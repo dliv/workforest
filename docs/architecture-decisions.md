@@ -1,6 +1,6 @@
 # git-forest — Architecture Decisions & Project Plan
 
-This document captures architectural decisions, open questions, and the phased build plan for `git-forest`. The original spec lives in [claude-web-init.md](claude-web-init.md).
+This document captures architectural decisions, open questions, and the phased build plan for `git-forest`. The original spec lives in [claude-web-init.md](claude-web-init.md) but has been **superseded** by this document on repo types (consolidated to one), config schema, and forest meta format.
 
 ---
 
@@ -12,55 +12,60 @@ These are shared contracts that multiple commands depend on. Changing them later
 
 The config lives at `~/.config/git-forest/config.toml` (XDG).
 
-**Decision needed: field naming consistency.**
+**DECIDED: field naming — use `base_branch` everywhere.** The original spec mixed `base_branch` (general) and `branch_base` (repo override). Unified on `base_branch` at both levels.
 
-The original spec uses `base_branch` in `[general]` but `branch_base` on repo overrides. Pick one name and use it everywhere.
+**DECIDED: one repo type.** The original spec had three types (`mutable`, `branch-on-main`, `readonly`). These have been consolidated into a single repo concept. Every repo is a worktree. The only per-repo config that matters is `base_branch` (if it differs from the global default). Whether you modify a repo in a given forest is your choice at the time, not something encoded in config.
 
-- **Recommendation:** Use `base_branch` globally and per-repo.
+- Repos that branch off `dev` (company repos): inherit the global `base_branch`.
+- Repos that branch off `main` (personal repos, coworker references): set `base_branch = "main"`.
+- In review mode, repos that aren't the focus get a `forest/{forest-name}` branch off their base. In feature mode, they get the suggested feature branch.
 
-**Decision needed: must `name` equal the directory basename of `path`?**
+**DECIDED: repo `name` is derived from `path` by default.** `name` is optional in config. If omitted, it defaults to the last path segment (e.g., `~/src/foo-api` → `foo-api`). Explicit `name` is allowed as an override but should be rare — it changes the folder name inside forests, which can break relative paths. The `init` wizard should warn if the user overrides.
 
-If `path = "~/src/foo-api"`, must `name = "foo-api"`? If so, `name` is redundant and could be derived. If not, we need a separate `dir_name` field or clear documentation that `name` controls the folder name in forests.
+**DECIDED: per-repo `remote` field — optional, defaults to `"origin"`.** Multi-remote discovery is out of scope for v1.
 
-- **Recommendation:** Derive `name` from the last segment of `path` by default. Allow explicit `name` as an override for cases where the directory name isn't what you want in the forest.
+Example config:
 
-**Decision needed: per-repo `remote` field.**
+```toml
+[general]
+worktree_base = "~/worktrees"
+base_branch = "dev"
+branch_template = "{user}/{name}"
+username = "dliv"
 
-The spec assumes `origin` everywhere. Some workflows involve multiple remotes (e.g., fork-based PRs).
+[[repos]]
+path = "~/src/foo-api"        # name "foo-api" implicit, base_branch "dev" inherited
 
-- **Recommendation:** Add optional `remote = "origin"` per repo, defaulting to `"origin"`. Defer multi-remote discovery to post-v1.
+[[repos]]
+path = "~/src/foo-web"        # name "foo-web" implicit, base_branch "dev" inherited
+
+[[repos]]
+path = "~/src/foo-infra"      # name "foo-infra" implicit, base_branch "dev" inherited
+
+[[repos]]
+path = "~/src/dev-docs"       # personal agentic context
+base_branch = "main"
+
+[[repos]]
+path = "~/src/bar-workspace"  # coworker's repo, referenced but rarely modified
+base_branch = "main"
+```
 
 ### 2. Path Handling
 
-**Decision needed: tilde expansion.**
+**DECIDED: tilde expansion.** Expand `~` to `$HOME` when loading config. No arbitrary env var expansion. Meta files (`.forest-meta.toml`) store fully expanded absolute paths so they are self-contained and never require re-expansion.
 
-Rust does not expand `~` automatically. The tool must handle this since the config examples use `~`.
-
-- **Recommendation:** Expand `~` to `$HOME` when loading config. Do not support arbitrary env vars. Document this behavior.
-
-**Decision needed: sanitization function for forest directory names.**
-
-Forest names may contain `/` (e.g., `java-84/refactor-auth`). The filesystem directory replaces `/` with `-`.
-
-- **Open question:** `a/b` and `a-b` collide. Options:
-  - (A) Detect collision at creation time and error.
-  - (B) Append a short hash suffix when collision is detected.
-  - (C) Disallow `/` in forest names entirely.
-- **Recommendation:** Option A (detect and error) is simplest for v1. Users can pick a different name.
+**DECIDED: sanitization — detect collisions and error.** Forest names may contain `/` (e.g., `java-84/refactor-auth`), which maps to `java-84-refactor-auth` on disk. If that directory already exists (from a different forest name like `java-84-refactor-auth`), error with a helpful message suggesting the user pick a different name.
 
 ### 3. Forest Identity & Lookup
 
-Commands accept a `<name>` argument. The original name (`java-84/refactor-auth`) and the sanitized directory name (`java-84-refactor-auth`) may differ.
+**DECIDED: accept both original and sanitized names.** Resolve by scanning `.forest-meta.toml` files in direct children of `worktree_base` (not recursive). Match against both the meta `name` field and the directory name.
 
-- **Recommendation:** Accept either. Resolve by scanning `.forest-meta.toml` files in `worktree_base`. Match against both the meta `name` field and the directory name.
-
-**Auto-detection:** If the user is inside a forest directory and omits `<name>`, should the tool detect the current forest by walking up to `.forest-meta.toml`?
-
-- **Recommendation:** Yes, for `status`, `exec`, and `rm`. Not for `new` (would be confusing).
+**DECIDED: auto-detect current forest.** If the user is inside a forest directory and omits `<name>`, detect the current forest by walking up to `.forest-meta.toml`. Applies to `status`, `exec`, and `rm`. Not `new`.
 
 ### 4. Git Wrapper & Error Model
 
-All git operations go through a helper function. Two modes:
+**DECIDED.** All git operations go through a helper function. Two modes:
 
 - **Capture:** `git(repo, args) -> Result<String>` — for commands where we need the output (branch checks, status).
 - **Stream:** `git_stream(repo, args) -> Result<ExitStatus>` — for commands where output should pass through to the user (exec, fetch).
@@ -75,9 +80,59 @@ All git operations go through a helper function. Two modes:
 
 ### 5. Partial Failure in `new`
 
-If `new` fails midway (network error, branch conflict, etc.), the forest is partially created.
+**DECIDED: write `.forest-meta.toml` incrementally.** Start with the forest header, append each repo entry as it's successfully created. This way `rm` can always clean up whatever was created.
 
-- **Recommendation:** Write `.forest-meta.toml` incrementally — start with the forest header, append each repo entry as it's successfully created. This way `rm` can always clean up whatever was created.
+### 6. Forest Meta is Fully Self-Contained
+
+**DECIDED: `.forest-meta.toml` captures all resolved values at creation time.** The global config is only used by `init` (writes it) and `new` (reads it for defaults/templates). All other commands (`rm`, `ls`, `status`, `exec`) operate solely from the forest's meta file.
+
+This means:
+- Changing global config (e.g., `base_branch`) does not retroactively affect existing forests.
+- `rm` has everything it needs (source paths, branch names, base branches) without consulting global config.
+- No config migration concerns — each forest is a snapshot of its creation-time state.
+
+Example `.forest-meta.toml`:
+
+```toml
+name = "review-sues-dialog"
+created_at = "2026-02-07T14:30:00Z"
+mode = "review"
+
+[[repos]]
+name = "foo-api"
+source = "/Users/dliv/src/foo-api"
+branch = "forest/review-sues-dialog"
+base_branch = "dev"
+branch_created = true
+
+[[repos]]
+name = "foo-web"
+source = "/Users/dliv/src/foo-web"
+branch = "sue/gh-100/fix-dialog"
+base_branch = "dev"
+branch_created = false
+
+[[repos]]
+name = "foo-infra"
+source = "/Users/dliv/src/foo-infra"
+branch = "forest/review-sues-dialog"
+base_branch = "dev"
+branch_created = true
+
+[[repos]]
+name = "dev-docs"
+source = "/Users/dliv/src/dev-docs"
+branch = "forest/review-sues-dialog"
+base_branch = "main"
+branch_created = true
+
+[[repos]]
+name = "bar-workspace"
+source = "/Users/dliv/src/bar-workspace"
+branch = "forest/review-sues-dialog"
+base_branch = "main"
+branch_created = true
+```
 
 ---
 
@@ -92,10 +147,7 @@ These are important but don't block starting. Resolve when building the relevant
   - What if the user enters a full ref like `origin/foo`? Normalize to short name or reject?
   - Use `git show-ref --verify` for unambiguous local/remote branch checks instead of `rev-parse`.
 
-- **"Review mode" vs "feature mode" for `branch-on-main` repos:**
-  - Current spec infers mode from whether user picked base branch for all mutable repos. This is fragile.
-  - Option: Ask once at the start — "Feature or review?" — and use that to set defaults for all repos.
-  - Option: Always prompt per-repo (simpler to implement, more verbose).
+- **"Review mode" vs "feature mode" — DECIDED (see below).**
 
 - **Upstream tracking:**
   - When creating a new branch off `origin/main`, should we set upstream? Git won't by default for new branches. Document expectations.
@@ -113,8 +165,7 @@ These are important but don't block starting. Resolve when building the relevant
   - `git worktree remove` fails on uncommitted changes unless `--force` is passed.
   - Should `rm` detect and warn, or just let git's error propagate?
 
-- **Store `base_branch` in meta:**
-  - To know "is this branch merged?", `rm` needs to know what the base branch was. Store it in `.forest-meta.toml` at creation time.
+- **Store `base_branch` in meta — DECIDED** (see Decision 6; meta is self-contained, `base_branch` is stored per repo).
 
 ### `init` command
 
@@ -122,13 +173,12 @@ These are important but don't block starting. Resolve when building the relevant
   - Overwrite with confirmation, or merge with existing config?
   - Should it detect existing repos and suggest them?
 
-### Readonly repos
+### `forest/{name}` branches
 
-- **Clone source:**
-  - `git clone --depth=1 <local-path>` can behave unexpectedly (hardlinks, ignoring depth).
-  - Option: Use `--no-local` flag.
-  - Option: Clone from the repo's origin URL instead of the local path.
-  - Defer decision until implementing readonly clone logic.
+- **Naming convention for auto-created base-tracking branches:**
+  - In review mode, repos not being reviewed get a `forest/{forest-name}` branch off their base branch.
+  - These are marked `branch_created = true` in meta and cleaned up by `rm`.
+  - Open: should the branch name include the repo name too (e.g., `forest/{forest-name}/{repo-name}`) or is `forest/{forest-name}` sufficient? Since branch names are per-repo in git, the simpler form should be fine.
 
 ---
 
@@ -171,19 +221,31 @@ Can start minimal (fewer prompts, sensible defaults) and iterate.
 
 **Goal:** Create forests. Start with happy path, layer in complexity.
 
-**3a — Minimal happy path:**
+**DECIDED: interactive flow uses "mode + defaults + exceptions" pattern:**
+
+1. Ask mode once: **"Feature work or PR review?"**
+2. Set defaults from mode:
+   - Feature → suggested branch (`{user}/{name}`) for all repos (each off its own `base_branch`).
+   - Review → `forest/{forest-name}` branch off each repo's `base_branch`.
+3. Confirm defaults: "Use `dliv/java-84/refactor-auth` for all repos? (Y/n)"
+4. Ask for exceptions via multi-select: **"Which repos should differ from the default?"**
+5. Only prompt branch details for the exceptions.
+
+**Typical PR review (most common case):** mode → review, exception → foo-web, enter PR branch. ~3 prompts total.
+
+**Cross-cutting feature:** mode → feature, confirm default, no exceptions. ~2 prompts total.
+
+**3a — Minimal happy path (no prompts):**
 - Create forest directory.
-- Readonly repos: shallow clone.
-- Mutable + branch-on-main: worktree add with suggested branch (no prompts).
+- Every repo: worktree add with suggested branch.
 - Write meta incrementally.
 
-**3b — Branch resolution + prompts:**
-- `git fetch --all` for mutable repos.
-- Per-repo branch selection prompt (3 options).
+**3b — Mode + exceptions interactive flow:**
+- `git fetch --all` for all repos.
+- Mode prompt → defaults → exceptions multi-select → per-exception branch input.
 - Full branch resolution logic (local → remote → new).
 
 **3c — Polish:**
-- Review-mode inference or explicit mode prompt.
 - Better error messages for common failures (branch exists in another worktree, etc.).
 
 ### Phase 4 — `rm <name>`
@@ -191,7 +253,7 @@ Can start minimal (fewer prompts, sensible defaults) and iterate.
 **Goal:** Clean up forests safely.
 
 - Read meta, best-effort cleanup.
-- Worktree remove, branch delete (safe by default), shallow clone removal.
+- Worktree remove, branch delete (safe by default).
 - Handle partial forests gracefully.
 - Confirmation prompt before executing.
 - Add `--dry-run` and `--force` flags.

@@ -1,3 +1,3 @@
 # AGENTS.md
 
-See [CLAUDE.md](CLAUDE.md) for canonical agent instructions.
+See [CLAUDE.md](./CLAUDE.md) for canonical agent instructions.
