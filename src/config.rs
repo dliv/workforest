@@ -44,6 +44,23 @@ pub struct ResolvedConfig {
     pub repos: Vec<ResolvedRepo>,
 }
 
+pub fn default_config_path() -> Result<PathBuf> {
+    let proj = directories::ProjectDirs::from("", "", "git-forest")
+        .context("could not determine config directory")?;
+    Ok(proj.config_dir().join("config.toml"))
+}
+
+pub fn load_default_config() -> Result<ResolvedConfig> {
+    let path = default_config_path()?;
+    if !path.exists() {
+        bail!(
+            "config not found at {}\nRun `git forest init` to create one.",
+            path.display()
+        );
+    }
+    load_config(&path)
+}
+
 pub fn load_config(path: &Path) -> Result<ResolvedConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;

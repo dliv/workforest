@@ -78,6 +78,18 @@ pub fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, ForestMeta
     Ok(None)
 }
 
+pub fn resolve_forest(worktree_base: &Path, name: Option<&str>) -> Result<(PathBuf, ForestMeta)> {
+    match name {
+        Some(n) => find_forest(worktree_base, n)?
+            .ok_or_else(|| anyhow::anyhow!("forest '{}' not found", n)),
+        None => {
+            let cwd = std::env::current_dir()?;
+            detect_current_forest(&cwd)?
+                .ok_or_else(|| anyhow::anyhow!("not inside a forest directory"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

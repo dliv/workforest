@@ -36,30 +36,30 @@ fn subcommand_rm_recognized() {
 }
 
 #[test]
-fn subcommand_ls_recognized() {
+fn ls_without_config_shows_init_hint() {
     cargo_bin_cmd!("git-forest")
         .arg("ls")
         .assert()
-        .success()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicates::str::contains("git forest init"));
 }
 
 #[test]
-fn subcommand_status_recognized() {
+fn status_without_config_shows_init_hint() {
     cargo_bin_cmd!("git-forest")
         .arg("status")
         .assert()
-        .success()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicates::str::contains("git forest init"));
 }
 
 #[test]
-fn subcommand_exec_recognized() {
+fn exec_without_config_shows_init_hint() {
     cargo_bin_cmd!("git-forest")
         .args(["exec", "test-forest", "--", "echo", "hello"])
         .assert()
-        .success()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicates::str::contains("git forest init"));
 }
 
 #[test]
