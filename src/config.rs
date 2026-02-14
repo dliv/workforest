@@ -118,7 +118,63 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
         });
     }
 
-    Ok(ResolvedConfig { general, repos })
+    let result = ResolvedConfig { general, repos };
+
+    debug_assert!(
+        result.general.worktree_base.is_absolute(),
+        "worktree_base must be absolute after parsing"
+    );
+    debug_assert!(
+        result.repos.iter().all(|r| !r.name.is_empty()),
+        "all repo names must be non-empty"
+    );
+    debug_assert!(
+        {
+            let names: HashSet<&str> = result.repos.iter().map(|r| r.name.as_str()).collect();
+            names.len() == result.repos.len()
+        },
+        "repo names must be unique"
+    );
+
+    Ok(result)
+}
+
+pub fn write_config_atomic(path: &Path, config: &ResolvedConfig, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "config already exists at {}\nUse --force to overwrite.",
+            path.display()
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    let raw = Config {
+        general: config.general.clone(),
+        repos: config
+            .repos
+            .iter()
+            .map(|r| RepoConfig {
+                path: r.path.clone(),
+                name: Some(r.name.clone()),
+                base_branch: Some(r.base_branch.clone()),
+                remote: Some(r.remote.clone()),
+            })
+            .collect(),
+    };
+
+    let content = toml::to_string_pretty(&raw).context("failed to serialize config")?;
+
+    let tmp_path = path.with_extension("toml.tmp");
+    std::fs::write(&tmp_path, &content)
+        .with_context(|| format!("failed to write temp config to {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to rename config to {}", path.display()))?;
+
+    Ok(())
 }
 
 #[cfg(test)]

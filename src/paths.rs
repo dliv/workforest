@@ -1,23 +1,38 @@
 use std::path::PathBuf;
 
 pub fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
+    let result = if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+            PathBuf::from(home).join(rest)
+        } else {
+            PathBuf::from(path)
         }
     } else if path == "~" {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
+            PathBuf::from(home)
+        } else {
+            PathBuf::from(path)
         }
-    }
-    PathBuf::from(path)
+    } else {
+        PathBuf::from(path)
+    };
+
+    debug_assert!(
+        !result.to_string_lossy().starts_with("~/"),
+        "expand_tilde result must not start with ~/"
+    );
+
+    result
 }
 
 pub fn sanitize_forest_name(name: &str) -> String {
     let sanitized = name.replace('/', "-");
-    if sanitized.is_empty() {
-        return sanitized;
-    }
+
+    debug_assert!(
+        !sanitized.contains('/'),
+        "sanitized name must not contain /"
+    );
+
     sanitized
 }
 
