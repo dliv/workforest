@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -8,6 +9,15 @@ use std::path::{Path, PathBuf};
 pub enum ForestMode {
     Feature,
     Review,
+}
+
+impl fmt::Display for ForestMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ForestMode::Feature => write!(f, "feature"),
+            ForestMode::Review => write!(f, "review"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
