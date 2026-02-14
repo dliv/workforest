@@ -56,7 +56,10 @@ mod tests {
 
     #[test]
     fn sanitize_replaces_slashes() {
-        assert_eq!(sanitize_forest_name("java-84/refactor-auth"), "java-84-refactor-auth");
+        assert_eq!(
+            sanitize_forest_name("java-84/refactor-auth"),
+            "java-84-refactor-auth"
+        );
     }
 
     #[test]

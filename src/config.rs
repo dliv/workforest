@@ -72,14 +72,11 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
     for repo in &raw.repos {
         let path = expand_tilde(repo.path.to_str().unwrap_or(""));
 
-        let name = repo
-            .name
-            .clone()
-            .unwrap_or_else(|| {
-                path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
+        let name = repo.name.clone().unwrap_or_else(|| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
 
         if name.is_empty() {
             bail!("repo has empty name (path: {})", path.display());
@@ -94,10 +91,7 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
             .clone()
             .unwrap_or_else(|| general.base_branch.clone());
 
-        let remote = repo
-            .remote
-            .clone()
-            .unwrap_or_else(|| "origin".to_string());
+        let remote = repo.remote.clone().unwrap_or_else(|| "origin".to_string());
 
         repos.push(ResolvedRepo {
             path,
@@ -134,7 +128,10 @@ path = "/tmp/src/foo-web"
 name = "foo-web"
 "#;
         let config = parse_config(toml).unwrap();
-        assert_eq!(config.general.worktree_base, PathBuf::from("/tmp/worktrees"));
+        assert_eq!(
+            config.general.worktree_base,
+            PathBuf::from("/tmp/worktrees")
+        );
         assert_eq!(config.general.base_branch, "dev");
         assert_eq!(config.general.username, "dliv");
         assert_eq!(config.repos.len(), 2);
@@ -176,7 +173,10 @@ username = "dliv"
 path = "/tmp/src/foo"
 "#;
         let config = parse_config(toml).unwrap();
-        assert_eq!(config.general.worktree_base, PathBuf::from(&home).join("worktrees"));
+        assert_eq!(
+            config.general.worktree_base,
+            PathBuf::from(&home).join("worktrees")
+        );
     }
 
     #[test]
@@ -193,7 +193,10 @@ username = "dliv"
 path = "~/src/foo-api"
 "#;
         let config = parse_config(toml).unwrap();
-        assert_eq!(config.repos[0].path, PathBuf::from(&home).join("src/foo-api"));
+        assert_eq!(
+            config.repos[0].path,
+            PathBuf::from(&home).join("src/foo-api")
+        );
     }
 
     #[test]
@@ -268,7 +271,10 @@ name = "foo"
 "#;
         let result = parse_config(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("duplicate repo name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate repo name"));
     }
 
     #[test]

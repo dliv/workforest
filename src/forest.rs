@@ -29,7 +29,10 @@ pub fn discover_forests(worktree_base: &Path) -> Result<Vec<ForestMeta>> {
     Ok(forests)
 }
 
-pub fn find_forest(worktree_base: &Path, name_or_dir: &str) -> Result<Option<(PathBuf, ForestMeta)>> {
+pub fn find_forest(
+    worktree_base: &Path,
+    name_or_dir: &str,
+) -> Result<Option<(PathBuf, ForestMeta)>> {
     let sanitized = sanitize_forest_name(name_or_dir);
 
     if !worktree_base.exists() {

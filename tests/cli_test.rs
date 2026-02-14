@@ -64,7 +64,5 @@ fn subcommand_exec_recognized() {
 
 #[test]
 fn no_args_shows_help() {
-    cargo_bin_cmd!("git-forest")
-        .assert()
-        .failure();
+    cargo_bin_cmd!("git-forest").assert().failure();
 }

@@ -123,7 +123,10 @@ branch_created = true
         assert_eq!(meta.name, "test-forest");
         assert_eq!(meta.mode, ForestMode::Feature);
         assert_eq!(meta.repos.len(), 2);
-        assert_eq!(meta.repos[0].source, PathBuf::from("/Users/dliv/src/foo-api"));
+        assert_eq!(
+            meta.repos[0].source,
+            PathBuf::from("/Users/dliv/src/foo-api")
+        );
         assert_eq!(meta.repos[1].base_branch, "main");
     }
 
