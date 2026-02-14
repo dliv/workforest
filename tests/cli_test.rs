@@ -140,9 +140,18 @@ fn init_json_output() {
 }
 
 #[test]
-fn subcommand_new_recognized() {
+fn subcommand_new_requires_mode() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "test-feature"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--mode"));
+}
+
+#[test]
+fn subcommand_new_recognized() {
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "test-feature", "--mode", "feature"])
         .assert()
         .success()
         .stderr(predicates::str::contains("not yet implemented"));

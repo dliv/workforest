@@ -1,3 +1,4 @@
+use crate::meta::ForestMode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -40,6 +41,21 @@ pub enum Command {
     New {
         /// Forest name (e.g., "java-84/refactor-auth")
         name: String,
+        /// Mode: feature or review
+        #[arg(long)]
+        mode: ForestMode,
+        /// Override default branch for all repos
+        #[arg(long)]
+        branch: Option<String>,
+        /// Per-repo branch override (format: repo-name=branch, repeatable)
+        #[arg(long = "repo-branch")]
+        repo_branches: Vec<String>,
+        /// Skip fetching remotes before creating
+        #[arg(long)]
+        no_fetch: bool,
+        /// Show plan without executing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a forest
     Rm {

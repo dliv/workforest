@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ForestMode {
     Feature,

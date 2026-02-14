@@ -62,7 +62,7 @@ fn run(cli: Cli) -> Result<()> {
             let result = commands::cmd_init(inputs, &config_path, force)?;
             output(&result, cli.json, commands::format_init_human)?;
         }
-        Command::New { name } => {
+        Command::New { name, .. } => {
             eprintln!("new {}: not yet implemented", name);
         }
         Command::Rm { name } => {
