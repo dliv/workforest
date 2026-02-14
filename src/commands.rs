@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{ResolvedConfig, ResolvedRepo};
 use crate::forest::discover_forests;
 use crate::git::ref_exists;
-use crate::meta::{ForestMeta, ForestMode};
+use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
 use crate::paths::{expand_tilde, forest_dir, sanitize_forest_name};
 
 /// Result structs for command output. Commands return these instead of printing
@@ -517,6 +517,152 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
         mode: inputs.mode.clone(),
         repo_plans,
     })
+}
+
+fn branch_created(checkout: &CheckoutKind) -> bool {
+    match checkout {
+        CheckoutKind::ExistingLocal => false,
+        CheckoutKind::TrackRemote => false,
+        CheckoutKind::NewBranch => true,
+    }
+}
+
+fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
+    let repos = plan
+        .repo_plans
+        .iter()
+        .map(|rp| NewRepoResult {
+            name: rp.name.clone(),
+            branch: rp.branch.clone(),
+            base_branch: rp.base_branch.clone(),
+            branch_created: branch_created(&rp.checkout),
+            checkout_kind: rp.checkout.clone(),
+            worktree_path: rp.dest.clone(),
+        })
+        .collect();
+
+    NewResult {
+        forest_name: plan.forest_name.clone(),
+        forest_dir: plan.forest_dir.clone(),
+        mode: plan.mode.clone(),
+        dry_run,
+        repos,
+    }
+}
+
+pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
+    // Create forest directory
+    std::fs::create_dir_all(&plan.forest_dir)?;
+
+    // Write initial meta with empty repos
+    let mut meta = ForestMeta {
+        name: plan.forest_name.clone(),
+        created_at: Utc::now(),
+        mode: plan.mode.clone(),
+        repos: vec![],
+    };
+    let meta_path = plan.forest_dir.join(META_FILENAME);
+    meta.write(&meta_path)?;
+
+    // Create worktrees incrementally
+    for repo_plan in &plan.repo_plans {
+        let dest_str = repo_plan.dest.to_string_lossy();
+
+        match &repo_plan.checkout {
+            CheckoutKind::ExistingLocal => {
+                crate::git::git(
+                    &repo_plan.source,
+                    &["worktree", "add", &dest_str, &repo_plan.branch],
+                )?;
+            }
+            CheckoutKind::TrackRemote => {
+                let start = format!("{}/{}", repo_plan.remote, repo_plan.branch);
+                crate::git::git(
+                    &repo_plan.source,
+                    &[
+                        "worktree",
+                        "add",
+                        &dest_str,
+                        "-b",
+                        &repo_plan.branch,
+                        &start,
+                    ],
+                )?;
+            }
+            CheckoutKind::NewBranch => {
+                let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
+                crate::git::git(
+                    &repo_plan.source,
+                    &[
+                        "worktree",
+                        "add",
+                        &dest_str,
+                        "-b",
+                        &repo_plan.branch,
+                        &start,
+                    ],
+                )?;
+            }
+        }
+
+        // Update meta incrementally
+        meta.repos.push(RepoMeta {
+            name: repo_plan.name.clone(),
+            source: repo_plan.source.clone(),
+            branch: repo_plan.branch.clone(),
+            base_branch: repo_plan.base_branch.clone(),
+            branch_created: branch_created(&repo_plan.checkout),
+        });
+        meta.write(&meta_path)?;
+    }
+
+    Ok(plan_to_result(plan, false))
+}
+
+pub fn cmd_new(inputs: NewInputs, config: &ResolvedConfig) -> Result<NewResult> {
+    // Fetch unless --no-fetch
+    if !inputs.no_fetch {
+        for repo in &config.repos {
+            if repo.path.is_dir() {
+                crate::git::git(&repo.path, &["fetch", &repo.remote])?;
+            }
+        }
+    }
+
+    let plan = plan_forest(&inputs, config)?;
+
+    if inputs.dry_run {
+        return Ok(plan_to_result(&plan, true));
+    }
+
+    execute_plan(&plan)
+}
+
+pub fn format_new_human(result: &NewResult) -> String {
+    let mut lines = Vec::new();
+
+    if result.dry_run {
+        lines.push("Dry run — no changes made.".to_string());
+        lines.push(String::new());
+    }
+
+    lines.push(format!(
+        "Forest {:?} ({} mode)",
+        result.forest_name, result.mode
+    ));
+    lines.push(format!("  {}", result.forest_dir.display()));
+    lines.push(String::new());
+
+    for repo in &result.repos {
+        let kind = match &repo.checkout_kind {
+            CheckoutKind::ExistingLocal => "existing",
+            CheckoutKind::TrackRemote => "track remote",
+            CheckoutKind::NewBranch => "new branch",
+        };
+        lines.push(format!("  {} → {} ({})", repo.name, repo.branch, kind));
+    }
+
+    lines.join("\n")
 }
 
 // --- init ---
