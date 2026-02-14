@@ -1,9 +1,8 @@
-use assert_cmd::Command;
+use assert_cmd::cargo_bin_cmd;
 
 #[test]
 fn help_exits_zero() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .arg("--help")
         .assert()
         .success();
@@ -11,8 +10,7 @@ fn help_exits_zero() {
 
 #[test]
 fn subcommand_init_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .arg("init")
         .assert()
         .success()
@@ -21,8 +19,7 @@ fn subcommand_init_recognized() {
 
 #[test]
 fn subcommand_new_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .args(["new", "test-feature"])
         .assert()
         .success()
@@ -31,8 +28,7 @@ fn subcommand_new_recognized() {
 
 #[test]
 fn subcommand_rm_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .args(["rm", "test-feature"])
         .assert()
         .success()
@@ -41,8 +37,7 @@ fn subcommand_rm_recognized() {
 
 #[test]
 fn subcommand_ls_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .arg("ls")
         .assert()
         .success()
@@ -51,8 +46,7 @@ fn subcommand_ls_recognized() {
 
 #[test]
 fn subcommand_status_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .arg("status")
         .assert()
         .success()
@@ -61,8 +55,7 @@ fn subcommand_status_recognized() {
 
 #[test]
 fn subcommand_exec_recognized() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .args(["exec", "test-forest", "--", "echo", "hello"])
         .assert()
         .success()
@@ -71,8 +64,7 @@ fn subcommand_exec_recognized() {
 
 #[test]
 fn no_args_shows_help() {
-    Command::cargo_bin("git-forest")
-        .unwrap()
+    cargo_bin_cmd!("git-forest")
         .assert()
         .failure();
 }

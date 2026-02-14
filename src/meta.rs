@@ -89,9 +89,9 @@ mod tests {
         assert_eq!(loaded.mode, original.mode);
         assert_eq!(loaded.repos.len(), original.repos.len());
         assert_eq!(loaded.repos[0].name, "foo-api");
-        assert_eq!(loaded.repos[0].branch_created, true);
+        assert!(loaded.repos[0].branch_created);
         assert_eq!(loaded.repos[1].name, "foo-web");
-        assert_eq!(loaded.repos[1].branch_created, false);
+        assert!(!loaded.repos[1].branch_created);
     }
 
     #[test]
