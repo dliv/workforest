@@ -149,12 +149,12 @@ fn subcommand_new_requires_mode() {
 }
 
 #[test]
-fn subcommand_new_recognized() {
-    cargo_bin_cmd!("git-forest")
+fn new_without_config_shows_init_hint() {
+    with_no_config()
         .args(["new", "test-feature", "--mode", "feature"])
         .assert()
-        .success()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicates::str::contains("git forest init"));
 }
 
 #[test]

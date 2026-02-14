@@ -7,7 +7,7 @@ mod meta;
 mod paths;
 mod testutil;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 
@@ -62,8 +62,43 @@ fn run(cli: Cli) -> Result<()> {
             let result = commands::cmd_init(inputs, &config_path, force)?;
             output(&result, cli.json, commands::format_init_human)?;
         }
-        Command::New { name, .. } => {
-            eprintln!("new {}: not yet implemented", name);
+        Command::New {
+            name,
+            mode,
+            branch,
+            repo_branches,
+            no_fetch,
+            dry_run,
+        } => {
+            let config = config::load_default_config()?;
+
+            // Parse --repo-branch strings ("repo=branch") into tuples
+            let mut parsed_repo_branches = Vec::new();
+            for rb in repo_branches {
+                match rb.split_once('=') {
+                    Some((repo, br)) => {
+                        parsed_repo_branches.push((repo.to_string(), br.to_string()));
+                    }
+                    None => {
+                        bail!(
+                            "invalid --repo-branch format: {:?}\n  hint: use --repo-branch repo-name=branch-name",
+                            rb
+                        );
+                    }
+                }
+            }
+
+            let inputs = commands::NewInputs {
+                name,
+                mode,
+                branch_override: branch,
+                repo_branches: parsed_repo_branches,
+                no_fetch,
+                dry_run,
+            };
+
+            let result = commands::cmd_new(inputs, &config)?;
+            output(&result, cli.json, commands::format_new_human)?;
         }
         Command::Rm { name } => {
             let label = name.as_deref().unwrap_or("(auto-detect)");
