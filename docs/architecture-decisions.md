@@ -206,6 +206,23 @@ Benefits:
 - **Good error reporting:** "failed on step 3 of 7: CreateWorktree { ... }".
 - **Agent-inspectable:** `--json --dry-run` lets an agent review the plan before approving execution.
 
+### 10. Debug Assertions for Invariants
+
+Use `debug_assert!` in production code to document and enforce postconditions — invariants that should be guaranteed by the code but would cause subtle bugs downstream if violated. These fire in debug/test builds and compile away in release.
+
+Use `debug_assert!` for **"the code has a bug"** conditions:
+- After tilde expansion, paths should be absolute.
+- After name derivation, repo names should be non-empty and unique.
+- After sanitization, forest names should not contain `/`.
+- After planning, action lists should reference valid paths from the input config.
+
+Use proper errors (`bail!`, `Result`) for **"the user gave bad input"** conditions:
+- Config file is malformed.
+- Repo path doesn't exist.
+- Forest name collides with an existing directory.
+
+Place `debug_assert!` at function boundaries — postconditions at the end of functions that produce validated data, preconditions at the start of functions that assume validated input.
+
 ---
 
 ## Open Questions (Deferred to Implementation Phase)
