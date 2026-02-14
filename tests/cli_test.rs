@@ -39,7 +39,7 @@ fn create_test_git_repo(dir: &std::path::Path) {
             .output()
             .unwrap();
     };
-    run(&["init"]);
+    run(&["init", "-b", "main"]);
     run(&["commit", "--allow-empty", "-m", "initial"]);
 }
 

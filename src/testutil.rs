@@ -41,7 +41,7 @@ impl TestEnv {
             );
         };
 
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["commit", "--allow-empty", "-m", "initial"]);
 
         repo_path

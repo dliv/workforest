@@ -637,7 +637,7 @@ mod tests {
                     .output()
                     .unwrap();
             };
-            run(&["init"]);
+            run(&["init", "-b", "main"]);
             run(&["commit", "--allow-empty", "-m", "initial"]);
         }
 
@@ -719,7 +719,7 @@ mod tests {
                 .output()
                 .unwrap();
         };
-        run(&["init"]);
+        run(&["init", "-b", "main"]);
         run(&["commit", "--allow-empty", "-m", "initial"]);
         repo_dir
     }
