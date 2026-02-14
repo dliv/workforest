@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{ResolvedConfig, ResolvedRepo};
 use crate::forest::discover_forests;
+use crate::git::ref_exists;
 use crate::meta::{ForestMeta, ForestMode};
-use crate::paths::expand_tilde;
+use crate::paths::{expand_tilde, forest_dir, sanitize_forest_name};
 
 /// Result structs for command output. Commands return these instead of printing
 /// directly — main.rs formats them as human-readable or JSON based on --json.
@@ -247,6 +248,275 @@ pub fn format_exec_human(result: &ExecResult) -> String {
     } else {
         format!("\nFailed in: {}", result.failures.join(", "))
     }
+}
+
+// --- new ---
+
+pub struct NewInputs {
+    pub name: String,
+    pub mode: ForestMode,
+    pub branch_override: Option<String>,
+    pub repo_branches: Vec<(String, String)>,
+    pub no_fetch: bool,
+    pub dry_run: bool,
+}
+
+pub struct ForestPlan {
+    pub forest_name: String,
+    pub forest_dir: PathBuf,
+    pub mode: ForestMode,
+    pub repo_plans: Vec<RepoPlan>,
+}
+
+pub struct RepoPlan {
+    pub name: String,
+    pub source: PathBuf,
+    pub dest: PathBuf,
+    pub branch: String,
+    pub base_branch: String,
+    pub remote: String,
+    pub checkout: CheckoutKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutKind {
+    /// Branch exists locally. `git worktree add <dest> <branch>`
+    ExistingLocal,
+    /// Branch exists on remote. `git worktree add <dest> -b <branch> <remote>/<branch>`
+    TrackRemote,
+    /// Branch doesn't exist. `git worktree add <dest> -b <branch> <remote>/<base_branch>`
+    NewBranch,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NewResult {
+    pub forest_name: String,
+    pub forest_dir: PathBuf,
+    pub mode: ForestMode,
+    pub dry_run: bool,
+    pub repos: Vec<NewRepoResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NewRepoResult {
+    pub name: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub branch_created: bool,
+    pub checkout_kind: CheckoutKind,
+    pub worktree_path: PathBuf,
+}
+
+fn compute_target_branch(
+    repo_name: &str,
+    forest_name: &str,
+    mode: &ForestMode,
+    branch_template: &str,
+    username: &str,
+    branch_override: &Option<String>,
+    repo_branches: &[(String, String)],
+) -> String {
+    // Per-repo override takes highest priority
+    if let Some((_, branch)) = repo_branches.iter().find(|(name, _)| name == repo_name) {
+        return branch.clone();
+    }
+
+    // Global --branch override
+    if let Some(branch) = branch_override {
+        return branch.clone();
+    }
+
+    // Mode default
+    match mode {
+        ForestMode::Feature => branch_template
+            .replace("{user}", username)
+            .replace("{name}", forest_name),
+        ForestMode::Review => format!("forest/{}", forest_name),
+    }
+}
+
+fn validate_branch_name(branch: &str, remote: &str) -> Result<()> {
+    if branch.starts_with("refs/") {
+        bail!(
+            "branch name {:?} looks like a ref path\n  hint: pass the branch name without the refs/ prefix",
+            branch
+        );
+    }
+    let remote_prefix = format!("{}/", remote);
+    if branch.starts_with(&remote_prefix) {
+        bail!(
+            "branch name {:?} looks like a remote ref\n  hint: pass the branch name without the remote prefix: {:?}",
+            branch,
+            &branch[remote_prefix.len()..]
+        );
+    }
+    Ok(())
+}
+
+pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<ForestPlan> {
+    // Validate forest name
+    if inputs.name.is_empty() || inputs.name == "." || inputs.name == ".." {
+        bail!(
+            "invalid forest name: {:?}\n  hint: provide a descriptive name like \"java-84/refactor-auth\"",
+            inputs.name
+        );
+    }
+    let sanitized = sanitize_forest_name(&inputs.name);
+    if sanitized.is_empty() {
+        bail!(
+            "forest name {:?} sanitizes to empty\n  hint: provide a name with at least one alphanumeric character",
+            inputs.name
+        );
+    }
+
+    // Validate config has repos
+    if config.repos.is_empty() {
+        bail!("no repos configured\n  hint: run `git forest init --repo <path>` to add repos");
+    }
+
+    // Validate --repo-branch keys: no duplicates
+    {
+        let mut seen = HashSet::new();
+        for (repo_name, _) in &inputs.repo_branches {
+            if !seen.insert(repo_name.as_str()) {
+                bail!(
+                    "duplicate repo-branch for: {}\n  hint: specify each repo at most once",
+                    repo_name
+                );
+            }
+        }
+    }
+
+    // Validate --repo-branch keys: all match config repos
+    {
+        let known_names: HashSet<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
+        for (repo_name, _) in &inputs.repo_branches {
+            if !known_names.contains(repo_name.as_str()) {
+                let known: Vec<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
+                bail!(
+                    "unknown repo: {}\n  hint: known repos: {}",
+                    repo_name,
+                    known.join(", ")
+                );
+            }
+        }
+    }
+
+    // Compute forest directory
+    let fdir = forest_dir(&config.general.worktree_base, &inputs.name);
+
+    // Create worktree_base if it doesn't exist (match discover_forests leniency)
+    if !config.general.worktree_base.exists() {
+        std::fs::create_dir_all(&config.general.worktree_base)?;
+    }
+
+    // Check for directory/name collision
+    if fdir.exists() {
+        bail!(
+            "forest directory already exists: {}\n  hint: choose a different name, or remove the existing forest with `git forest rm`",
+            fdir.display()
+        );
+    }
+    // Also check for name collision via meta scan
+    if let Some((existing_dir, existing_meta)) =
+        crate::forest::find_forest(&config.general.worktree_base, &inputs.name)?
+    {
+        bail!(
+            "forest name {:?} collides with existing forest {:?} at {}\n  hint: choose a different name",
+            inputs.name,
+            existing_meta.name,
+            existing_dir.display()
+        );
+    }
+
+    // Validate source repos exist and branch names
+    for repo in &config.repos {
+        if !repo.path.is_dir() {
+            bail!(
+                "source repo not found: {}\n  hint: check that the path exists, or update config with `git forest init --force`",
+                repo.path.display()
+            );
+        }
+    }
+
+    // Validate all branch names (global override, per-repo overrides, and computed defaults)
+    if let Some(ref branch) = inputs.branch_override {
+        // Validate against all remotes — use first repo's remote as representative
+        if let Some(repo) = config.repos.first() {
+            validate_branch_name(branch, &repo.remote)?;
+        }
+    }
+    for (repo_name, branch) in &inputs.repo_branches {
+        let remote = config
+            .repos
+            .iter()
+            .find(|r| r.name == *repo_name)
+            .map(|r| r.remote.as_str())
+            .unwrap_or("origin");
+        validate_branch_name(branch, remote)?;
+    }
+
+    // Build repo plans
+    let mut repo_plans = Vec::new();
+    for repo in &config.repos {
+        let branch = compute_target_branch(
+            &repo.name,
+            &inputs.name,
+            &inputs.mode,
+            &config.general.branch_template,
+            &config.general.username,
+            &inputs.branch_override,
+            &inputs.repo_branches,
+        );
+
+        validate_branch_name(&branch, &repo.remote)?;
+
+        // Branch resolution
+        let local_ref = format!("refs/heads/{}", branch);
+        let remote_ref = format!("refs/remotes/{}/{}", repo.remote, branch);
+
+        let checkout = if ref_exists(&repo.path, &local_ref)? {
+            CheckoutKind::ExistingLocal
+        } else if ref_exists(&repo.path, &remote_ref)? {
+            CheckoutKind::TrackRemote
+        } else {
+            // Verify base branch exists on remote
+            let base_ref = format!("refs/remotes/{}/{}", repo.remote, repo.base_branch);
+            if !ref_exists(&repo.path, &base_ref)? {
+                bail!(
+                    "{}/{} not found in {}\n  hint: check that base_branch {:?} exists on remote {:?}, or run `git fetch {}` in {}",
+                    repo.remote,
+                    repo.base_branch,
+                    repo.name,
+                    repo.base_branch,
+                    repo.remote,
+                    repo.remote,
+                    repo.path.display()
+                );
+            }
+            CheckoutKind::NewBranch
+        };
+
+        let dest = fdir.join(&repo.name);
+
+        repo_plans.push(RepoPlan {
+            name: repo.name.clone(),
+            source: repo.path.clone(),
+            dest,
+            branch,
+            base_branch: repo.base_branch.clone(),
+            remote: repo.remote.clone(),
+            checkout,
+        });
+    }
+
+    Ok(ForestPlan {
+        forest_name: inputs.name.clone(),
+        forest_dir: fdir,
+        mode: inputs.mode.clone(),
+        repo_plans,
+    })
 }
 
 // --- init ---
