@@ -8,11 +8,20 @@ Installs as `git-forest`, invoked as `git forest <command>`.
 
 Phase 0 — foundation types and test harness. All subcommands are stubbed.
 
+## Setup
+
+Requires [just](https://just.systems/man/en/).
+
+```
+just setup    # configures git hooks
+```
+
 ## Build & Test
 
 ```
-cargo build
-cargo test
+just build
+just test
+just check    # fmt + clippy
 ```
 
 ## Usage

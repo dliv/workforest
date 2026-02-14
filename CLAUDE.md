@@ -5,8 +5,10 @@ Canonical agent instructions for this project. AGENTS.md is only a pointer to th
 ## Commands
 
 ```
-cargo build          # build
-cargo test           # run all tests
+just setup           # one-time: configure git hooks
+just build           # build
+just test            # run all tests
+just check           # fmt --check + clippy
 cargo check          # typecheck only
 ```
 
