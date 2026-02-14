@@ -31,6 +31,8 @@ git forest new <name>
     --dry-run                    Show plan without executing
 ```
 
+`--mode` uses clap `ValueEnum` on `ForestMode` for case-insensitive parsing, auto-generated `--help` values, and consistent error messages — no manual string matching.
+
 ### Minimal invocations
 
 ```sh
@@ -69,12 +71,12 @@ CLI flags
     ▼
 NewInputs (struct)
     │
-    ├── fetch_repos() ──── if !no_fetch: git fetch <remote> in each source repo
+    ├── fetch_repos() ──── always unless --no-fetch (even during --dry-run)
     │
     ▼
 plan_forest(inputs, config) -> Result<ForestPlan>     ← read-only git queries + pure planning
     │
-    ├── --dry-run: return plan as NewResult (no execution)
+    ├── --dry-run: convert plan to NewResult, return (no execution)
     │
     ▼
 execute_plan(plan) -> Result<NewResult>                ← impure: mkdir, git worktree add, write meta
@@ -82,6 +84,14 @@ execute_plan(plan) -> Result<NewResult>                ← impure: mkdir, git wo
     ▼
 NewResult (struct) → main.rs formats as human or JSON
 ```
+
+### Fetch behavior (decided)
+
+Always fetch unless `--no-fetch`, **including during `--dry-run`**. Fetch is non-destructive (only updates tracking refs) and makes the plan accurate. `--no-fetch` is the explicit opt-out for offline use or speed.
+
+### Dry-run output (decided)
+
+Reuse `NewResult` for both dry-run and executed runs. Set `dry_run: true` and populate `repos` from the plan. Add a `checkout_kind` field to `NewRepoResult` so JSON consumers can see the resolution detail. This avoids maintaining two JSON schemas and matches the existing pattern (one result type per command).
 
 ### Key types
 
@@ -116,6 +126,7 @@ pub struct RepoPlan {
     pub checkout: CheckoutKind,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub enum CheckoutKind {
     /// Branch exists locally. `git worktree add <dest> <branch>`
     ExistingLocal,
@@ -142,13 +153,14 @@ pub struct NewRepoResult {
     pub branch: String,
     pub base_branch: String,
     pub branch_created: bool,
+    pub checkout_kind: CheckoutKind, // for JSON consumers (especially --dry-run)
     pub worktree_path: PathBuf,
 }
 ```
 
-`branch_created` is derived from `CheckoutKind`:
+`branch_created` is derived from `CheckoutKind` (decided — this mapping is final):
 - `ExistingLocal` → `false` (branch already existed)
-- `TrackRemote` → `false` (branch exists on remote; local tracking branch is ephemeral)
+- `TrackRemote` → `false` (branch exists on remote; local tracking branch is not ours to delete)
 - `NewBranch` → `true` (we created this branch; `rm` should delete it)
 
 ---
@@ -178,11 +190,22 @@ All `git show-ref` calls run in the source repo (e.g., `~/src/foo-api`), not in 
 
 Branch resolution depends on remote tracking refs being current. If `--no-fetch` is set, resolution uses stale local state. This is documented behavior — the user opted out of freshness.
 
+### Reject ambiguous branch inputs
+
+Branch names starting with `refs/` or `<remote>/` (matching the configured remote for that repo) are rejected during validation with a helpful error:
+
+```
+error: branch name "origin/feature-x" looks like a remote ref
+  hint: pass the branch name without the remote prefix: "feature-x"
+```
+
+This prevents misresolution where `refs/heads/origin/foo` would be checked instead of `refs/remotes/origin/foo`.
+
 ---
 
 ## Git Operations
 
-### Fetch (pre-planning, optional)
+### Fetch (pre-planning)
 
 For each source repo, run in the source repo directory:
 
@@ -191,6 +214,8 @@ git fetch <remote>
 ```
 
 Maps to: `git(&source, &["fetch", &remote])`
+
+Always runs unless `--no-fetch`. Runs even during `--dry-run` to ensure accurate plan.
 
 ### Worktree creation (execution)
 
@@ -237,15 +262,28 @@ This uses the existing `ForestMeta::write()` method (re-serializes the full stru
 
 Before planning worktree operations, validate:
 
-1. **Forest name not empty.**
+1. **Forest name not empty, not `.`, not `..`.** Also reject names that sanitize to empty.
 2. **Forest directory doesn't already exist.** Check both `forest_dir(worktree_base, name)` and scan for meta files with the same name (collision between original and sanitized names — Decision 2).
 3. **Config has repos.** Error if `config.repos` is empty.
 4. **All `--repo-branch` names match config repos.** Error with "unknown repo: X, known repos: A, B, C" on mismatch.
-5. **Source repos exist.** Each `config.repos[i].path` must be a directory. (Git-repo validation happened at `init` time; paths could have been moved since.)
+5. **No duplicate `--repo-branch` keys.** Error on `--repo-branch foo=a --repo-branch foo=b` — ambiguous, fail with "duplicate repo-branch for: foo".
+6. **Source repos exist.** Each `config.repos[i].path` must be a directory. (Git-repo validation happened at `init` time; paths could have been moved since.)
+7. **Branch names are not ambiguous.** Reject names starting with `refs/` or matching `<remote>/...` for the repo's configured remote. Error with hint to remove the prefix.
+8. **Base branch ref exists on remote.** After fetch, verify `refs/remotes/<remote>/<base_branch>` exists for each repo that needs `NewBranch` checkout. Error with:
+   ```
+   error: origin/dev not found in foo-api
+     hint: check that base_branch "dev" exists on remote "origin", or run `git fetch origin` in ~/src/foo-api
+   ```
 
 ---
 
 ## Implementation Steps
+
+### Step 0 — Fix `git init -b main` in test infrastructure
+
+`TestEnv::create_repo()` currently runs `git init` which creates `master` on most systems, but `default_config()` sets `base_branch: "main"`. Phase 3 tests will fail when branch resolution looks for `origin/main`.
+
+Fix: change `create_repo()` and `create_repo_with_branch()` to use `git init -b main`. Apply project-wide — this affects existing tests too, not just new ones.
 
 ### Step 1 — Add `ref_exists` helper to `git.rs`
 
@@ -261,13 +299,24 @@ Tests: local branch exists, local branch missing, remote ref exists, remote ref 
 
 Add flags: `--mode`, `--branch`, `--repo-branch`, `--no-fetch`, `--dry-run`.
 
+Derive `clap::ValueEnum` on `ForestMode` (in `meta.rs`) for `--mode`. This gives case-insensitive parsing and auto-generated help values. `ForestMode` already has `Feature` and `Review` variants — adding `ValueEnum` is additive.
+
 ```rust
+// meta.rs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ForestMode {
+    Feature,
+    Review,
+}
+
+// cli.rs
 New {
     /// Forest name
     name: String,
     /// Mode: feature or review
     #[arg(long)]
-    mode: String,  // parsed to ForestMode in main.rs
+    mode: ForestMode,
     /// Override default branch for all repos
     #[arg(long)]
     branch: Option<String>,
@@ -283,7 +332,7 @@ New {
 }
 ```
 
-Parse `--mode` as `"feature" | "review"` in `main.rs` with a helpful error. Parse `--repo-branch` as `name=branch` with validation.
+No manual string parsing for mode — clap handles it with `ValueEnum`.
 
 ### Step 3 — Add planning types and `plan_forest()` to `commands.rs`
 
@@ -293,13 +342,16 @@ This is the core logic. Add:
 - `plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<ForestPlan>`
 
 `plan_forest` does:
-1. Compute `forest_dir` from `worktree_base` + sanitized name.
-2. Check for directory/name collision.
-3. For each repo in config:
+1. Validate inputs (forest name, repo-branch keys, branch name guards, source paths).
+2. Compute `forest_dir` from `worktree_base` + sanitized name.
+3. `create_dir_all(worktree_base)` if it doesn't exist (match `discover_forests` leniency).
+4. Check for directory/name collision.
+5. For each repo in config:
    a. Determine target branch (from mode default, `--branch` override, or `--repo-branch` override).
    b. Resolve branch via `ref_exists()` → `CheckoutKind`.
-   c. Build `RepoPlan`.
-4. Return `ForestPlan`.
+   c. If `NewBranch`, verify `refs/remotes/<remote>/<base_branch>` exists.
+   d. Build `RepoPlan`.
+6. Return `ForestPlan`.
 
 Branch computation helper:
 
@@ -317,8 +369,8 @@ fn compute_target_branch(
 
 ### Step 4 — Add `execute_plan()` and `cmd_new()` to `commands.rs`
 
-- `execute_plan(plan: &ForestPlan) -> Result<NewResult>` — creates dirs, runs git, writes meta.
-- `cmd_new(inputs: NewInputs, config: &ResolvedConfig) -> Result<NewResult>` — orchestrates fetch → plan → execute (or dry-run).
+- `execute_plan(plan: &ForestPlan) -> Result<NewResult>` — creates dirs, runs git, writes meta incrementally.
+- `cmd_new(inputs: NewInputs, config: &ResolvedConfig) -> Result<NewResult>` — orchestrates fetch → plan → execute (or dry-run → convert plan to result).
 - `format_new_human(result: &NewResult) -> String` — human-readable output.
 
 Execution sequence for each repo:
@@ -342,12 +394,10 @@ match &repo_plan.checkout {
 
 Replace the `New` stub with:
 1. Load config.
-2. Parse `--mode` to `ForestMode`.
-3. Parse `--repo-branch` strings to `(String, String)` tuples.
-4. Build `NewInputs`.
-5. Optionally fetch (`!no_fetch`).
-6. Call `cmd_new()`.
-7. Output result via `output()` helper.
+2. Parse `--repo-branch` strings to `(String, String)` tuples (split on first `=`).
+3. Build `NewInputs` (mode comes directly from clap as `ForestMode`).
+4. Call `cmd_new()` (which handles fetch, plan, execute internally).
+5. Output result via `output()` helper.
 
 ### Step 6 — Tests
 
@@ -359,24 +409,29 @@ See Tests section below.
 
 | File | Changes |
 |------|---------|
+| `meta.rs` | Add `clap::ValueEnum` derive to `ForestMode` |
 | `git.rs` | Add `ref_exists()` helper |
-| `cli.rs` | Expand `New` variant with `--mode`, `--branch`, `--repo-branch`, `--no-fetch`, `--dry-run` |
+| `cli.rs` | Expand `New` variant with `--mode` (as `ForestMode`), `--branch`, `--repo-branch`, `--no-fetch`, `--dry-run` |
 | `commands.rs` | Add `NewInputs`, `ForestPlan`, `RepoPlan`, `CheckoutKind`, `NewResult`, `NewRepoResult`; add `plan_forest()`, `execute_plan()`, `cmd_new()`, `format_new_human()` |
-| `main.rs` | Wire up `New` command, parse mode/repo-branch flags |
-| `meta.rs` | No changes (existing `ForestMeta`/`RepoMeta` already sufficient) |
+| `main.rs` | Wire up `New` command, parse `--repo-branch` strings |
 | `config.rs` | No changes |
 | `paths.rs` | No changes (existing `sanitize_forest_name`, `forest_dir` already sufficient) |
-| `testutil.rs` | Add `create_repo_with_remote()` helper for testing fetch + remote branch resolution |
+| `testutil.rs` | Fix `create_repo` to use `git init -b main`; add `create_repo_with_remote()` helper |
 
 ---
 
 ## Tests
 
+### Step 0 — Fix existing test infra
+
+- `create_repo` / `create_repo_with_branch` → `git init -b main`
+- Verify all existing tests still pass after this change.
+
 ### Unit tests — `git.rs`
 
 - `ref_exists_local_branch` — returns true for existing local branch
 - `ref_exists_local_branch_missing` — returns false for non-existent branch
-- `ref_exists_remote_ref` — returns true for existing remote ref
+- `ref_exists_remote_ref` — returns true for existing remote ref (needs `create_repo_with_remote`)
 - `ref_exists_remote_ref_missing` — returns false for non-existent remote ref
 
 ### Unit tests — `commands.rs` (plan_forest)
@@ -387,11 +442,17 @@ See Tests section below.
 - `branch_override_applies_to_all_repos` — `--branch` overrides template for every repo
 - `repo_branch_override_applies_to_specific_repo` — `--repo-branch foo=bar` only affects foo
 - `repo_branch_override_unknown_repo_errors` — error with hint listing valid repo names
+- `duplicate_repo_branch_errors` — `--repo-branch foo=a --repo-branch foo=b` → error
 
-**Plan validation:**
+**Input validation:**
+- `plan_empty_name_errors` — empty forest name → error
+- `plan_dot_name_errors` — `"."` or `".."` → error
 - `plan_forest_dir_collision_errors` — existing directory at target path → error
 - `plan_empty_config_repos_errors` — no repos configured → error
 - `plan_source_repo_missing_errors` — source repo path doesn't exist → error
+- `plan_ambiguous_branch_refs_prefix_errors` — branch starting with `refs/` → error
+- `plan_ambiguous_branch_remote_prefix_errors` — branch starting with `origin/` → error
+- `plan_base_branch_ref_missing_errors` — `origin/dev` doesn't exist → clear error with hint
 
 **Branch resolution:**
 - `plan_resolves_existing_local_branch` — existing local → `ExistingLocal`, `branch_created = false`
@@ -414,14 +475,14 @@ See Tests section below.
 - `new_review_mode_with_repo_branch` — review mode with `--repo-branch`, verify branches
 - `new_dry_run_does_not_create` — `--dry-run` prints plan, forest dir does not exist after
 - `new_json_output` — `--json` returns valid JSON with expected fields
-- `new_without_mode_errors` — missing `--mode` → error with hint
+- `new_without_mode_errors` — missing `--mode` → clap error
 - `new_without_config_errors` — no config file → error mentioning `git forest init`
 - `new_duplicate_forest_name_errors` — forest dir already exists → error
 - `new_no_fetch_skips_fetch` — `--no-fetch` doesn't fail when remote is unreachable
 - `ls_shows_new_forest` — after `new`, `ls` shows the created forest
 
 Update existing test:
-- `subcommand_new_recognized` — update (currently expects "not yet implemented"; should now succeed or require `--mode`)
+- `subcommand_new_recognized` — update (currently expects "not yet implemented"; now requires `--mode`)
 
 ### Test infrastructure — `testutil.rs`
 
@@ -429,31 +490,38 @@ Add `create_repo_with_remote()`:
 
 ```rust
 /// Creates a bare repo + a regular repo with the bare as `origin`.
+/// Runs `git fetch origin` after setup so remote-tracking refs exist.
 /// Returns the path to the regular (non-bare) repo.
 pub fn create_repo_with_remote(&self, name: &str) -> PathBuf {
-    // 1. Create bare repo at self.dir/bare/{name}.git
-    // 2. Create regular repo at self.dir/src/{name}
+    // 1. Create bare repo at self.dir/bare/{name}.git via `git init --bare -b main`
+    // 2. Create regular repo at self.dir/src/{name} via `git init -b main`
     // 3. git remote add origin <bare-path>
-    // 4. git push origin HEAD
+    // 4. git commit --allow-empty -m "initial"
+    // 5. git push origin main
+    // 6. git fetch origin   ← ensures refs/remotes/origin/main exists
     // Returns regular repo path
 }
 ```
 
-This enables testing fetch and remote branch resolution without network access.
+To test `CheckoutKind::TrackRemote` (branch exists on remote but not locally):
+1. After `create_repo_with_remote`, create a branch in a temporary second clone and push it.
+2. In the source repo, `git fetch origin` — now `refs/remotes/origin/<branch>` exists but `refs/heads/<branch>` does not.
+
+Or simpler: push a branch to the bare repo directly (`git branch <name> HEAD` in the bare repo), then fetch from source.
 
 ---
 
 ## Open Questions
 
-1. **Should `--dry-run` still fetch?** Fetch is non-destructive (only updates tracking refs) and makes the plan more accurate. But `--dry-run` conventionally implies "no side effects." Recommendation: skip fetch in dry-run mode, document that the plan may be stale. Alternatively, add `--dry-run` only to the worktree-creation phase and always fetch.
+1. ~~Should `--dry-run` still fetch?~~ **Decided: yes.** Always fetch unless `--no-fetch`. Fetch is non-destructive and makes the plan accurate.
 
-2. **`--mode` as required flag vs. inferred.** In Phase 5, missing `--mode` triggers an interactive prompt. For now, it's required. Should we accept `--mode` values case-insensitively? Probably yes (clap can handle this).
+2. ~~`--mode` case sensitivity?~~ **Decided: use `ValueEnum`.** Clap handles case-insensitive parsing automatically.
 
-3. **Upstream tracking.** When creating a new branch off `origin/dev`, should we set `--track`? `git worktree add -b <branch> <remote>/<base>` does NOT set upstream tracking by default. We could add `git branch --set-upstream-to=<remote>/<base> <branch>` after creation. Recommendation: defer to Phase 5 — `git push -u` at push time is the more common workflow.
+3. **Upstream tracking.** When creating a new branch off `origin/dev`, should we set `--track`? `git worktree add -b <branch> <remote>/<base>` does NOT set upstream tracking by default. Recommendation: defer to Phase 5 — `git push -u` at push time is the more common workflow.
 
 4. **Error on branch already checked out in another worktree.** `git worktree add` will fail with a clear message if the branch is checked out elsewhere. For Phase 3, we let git's error propagate. Phase 3c polish would detect this upfront during planning and give a better message (e.g., "branch X is already checked out in /path/to/other/worktree").
 
-5. **Should `ForestPlan` / `RepoPlan` be `Serialize`?** Making them serializable enables `--dry-run --json` to output the plan as structured data (what actions would be taken). This is valuable for agents. Recommendation: yes, make them `Serialize` and use them as the dry-run result instead of `NewResult`.
+5. ~~Should `ForestPlan` be `Serialize`?~~ **Decided: no.** Reuse `NewResult` for both dry-run and real runs with `checkout_kind` field for detail. One JSON schema per command.
 
 ---
 
@@ -465,3 +533,4 @@ This enables testing fetch and remote branch resolution without network access.
 - Better error for "branch checked out in another worktree" → Phase 3c
 - Upstream tracking setup → Phase 5
 - Resuming a partially-created forest → Phase 5
+- Splitting `commands.rs` into per-command modules → after Phase 3 lands (file is ~950 lines now, will grow; not blocking)
