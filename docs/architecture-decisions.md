@@ -136,6 +136,78 @@ branch_created = true
 
 ---
 
+## Cross-Cutting Design Principles
+
+These principles apply to all commands and phases. They were established during Phase 2 planning but govern the entire project.
+
+### 7. Agent-Drivable First
+
+The primary consumer of `git-forest` is a software agent (MCP tool, AI coding assistant, shell script). Human UX is important but secondary — the interactive wizard is a convenience layer, not the core interface.
+
+This means:
+- **All inputs expressible as flags.** No command requires interactive prompts to function. Interactive features (dialoguer wizard) are deferred to Phase 5 and only activate when stdin is a TTY and required flags are missing.
+- **Structured output via `--json`.** Every command supports `--json` for machine-readable output. Human-readable tables are the default. Both are backed by the same data.
+- **Actionable error messages.** Every error includes a hint about what to do next, so an agent can parse and recover.
+- **Idempotent where possible.** `--force` flags for operations that might conflict. Same flags = same result.
+- **No hidden state.** Config and meta files are the only artifacts. Paths are discoverable (`--show-path`).
+- **Predictable exit codes.** 0 = success, 1 = user/input error, 2 = system error.
+
+### 8. Commands Return Data, Don't Print
+
+Command functions return typed result structs, not `Result<()>` with `println!` inside. `main.rs` handles all output — either human-readable or JSON based on `--json`.
+
+```
+main.rs: parse CLI, load config, resolve args
+        │
+        ▼
+  cmd_xxx(inputs) -> Result<XxxResult>    ← pure-ish, no printing
+        │
+        ▼
+  main.rs: match --json
+        ├── true:  serde_json::to_string_pretty(&result)
+        └── false: format_xxx_human(&result) -> String
+```
+
+This gives us:
+- **Testability:** assert on data, not captured stdout.
+- **Dual output for free:** human and JSON from the same result structs.
+- **Clean boundary:** command logic is pure-ish, IO is at the edges.
+- **Future-proof:** an MCP tool or library consumer calls the same functions and gets data back.
+
+This is the practical version of "functional core, imperative shell." The call graph is shallow (main → command → helpers), so there's no deep plumbing problem. IO naturally lives at the two edges (input at the top, output at the bottom) with a thin layer of logic in between. No traits, no DI, no ports-and-adapters machinery needed.
+
+### 9. Plan/Execute for Mutating Commands
+
+Read-only commands (`ls`, `status`) are straightforward: take data, return data. Mutating commands (`init`, `new`, `rm`) use a **plan/execute** split:
+
+1. A **pure planning function** takes inputs and returns a data structure describing what should happen.
+2. An **execution function** carries out the plan (filesystem writes, git operations).
+
+For example, `new` will work as:
+
+```rust
+plan_forest(inputs) -> Result<Vec<RepoAction>>     // pure: decide what to do
+execute_plan(actions) -> Result<NewResult>           // impure: do it
+```
+
+The `RepoAction` enum describes operations as data (the command pattern, expressed naturally as a Rust enum):
+
+```rust
+enum RepoAction {
+    FetchRemote { repo: PathBuf, remote: String },
+    CreateWorktree { source: PathBuf, dest: PathBuf, branch: String },
+    CreateBranch { repo: PathBuf, branch: String, base: String },
+}
+```
+
+Benefits:
+- **Testable:** assert on the plan without touching git or the filesystem.
+- **`--dry-run` for free:** print the actions instead of executing them.
+- **Good error reporting:** "failed on step 3 of 7: CreateWorktree { ... }".
+- **Agent-inspectable:** `--json --dry-run` lets an agent review the plan before approving execution.
+
+---
+
 ## Open Questions (Deferred to Implementation Phase)
 
 These are important but don't block starting. Resolve when building the relevant feature.
@@ -169,9 +241,7 @@ These are important but don't block starting. Resolve when building the relevant
 
 ### `init` command
 
-- **Re-running init:**
-  - Overwrite with confirmation, or merge with existing config?
-  - Should it detect existing repos and suggest them?
+- **Re-running init: DECIDED — replace with `--force`, not merge.** Merging is complex and error-prone. For adding repos later, edit the config file or (eventually) `git forest config add-repo`.
 
 ### `forest/{name}` branches
 
@@ -184,7 +254,7 @@ These are important but don't block starting. Resolve when building the relevant
 
 ## Phased Build Plan
 
-### Phase 0 — Skeleton & Foundation
+### Phase 0 — Skeleton & Foundation (COMPLETE)
 
 **Goal:** Runnable CLI with shared infrastructure. `git forest --help` works.
 
@@ -197,7 +267,7 @@ These are important but don't block starting. Resolve when building the relevant
 
 **No git mutations. No interactive prompts.**
 
-### Phase 1 — Read-Only Commands
+### Phase 1 — Read-Only Commands (COMPLETE)
 
 **Goal:** Validate contracts by reading existing forests (manually created or from Phase 3).
 
@@ -207,15 +277,22 @@ These are important but don't block starting. Resolve when building the relevant
 
 These are simple, low-risk, and exercise config loading, meta parsing, discovery, and the git wrapper.
 
-### Phase 2 — `init`
+### Phase 2 — `init` + Output Architecture
 
-**Goal:** Interactive config generation.
+**Goal:** Non-interactive config generation + refactor all commands for structured output.
 
-- Implement `dialoguer`-based wizard.
-- Write config atomically (write to temp file, then rename).
-- Handle re-run with confirmation prompt.
+See [PHASE_2_PLAN.md](PHASE_2_PLAN.md) for full implementation details.
 
-Can start minimal (fewer prompts, sensible defaults) and iterate.
+**Step 1 — Output refactor:**
+- Refactor `ls`, `status`, `exec` to return typed result structs instead of printing directly (Decision 8).
+- Add global `--json` flag.
+- Add `serde_json` dependency.
+
+**Step 2 — `init` command:**
+- Flag-driven, non-interactive config generation.
+- `InitInputs` → `validate_init_inputs()` → `write_config_atomic()` → `InitResult` (Decision 9: plan/execute).
+- Atomic write (tempfile + rename). `--force` to overwrite. `--show-path` for discoverability.
+- Actionable error messages with hints (Decision 7).
 
 ### Phase 3 — `new <name>`
 
@@ -235,14 +312,16 @@ Can start minimal (fewer prompts, sensible defaults) and iterate.
 
 **Cross-cutting feature:** mode → feature, confirm default, no exceptions. ~2 prompts total.
 
-**3a — Minimal happy path (no prompts):**
+Uses plan/execute pattern (Decision 9): `plan_forest()` returns `Vec<RepoAction>`, a separate function executes them. `--dry-run` support.
+
+**3a — Minimal happy path (flag-driven, no prompts):**
 - Create forest directory.
 - Every repo: worktree add with suggested branch.
 - Write meta incrementally.
 
-**3b — Mode + exceptions interactive flow:**
+**3b — Mode + exceptions flow (flag-driven or interactive):**
 - `git fetch --all` for all repos.
-- Mode prompt → defaults → exceptions multi-select → per-exception branch input.
+- Mode + defaults + exceptions, expressible as flags or interactive prompts.
 - Full branch resolution logic (local → remote → new).
 
 **3c — Polish:**
@@ -255,18 +334,20 @@ Can start minimal (fewer prompts, sensible defaults) and iterate.
 - Read meta, best-effort cleanup.
 - Worktree remove, branch delete (safe by default).
 - Handle partial forests gracefully.
-- Confirmation prompt before executing.
-- Add `--dry-run` and `--force` flags.
+- Uses plan/execute pattern (Decision 9): `--dry-run` to preview what would be deleted.
+- `--force` flag for destructive operations.
 
 ### Phase 5 — Hardening & UX
 
-**Goal:** Polish for daily use.
+**Goal:** Polish for daily use. Human-friendly layer on top of agent-friendly core.
 
+- Interactive wizard for `init` using `dialoguer` (deferred from Phase 2).
+- Interactive prompts for `new` (mode + exceptions flow).
 - Accept both original and sanitized names everywhere.
 - Auto-detect current forest when inside one.
 - `git forest path <name>` — print forest path for shell integration.
 - Improve error messages and edge case handling.
-- `--yes` flag for non-interactive use.
+- `--yes` flag for non-interactive use (skip confirmations).
 - `--verbose` flag for debugging.
 
 ---
@@ -283,3 +364,5 @@ Captured from the original spec plus review discussion:
 - Parallel execution in `exec`.
 - Multi-remote branch discovery.
 - Config migrations / schema versioning.
+- MCP tool integration.
+- `git forest config` subcommand for editing config.

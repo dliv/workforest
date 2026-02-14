@@ -1,58 +1,157 @@
-# Phase 2 Plan — `init` (Config Generation)
+# Phase 2 Plan — `init` + Output Architecture
 
 **STATUS: DRAFT**
 
 ## Goal
 
-Implement `git forest init` to generate `~/.config/git-forest/config.toml`. Two layers: a non-interactive flag-based interface (agent-friendly, testable) and an interactive wizard for humans. Both share the same validation and write path.
+Two things in this phase:
 
-## Design Principle: Agent-Drivable First
+1. Implement `git forest init` as a non-interactive, flag-driven command.
+2. Refactor all commands to return data (not print), and add `--json` output support.
 
-Every command should be drivable by a software agent (MCP tool, shell script, AI coding assistant) without simulating TTY input. This means:
+The interactive wizard (dialoguer) is deferred to Phase 5 — the flag-based interface is sufficient for development and is the primary interface for agents.
 
-1. **All inputs expressible as flags.** The interactive wizard is a convenience layer, not the only path.
-2. **Structured, predictable output.** Errors to stderr with actionable next steps. Success to stdout. Exit codes are meaningful (0 = success, 1 = user error, 2 = system error).
-3. **Idempotent when possible.** `init` with `--force` and the same flags = same result.
-4. **No hidden state.** The config file is the only artifact. Its path is discoverable via `git forest init --show-path`.
+## Design Principles
 
-This doesn't mean we build `--json` output or MCP integration now — it means we design the internal architecture so these are easy to add later. Specifically: command logic is a pure function from inputs to outputs, with IO at the edges.
+This phase implements Decisions 7–9 from [architecture-decisions.md](architecture-decisions.md): agent-drivable first, commands return data, and plan/execute for mutating commands. See that document for the full rationale.
 
 ## Architecture
 
+### Output flow (all commands)
+
 ```
-CLI flags / interactive prompts
+main.rs: parse CLI, load config, resolve args
         │
         ▼
-  InitInputs (struct)
+  cmd_xxx(inputs) -> Result<XxxResult>    ← pure-ish, no printing
         │
         ▼
-  validate_init_inputs() -> Result<ResolvedConfig>
+  main.rs: match --json
+        ├── true:  serde_json::to_string_pretty(&result)
+        └── false: format_xxx_human(&result) -> String
         │
         ▼
-  write_config_atomic(path, config) -> Result<()>
+  println!
 ```
 
-`InitInputs` is the boundary. Everything above it is UI (flags or dialoguer). Everything below it is pure logic + IO. This means:
-- Tests exercise `validate_init_inputs()` directly — no prompt mocking needed.
-- A future MCP tool calls the same validation/write path.
-- The interactive wizard is just one way to populate `InitInputs`.
+### Init flow (plan/execute)
 
-## Phase 2a — Non-Interactive Core
+```
+CLI flags
+    │
+    ▼
+InitInputs (struct)
+    │
+    ▼
+validate_init_inputs() -> Result<ResolvedConfig>    ← pure: plan
+    │
+    ▼
+write_config_atomic(path, config) -> Result<()>     ← impure: execute
+    │
+    ▼
+InitResult { path, config_summary }
+```
 
-### CLI changes
+---
+
+## Step 1 — Refactor Existing Commands to Return Data
+
+Before adding `init`, refactor `ls`, `status`, and `exec` so they return data instead of printing. This establishes the pattern for all future commands.
+
+### Result structs
+
+```rust
+// ls
+#[derive(Serialize)]
+pub struct LsResult {
+    pub forests: Vec<ForestSummary>,
+}
+
+#[derive(Serialize)]
+pub struct ForestSummary {
+    pub name: String,
+    pub age_seconds: i64,       // raw; human formatter turns this into "3d ago"
+    pub age_display: String,    // pre-formatted for human output
+    pub mode: ForestMode,
+    pub branch_summary: Vec<BranchCount>,
+}
+
+#[derive(Serialize)]
+pub struct BranchCount {
+    pub branch: String,
+    pub count: usize,
+}
+
+// status
+#[derive(Serialize)]
+pub struct StatusResult {
+    pub forest_name: String,
+    pub repos: Vec<RepoStatus>,
+}
+
+#[derive(Serialize)]
+pub struct RepoStatus {
+    pub name: String,
+    pub status: RepoStatusKind,
+}
+
+#[derive(Serialize)]
+pub enum RepoStatusKind {
+    Ok { output: String },
+    Missing { path: String },
+    Error { message: String },
+}
+```
+
+`exec` is special — it streams output and must pass through stdout/stderr in real time. It stays as `Result<ExecResult>` where `ExecResult` just captures the summary (which repos failed). The streaming happens during execution; the result is reported at the end.
+
+### Global `--json` flag
+
+Add to `Cli`:
+```rust
+#[derive(Parser)]
+pub struct Cli {
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+```
+
+### What changes
+
+| File | Changes |
+|------|---------|
+| `cli.rs` | Add `--json` global flag |
+| `commands.rs` | Return result structs instead of printing. Extract human formatting into `format_*` functions. |
+| `main.rs` | Add output dispatch: `--json` → JSON, else → human format |
+| `Cargo.toml` | Add `serde_json` dependency |
+
+### Tests
+
+- Existing unit tests switch from "doesn't panic" to asserting on returned data (much better).
+- Add tests for `format_ls_human()` etc. if the formatting logic is non-trivial.
+- Integration test: `ls --json` returns valid JSON.
+
+---
+
+## Step 2 — Implement `init`
+
+### CLI
 
 ```
 git forest init [flags]
     --worktree-base <PATH>     Where to create forests (default: ~/worktrees)
     --base-branch <BRANCH>     Default base branch (default: dev)
     --branch-template <TPL>    Branch naming template (default: {user}/{name})
-    --username <NAME>          Your short username
-    --repo <PATH>              Add a repo (repeatable)
+    --username <NAME>          Your short username (required)
+    --repo <PATH>              Add a repo (repeatable, at least one required)
     --force                    Overwrite existing config without prompting
     --show-path                Print config path and exit
 ```
 
-Minimal valid invocation:
+Minimal invocation:
 ```sh
 git forest init \
   --username dliv \
@@ -60,13 +159,13 @@ git forest init \
   --repo ~/src/foo-web
 ```
 
-Everything else has sensible defaults.
+Without required flags: error with usage help (no wizard fallback — that's Phase 5).
 
 ### `InitInputs` struct
 
 ```rust
 pub struct InitInputs {
-    pub worktree_base: String,      // raw, pre-expansion (e.g. "~/worktrees")
+    pub worktree_base: String,       // raw, pre-expansion (e.g. "~/worktrees")
     pub base_branch: String,
     pub branch_template: String,
     pub username: String,
@@ -74,8 +173,8 @@ pub struct InitInputs {
 }
 
 pub struct RepoInput {
-    pub path: String,               // raw, pre-expansion
-    pub name: Option<String>,       // override; derived from path if None
+    pub path: String,                // raw, pre-expansion
+    pub name: Option<String>,        // override; derived from path if None
     pub base_branch: Option<String>, // override; inherited from general if None
 }
 ```
@@ -83,7 +182,7 @@ pub struct RepoInput {
 ### Validation (`validate_init_inputs`)
 
 - Expand tildes in all paths
-- Validate `worktree_base` parent exists (we'll create `worktree_base` itself)
+- Validate `worktree_base` parent directory exists (we create `worktree_base` itself if needed)
 - Validate each repo `path` exists and is a git repo (`git rev-parse --git-dir`)
 - Derive repo names from paths when not explicit
 - Check for duplicate repo names
@@ -92,120 +191,104 @@ pub struct RepoInput {
 
 ### Atomic write
 
+- Create parent directories if needed
 - Write to `<config_path>.tmp`
 - Rename to `<config_path>`
-- Create parent directories if needed
-- If config already exists and `--force` not passed: error with message "Config already exists at <path>. Use --force to overwrite, or edit it directly."
+- If config exists and `--force` not set: error with hint
 
-### Error messages (agent-friendly)
+### Result struct
 
-Every error should include:
-- What went wrong
-- What the user (or agent) should do about it
+```rust
+#[derive(Serialize)]
+pub struct InitResult {
+    pub config_path: PathBuf,
+    pub worktree_base: PathBuf,
+    pub repos: Vec<InitRepoSummary>,
+}
 
-Examples:
+#[derive(Serialize)]
+pub struct InitRepoSummary {
+    pub name: String,
+    pub path: PathBuf,
+    pub base_branch: String,
+}
+```
+
+### Error messages
+
+Every error includes what went wrong and what to do about it:
+
 ```
 error: ~/src/foo-api is not a git repository
   hint: run `git init` in that directory, or check the path
 
 error: config already exists at ~/.config/git-forest/config.toml
-  hint: use `--force` to overwrite, or edit the file directly
+  hint: use --force to overwrite, or edit the file directly
 
 error: repo name 'foo' is used by both ~/src/foo and ~/src/other/foo
-  hint: use `--repo ~/src/other/foo:name=other-foo` to disambiguate
-  (or in interactive mode, you'll be prompted for a name)
+  hint: add an explicit name with a separate --repo-name flag,
+        or rename one of the directories
 ```
-
-### What changes in which files
-
-| File | Changes |
-|------|---------|
-| `cli.rs` | Add flags to `Init` variant |
-| `config.rs` | Add `write_config_atomic()`, make `Config` serializable (already is) |
-| `commands.rs` | Add `cmd_init()` — parse flags into `InitInputs`, validate, write |
-| `main.rs` | Wire up `Init` to `cmd_init()` |
-| `Cargo.toml` | No new deps yet (dialoguer comes in 2b) |
-
-### Tests
-
-**Unit tests (in `commands.rs` or a new `init.rs`):**
-- Valid inputs → produces correct `ResolvedConfig`
-- Missing username → error
-- No repos → error (at least one repo required)
-- Duplicate repo names → error with hint
-- Invalid repo path (not a git repo) → error with hint
-- `branch_template` missing `{name}` → error
-- Tilde expansion works in all path fields
-
-**Integration tests (in `tests/cli_test.rs`):**
-- `init --show-path` prints path and exits 0
-- `init --username dliv --repo <path>` creates config file
-- `init` without `--username` or `--repo` → error (in non-interactive mode; once 2b lands, this triggers the wizard instead)
-- `init` when config exists → error mentioning `--force`
-- `init --force` when config exists → overwrites
-- Update existing test `subcommand_init_recognized` (currently expects "not yet implemented")
-
----
-
-## Phase 2b — Interactive Wizard
-
-Add `dialoguer` dependency. When `init` is run without sufficient flags, fall back to interactive prompts.
-
-### Detection logic
-
-```
-if stdin is a TTY and required flags are missing:
-    launch wizard (pre-fill any flags that were provided)
-else if required flags are missing:
-    error with usage help
-else:
-    proceed non-interactively
-```
-
-This means an agent piping input or passing flags never hits the wizard.
-
-### Wizard flow
-
-1. **Username** — `Input::new("Your short username (for branch names)")` with default from `$USER` or git config `user.name`
-2. **Worktree base** — `Input::new("Where should forests live?")` with default `~/worktrees`
-3. **Base branch** — `Input::new("Default base branch")` with default `dev`
-4. **Branch template** — `Input::new("Branch naming template")` with default `{user}/{name}`, validate contains `{name}`
-5. **Repos** — Loop:
-   - `Input::new("Path to a repo (empty to finish)")`
-   - Auto-derive name, show it: `"  → name: foo-api"`
-   - Optional: `"Override base branch for foo-api? (default: dev)"` — skip if user just hits enter
-   - Repeat until empty input
-   - Require at least one repo
-6. **Confirm** — Show summary, `Confirm::new("Write config?")`
 
 ### What changes
 
 | File | Changes |
 |------|---------|
-| `Cargo.toml` | Add `dialoguer` dependency |
-| `commands.rs` | Add wizard function that returns `InitInputs` |
+| `cli.rs` | Add flags to `Init` variant |
+| `config.rs` | Add `write_config_atomic()` |
+| `commands.rs` | Add `cmd_init()` returning `InitResult`, `validate_init_inputs()` |
+| `main.rs` | Wire up `Init`, format output |
 
 ### Tests
 
-Interactive prompts are hard to unit test. Strategy:
-- The wizard function returns `InitInputs` — the same struct flags produce
-- All validation is in `validate_init_inputs()` — already tested in 2a
-- Integration test: `init` with flags still works (no wizard triggered)
-- Manual testing for the wizard UX
+**Unit tests:**
+- Valid inputs → correct `ResolvedConfig` + `InitResult`
+- Missing username → error
+- No repos → error
+- Duplicate repo names → error with hint
+- Invalid repo path (not a git repo) → error with hint
+- `branch_template` missing `{name}` → error
+- Tilde expansion in all path fields
+- Atomic write creates file
+- Atomic write with `--force` overwrites
+- Atomic write without `--force` when file exists → error
+
+**Integration tests:**
+- `init --show-path` prints path and exits 0
+- `init --username dliv --repo <tmpdir>/repo` creates valid config
+- `init` without required flags → error
+- `init` when config exists → error mentioning `--force`
+- `init --force` → overwrites
+- `init --json --username dliv --repo <path>` → valid JSON result
+- Update existing `subcommand_init_recognized` test
+
+---
+
+## Suggested Implementation Order
+
+1. **Add `serde_json` dep + `--json` flag to CLI** — mechanical, no logic changes yet
+2. **Refactor `cmd_ls`** — return `LsResult`, move printing to `main.rs`. Update tests.
+3. **Refactor `cmd_status`** — return `StatusResult`, same pattern. Update tests.
+4. **Refactor `cmd_exec`** — lighter touch (streaming stays), just capture `ExecResult` summary.
+5. **Implement `cmd_init`** — `InitInputs` → validate → write → `InitResult`.
+6. **Integration tests** for init + --json across commands.
+
+Each step is a clean commit.
 
 ---
 
 ## Open Questions (Resolve During Implementation)
 
-1. **Repo path syntax for name/base_branch overrides in flags.** Proposed: `--repo ~/src/foo:name=custom-name,base_branch=main`. Alternatively, separate flags like `--repo-override foo:base_branch=main`. The colon syntax is more compact but harder to parse. Could also defer overrides to config file editing and keep `--repo` simple (just paths).
+1. **Repo overrides via flags.** For now, `--repo` is just a path. Per-repo `base_branch` overrides require editing the config file after init. We can add `--repo-base-branch <name>=<branch>` or similar later if needed, but keeping `--repo` simple is better for now.
 
-2. **Should `init` validate that repos have the expected base branch?** e.g., if user says `base_branch = dev`, check that `origin/dev` exists. Probably yes as a warning, not an error — the remote might not be set up yet.
+2. **Should `init` warn if `origin/<base_branch>` doesn't exist?** Probably yes as a warning (not error) — the remote might not be set up yet. Defer to implementation.
 
-3. **Re-running init: merge or replace?** Architecture doc says "Overwrite with confirmation, or merge with existing config?" Recommendation: replace with `--force`. Merging is complex and error-prone. If you want to add a repo, edit the config file. We could add `git forest config add-repo <path>` later.
+3. **Re-running init: replace, not merge.** `--force` overwrites entirely. Merging is complex and error-prone. For adding repos later, edit the file or (eventually) `git forest config add-repo`.
 
-## Out of Scope
+## Out of Scope (Deferred)
 
-- `--json` output (Phase 5)
-- MCP tool integration (post-v1)
-- Config migrations / schema versioning (post-v1)
-- `git forest config` subcommand for editing (post-v1)
+- Interactive wizard with `dialoguer` → Phase 5
+- MCP tool integration → post-v1
+- Config migrations / schema versioning → post-v1
+- `git forest config` subcommand → post-v1
+- `--verbose` flag → Phase 5
