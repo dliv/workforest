@@ -294,22 +294,16 @@ These are important but don't block starting. Resolve when building the relevant
 
 These are simple, low-risk, and exercise config loading, meta parsing, discovery, and the git wrapper.
 
-### Phase 2 — `init` + Output Architecture
+### Phase 2 — `init` + Output Architecture (COMPLETE)
 
 **Goal:** Non-interactive config generation + refactor all commands for structured output.
 
 See [PHASE_2_PLAN.md](PHASE_2_PLAN.md) for full implementation details.
 
-**Step 1 — Output refactor:**
-- Refactor `ls`, `status`, `exec` to return typed result structs instead of printing directly (Decision 8).
-- Add global `--json` flag.
-- Add `serde_json` dependency.
-
-**Step 2 — `init` command:**
-- Flag-driven, non-interactive config generation.
-- `InitInputs` → `validate_init_inputs()` → `write_config_atomic()` → `InitResult` (Decision 9: plan/execute).
-- Atomic write (tempfile + rename). `--force` to overwrite. `--show-path` for discoverability.
-- Actionable error messages with hints (Decision 7).
+- All commands (`ls`, `status`, `exec`) return typed result structs (Decision 8). `--json` global flag.
+- `init` command: flag-driven, non-interactive config generation with validation and atomic write.
+- `debug_assert!` postconditions on key functions (Decision 10).
+- 75 tests (63 unit + 12 integration).
 
 ### Phase 3 — `new <name>`
 
