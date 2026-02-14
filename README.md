@@ -6,7 +6,7 @@ Installs as `git-forest`, invoked as `git forest <command>`.
 
 ## Status
 
-Phase 0 — foundation types and test harness. All subcommands are stubbed.
+Phase 1 complete — read-only commands work. `init`, `new`, and `rm` are stubbed.
 
 ## Setup
 
@@ -28,10 +28,10 @@ just check    # fmt + clippy
 
 ```
 git-forest --help
-git-forest init          # not yet implemented
-git-forest new <name>    # not yet implemented
-git-forest rm [name]     # not yet implemented
-git-forest ls            # not yet implemented
-git-forest status [name] # not yet implemented
-git-forest exec <name> -- <cmd>  # not yet implemented
+git-forest ls                    # list all forests
+git-forest status [name]         # git status per repo in a forest
+git-forest exec <name> -- <cmd>  # run command in each repo
+git-forest init                  # not yet implemented
+git-forest new <name>            # not yet implemented
+git-forest rm [name]             # not yet implemented
 ```

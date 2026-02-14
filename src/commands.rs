@@ -77,14 +77,64 @@ fn format_branches(forest: &ForestMeta) -> String {
 }
 
 pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<()> {
-    let _ = (forest_dir, meta);
-    eprintln!("status: not yet implemented");
+    for repo in &meta.repos {
+        let worktree = forest_dir.join(&repo.name);
+        println!("=== {} ===", repo.name);
+
+        if !worktree.exists() {
+            eprintln!("  warning: worktree missing at {}", worktree.display());
+            continue;
+        }
+
+        match crate::git::git(&worktree, &["status", "-sb"]) {
+            Ok(output) => println!("{}", output),
+            Err(e) => eprintln!("  warning: {}", e),
+        }
+    }
     Ok(())
 }
 
 pub fn cmd_exec(forest_dir: &Path, meta: &ForestMeta, cmd: &[String]) -> Result<()> {
-    let _ = (forest_dir, meta, cmd);
-    eprintln!("exec: not yet implemented");
+    if cmd.is_empty() {
+        anyhow::bail!("no command specified");
+    }
+
+    let mut failures = Vec::new();
+
+    for repo in &meta.repos {
+        let worktree = forest_dir.join(&repo.name);
+        println!("=== {} ===", repo.name);
+
+        if !worktree.exists() {
+            eprintln!("  warning: worktree missing at {}", worktree.display());
+            failures.push(repo.name.clone());
+            continue;
+        }
+
+        let status = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .current_dir(&worktree)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        match status {
+            Ok(s) if !s.success() => {
+                failures.push(repo.name.clone());
+            }
+            Err(e) => {
+                eprintln!("  error: {}", e);
+                failures.push(repo.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    if !failures.is_empty() {
+        eprintln!("\nFailed in: {}", failures.join(", "));
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 
@@ -247,5 +297,84 @@ mod tests {
 
         // Should succeed and list both forests without panicking
         cmd_ls(base).unwrap();
+    }
+
+    // --- status tests ---
+
+    fn setup_forest_with_git_repos(base: &Path) -> (PathBuf, ForestMeta) {
+        let forest_dir = base.join("test-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+
+        // Create real git repos as worktrees
+        for name in &["api", "web"] {
+            let repo_dir = forest_dir.join(name);
+            std::fs::create_dir_all(&repo_dir).unwrap();
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo_dir)
+                    .env("GIT_AUTHOR_NAME", "Test")
+                    .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                    .env("GIT_COMMITTER_NAME", "Test")
+                    .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                    .output()
+                    .unwrap();
+            };
+            run(&["init"]);
+            run(&["commit", "--allow-empty", "-m", "initial"]);
+        }
+
+        let meta = make_meta(
+            "test-forest",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "main"), make_repo("web", "main")],
+        );
+
+        (forest_dir, meta)
+    }
+
+    #[test]
+    fn cmd_status_runs_in_each_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (forest_dir, meta) = setup_forest_with_git_repos(tmp.path());
+        cmd_status(&forest_dir, &meta).unwrap();
+    }
+
+    #[test]
+    fn cmd_status_missing_worktree_continues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("test-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+
+        let meta = make_meta(
+            "test-forest",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("missing-repo", "main")],
+        );
+
+        // Should not error — prints warning and continues
+        cmd_status(&forest_dir, &meta).unwrap();
+    }
+
+    // --- exec tests ---
+
+    #[test]
+    fn cmd_exec_runs_command_in_each_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (forest_dir, meta) = setup_forest_with_git_repos(tmp.path());
+
+        let cmd = vec!["echo".to_string(), "hello".to_string()];
+        cmd_exec(&forest_dir, &meta, &cmd).unwrap();
+    }
+
+    #[test]
+    fn cmd_exec_empty_cmd_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (forest_dir, meta) = setup_forest_with_git_repos(tmp.path());
+
+        let result = cmd_exec(&forest_dir, &meta, &[]);
+        assert!(result.is_err());
     }
 }

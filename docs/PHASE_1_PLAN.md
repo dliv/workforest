@@ -1,5 +1,7 @@
 # Phase 1 Plan — Read-Only Commands (`ls`, `status`, `exec`)
 
+**STATUS: COMPLETE** — All three commands implemented and tested.
+
 ## Goal
 
 Wire up the three read-only commands so they work against real forests. These become the feedback loop for developing `new` in Phase 3.
