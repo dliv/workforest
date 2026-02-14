@@ -99,6 +99,59 @@ impl TestEnv {
         std::fs::write(self.config_path(), content).expect("failed to write config");
     }
 
+    /// Creates a bare repo + a regular repo with the bare as `origin`.
+    /// Runs `git fetch origin` after setup so remote-tracking refs exist.
+    /// Returns the path to the regular (non-bare) repo.
+    pub fn create_repo_with_remote(&self, name: &str) -> PathBuf {
+        let bare_path = self.dir.path().join("bare").join(format!("{}.git", name));
+        let repo_path = self.dir.path().join("src").join(name);
+
+        std::fs::create_dir_all(&bare_path).unwrap();
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let run = |dir: &PathBuf, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {:?} in {} failed: {}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        // 1. Create bare repo
+        run(&bare_path, &["init", "--bare", "-b", "main"]);
+
+        // 2. Create regular repo
+        run(&repo_path, &["init", "-b", "main"]);
+
+        // 3. Add remote
+        run(
+            &repo_path,
+            &["remote", "add", "origin", bare_path.to_str().unwrap()],
+        );
+
+        // 4. Initial commit
+        run(&repo_path, &["commit", "--allow-empty", "-m", "initial"]);
+
+        // 5. Push main to origin
+        run(&repo_path, &["push", "origin", "main"]);
+
+        // 6. Fetch to ensure refs/remotes/origin/main exists
+        run(&repo_path, &["fetch", "origin"]);
+
+        repo_path
+    }
+
     pub fn default_config(&self, repo_names: &[&str]) -> ResolvedConfig {
         let repos = repo_names
             .iter()

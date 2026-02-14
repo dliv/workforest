@@ -29,6 +29,33 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(stdout.trim_end().to_string())
 }
 
+/// Check if a ref exists. Returns true if `git show-ref --verify <refname>` succeeds.
+pub fn ref_exists(repo: &Path, refname: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["show-ref", "--verify", refname])
+        .current_dir(repo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run git show-ref --verify {} in {}",
+                refname,
+                repo.display()
+            )
+        })?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(_) => Ok(false), // exit 1 or 128 both mean "ref not found"
+        None => bail!(
+            "git show-ref --verify {} killed by signal in {}",
+            refname,
+            repo.display()
+        ),
+    }
+}
+
 pub fn git_stream(repo: &Path, args: &[&str]) -> Result<ExitStatus> {
     let status = Command::new("git")
         .args(args)
@@ -83,5 +110,33 @@ mod tests {
         let repo = env.create_repo("test-repo");
         let status = git_stream(&repo, &["checkout", "nonexistent-branch"]).unwrap();
         assert!(!status.success());
+    }
+
+    #[test]
+    fn ref_exists_local_branch() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("test-repo");
+        assert!(ref_exists(&repo, "refs/heads/main").unwrap());
+    }
+
+    #[test]
+    fn ref_exists_local_branch_missing() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("test-repo");
+        assert!(!ref_exists(&repo, "refs/heads/nonexistent").unwrap());
+    }
+
+    #[test]
+    fn ref_exists_remote_ref() {
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("test-repo");
+        assert!(ref_exists(&repo, "refs/remotes/origin/main").unwrap());
+    }
+
+    #[test]
+    fn ref_exists_remote_ref_missing() {
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("test-repo");
+        assert!(!ref_exists(&repo, "refs/remotes/origin/nonexistent").unwrap());
     }
 }
