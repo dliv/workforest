@@ -159,11 +159,12 @@ fn new_without_config_shows_init_hint() {
 
 #[test]
 fn subcommand_rm_recognized() {
-    cargo_bin_cmd!("git-forest")
+    // rm without config should fail with init hint (same as other commands)
+    with_no_config()
         .args(["rm", "test-feature"])
         .assert()
-        .success()
-        .stderr(predicates::str::contains("not yet implemented"));
+        .failure()
+        .stderr(predicates::str::contains("git forest init"));
 }
 
 fn with_no_config() -> assert_cmd::Command {
@@ -438,6 +439,183 @@ fn ls_shows_new_forest() {
         .assert()
         .success()
         .stdout(predicates::str::contains("visible-forest"));
+
+    drop(tmp);
+}
+
+// --- rm command integration tests ---
+
+#[test]
+fn rm_removes_forest() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    // Create forest
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "rm-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let forest_dir = worktree_base.join("rm-e2e");
+    assert!(forest_dir.exists());
+    assert!(forest_dir.join("foo-api").exists());
+    assert!(forest_dir.join("foo-web").exists());
+
+    // Remove forest
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "rm-e2e"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Removed forest"));
+
+    // Verify everything is gone
+    assert!(!forest_dir.exists());
+    assert!(!forest_dir.join("foo-api").exists());
+    assert!(!forest_dir.join("foo-web").exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn rm_dry_run_preserves_forest() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "rm-dry-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let forest_dir = worktree_base.join("rm-dry-e2e");
+    assert!(forest_dir.exists());
+
+    // Dry run
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "rm-dry-e2e", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Dry run"))
+        .stdout(predicates::str::contains("Would remove forest"));
+
+    // Everything should still exist
+    assert!(forest_dir.exists());
+    assert!(forest_dir.join("foo-api").exists());
+    assert!(forest_dir.join(".forest-meta.toml").exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn rm_json_output() {
+    let (tmp, fake_home, _) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "rm-json-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["--json", "rm", "rm-json-e2e"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["forest_name"], "rm-json-e2e");
+    assert_eq!(json["dry_run"], false);
+    assert!(json["repos"].is_array());
+    assert_eq!(json["repos"].as_array().unwrap().len(), 2);
+    assert!(json["forest_dir_removed"].as_bool().unwrap());
+    assert!(json["errors"].as_array().unwrap().is_empty());
+
+    drop(tmp);
+}
+
+#[test]
+fn rm_nonexistent_forest_errors() {
+    let (_tmp, fake_home, _) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "does-not-exist"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not found"));
+}
+
+#[test]
+fn rm_force_flag() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    let forest_dir = worktree_base.join("rm-force-e2e");
+
+    // Make foo-api dirty
+    let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
+    std::fs::write(&dirty_file, "dirty content").unwrap();
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap();
+    };
+    run(&forest_dir.join("foo-api"), &["add", "dirty.txt"]);
+
+    // Without --force: should exit 1 (partial failure)
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "rm-force-e2e"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .failure();
+
+    // Re-create (the forest dir still exists with leftover worktree)
+    // Need to clean up and recreate
+    std::fs::remove_dir_all(&forest_dir).unwrap();
+    // Also prune worktrees in source repos
+    run(
+        &tmp.path().join("src").join("foo-api"),
+        &["worktree", "prune"],
+    );
+    run(
+        &tmp.path().join("src").join("foo-web"),
+        &["worktree", "prune"],
+    );
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // Make dirty again
+    let dirty_file = forest_dir.join("foo-api").join("dirty2.txt");
+    std::fs::write(&dirty_file, "dirty content 2").unwrap();
+    run(&forest_dir.join("foo-api"), &["add", "dirty2.txt"]);
+
+    // With --force: should succeed
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "rm-force-e2e", "--force"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Removed forest"));
+
+    assert!(!forest_dir.exists());
 
     drop(tmp);
 }

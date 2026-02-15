@@ -100,9 +100,20 @@ fn run(cli: Cli) -> Result<()> {
             let result = commands::cmd_new(inputs, &config)?;
             output(&result, cli.json, commands::format_new_human)?;
         }
-        Command::Rm { name } => {
-            let label = name.as_deref().unwrap_or("(auto-detect)");
-            eprintln!("rm {}: not yet implemented", label);
+        Command::Rm {
+            name,
+            force,
+            dry_run,
+        } => {
+            let config = config::load_default_config()?;
+            let (dir, meta) =
+                forest::resolve_forest(&config.general.worktree_base, name.as_deref())?;
+            let result = commands::cmd_rm(&dir, &meta, force, dry_run)?;
+            let has_errors = !result.errors.is_empty();
+            output(&result, cli.json, commands::format_rm_human)?;
+            if has_errors {
+                std::process::exit(1);
+            }
         }
         Command::Ls => {
             let config = config::load_default_config()?;

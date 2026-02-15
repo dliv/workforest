@@ -5,10 +5,12 @@ mod exec;
 mod init;
 mod ls;
 mod new;
+mod rm;
 mod status;
 
 pub use exec::*;
 pub use init::*;
 pub use ls::*;
 pub use new::*;
+pub use rm::*;
 pub use status::*;

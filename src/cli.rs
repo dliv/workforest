@@ -61,6 +61,12 @@ pub enum Command {
     Rm {
         /// Forest name (or auto-detect from cwd)
         name: Option<String>,
+        /// Force removal of dirty worktrees and unmerged branches
+        #[arg(long)]
+        force: bool,
+        /// Show what would be removed without executing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List all forests
     Ls,
