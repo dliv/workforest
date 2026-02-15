@@ -361,6 +361,7 @@ Currently the config is a singleton — one set of repos, one `worktree_base`. T
 - `git forest init` evolves to create/update templates within the config.
 - Backward compatible: existing single-template configs continue to work (treated as the default template).
 - `git forest config` subcommand for editing config (add-repo, remove-repo, set defaults).
+- **Simplify branch config:** Remove `--username` and `--branch-template`. Replace with `--feature-branch-template` where the user bakes their identity directly into the template (e.g., `--feature-branch-template "dliv/{name}"`). Current `--username` is hidden state that only exists to fill `{user}` in the branch template — the template should be self-contained. Review mode branches (`forest/{name}`) remain hardcoded and don't need a template.
 
 ### Phase 6 — Hardening
 

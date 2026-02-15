@@ -2,36 +2,128 @@
 
 Multi-repo worktree orchestrator. Manages collections of git worktrees ("forests") across multiple repositories for parallel development and PR review workflows.
 
+If your repos *should* be a monorepo but aren't, this tool makes worktrees across all of them feel like one.
+
 Installs as `git-forest`, invoked as `git forest <command>`.
 
 ## Status
 
-Phase 1 complete — read-only commands work. `init`, `new`, and `rm` are stubbed.
+Phase 4 complete. All core commands work: `init`, `new`, `rm`, `ls`, `status`, `exec`. 138 tests.
 
-## Setup
+## Quick Start
 
-Requires [just](https://just.systems/man/en/).
-
-```
-just setup    # configures git hooks
-```
-
-## Build & Test
-
-```
+```sh
+# Build
 just build
-just test
-just check    # fmt + clippy
+
+# Configure repos and worktree base
+git forest init \
+  --username dliv \
+  --repo ~/src/foo-api \
+  --repo ~/src/foo-web \
+  --repo ~/src/foo-infra \
+  --repo ~/src/dev-docs \
+  --base-branch dev \
+  --repo-base-branch dev-docs=main \
+  --worktree-base ~/worktrees
+
+# Create a forest for feature work
+git forest new my-feature --mode feature
+
+# See what you've got
+git forest ls
+git forest status my-feature
+
+# Run a command across all repos
+git forest exec my-feature -- git log --oneline -3
+
+# Clean up when done
+git forest rm my-feature
 ```
 
-## Usage
+## Commands
 
 ```
-git-forest --help
-git-forest ls                    # list all forests
-git-forest status [name]         # git status per repo in a forest
-git-forest exec <name> -- <cmd>  # run command in each repo
-git-forest init                  # not yet implemented
-git-forest new <name>            # not yet implemented
-git-forest rm [name]             # not yet implemented
+git forest init     Configure repos and defaults
+git forest new      Create a forest (worktrees + branches across all repos)
+git forest rm       Remove a forest (worktrees, branches, directory)
+git forest ls       List all forests
+git forest status   Show git status per repo in a forest
+git forest exec     Run a command in each repo of a forest
 ```
+
+All commands support `--json` for structured output.
+
+### `init`
+
+```
+git forest init --username <name> --repo <path> [--repo <path>...] [options]
+
+Options:
+  --worktree-base <path>              Base directory for forests (default: ~/worktrees)
+  --base-branch <branch>              Default base branch (default: dev)
+  --branch-template <tmpl>            Branch naming template (default: {user}/{name})
+  --repo-base-branch <repo=branch>    Per-repo base branch override (repeatable)
+  --force                             Overwrite existing config
+  --show-path                         Print config path and exit
+```
+
+### `new`
+
+```
+git forest new <name> --mode <feature|review> [options]
+
+Options:
+  --branch <branch>                   Override branch for all repos
+  --repo-branch <repo=branch>         Per-repo branch override (repeatable)
+  --no-fetch                          Skip fetching remotes
+  --dry-run                           Show plan without executing
+```
+
+**Feature mode:** All repos get `{user}/{name}` branch off their base branch.
+
+**Review mode:** All repos get `forest/{name}` branch. Use `--repo-branch` to point specific repos at a PR branch.
+
+### `rm`
+
+```
+git forest rm [name] [options]
+
+Options:
+  --force       Force removal of dirty worktrees and unmerged branches
+  --dry-run     Show what would be removed without executing
+```
+
+Best-effort cleanup: removes worktrees, deletes branches we created, removes the forest directory. Continues on individual failures and reports all errors.
+
+### `ls`, `status`, `exec`
+
+```
+git forest ls
+git forest status [name]
+git forest exec <name> -- <cmd> [args...]
+```
+
+`status` and `rm` auto-detect the current forest when run from inside one.
+
+## Development
+
+Requires [just](https://just.systems/man/en/) and [tokei](https://github.com/XAMPPRocky/tokei) (for `just loc`).
+
+```
+just setup    # configure git hooks
+just build    # build
+just test     # run all tests
+just check    # fmt --check + clippy
+just loc      # count lines of code
+```
+
+## Design
+
+See [docs/architecture-decisions.md](docs/architecture-decisions.md) for architectural decisions and the phased build plan.
+
+Key principles:
+- **Agent-drivable first** — all inputs expressible as flags, `--json` on every command
+- **Commands return data, don't print** — typed result structs, formatted at the edge
+- **Plan/execute for mutations** — `new` and `rm` use a plan/execute split with `--dry-run`
+- **Best-effort cleanup** — `rm` continues on failures, accumulates and reports errors
