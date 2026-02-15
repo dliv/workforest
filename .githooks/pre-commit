@@ -1,3 +1,13 @@
 #!/bin/sh
-set -e
-cargo fmt --all -- --check
+set -eu
+
+# Only check staged Rust files (skip docs-only commits, etc.)
+staged_rs="$(git diff --cached --name-only -z --diff-filter=ACMR -- '*.rs')"
+[ -z "$staged_rs" ] && exit 0
+
+command -v rustfmt >/dev/null 2>&1 || {
+  echo "rustfmt not found. Install with: rustup component add rustfmt" >&2
+  exit 1
+}
+
+printf '%s' "$staged_rs" | xargs -0 rustfmt --check
