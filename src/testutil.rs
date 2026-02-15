@@ -169,8 +169,7 @@ impl TestEnv {
             general: GeneralConfig {
                 worktree_base: self.worktree_base(),
                 base_branch: "main".to_string(),
-                branch_template: "{user}/{name}".to_string(),
-                username: "testuser".to_string(),
+                feature_branch_template: "testuser/{name}".to_string(),
             },
             repos,
         }

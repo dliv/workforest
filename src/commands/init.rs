@@ -9,8 +9,7 @@ use crate::paths::expand_tilde;
 pub struct InitInputs {
     pub worktree_base: String,
     pub base_branch: String,
-    pub branch_template: String,
-    pub username: String,
+    pub feature_branch_template: String,
     pub repos: Vec<RepoInput>,
 }
 
@@ -35,16 +34,12 @@ pub struct InitRepoSummary {
 }
 
 pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedConfig> {
-    if inputs.username.is_empty() {
-        bail!("--username is required\nHint: git forest init --username <your-name> --repo <path>");
-    }
-
     if inputs.repos.is_empty() {
-        bail!("at least one --repo is required\nHint: git forest init --username <your-name> --repo <path>");
+        bail!("at least one --repo is required\nHint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
     }
 
-    if !inputs.branch_template.contains("{name}") {
-        bail!("--branch-template must contain {{name}}");
+    if !inputs.feature_branch_template.contains("{name}") {
+        bail!("--feature-branch-template must contain {{name}}");
     }
 
     let worktree_base = expand_tilde(&inputs.worktree_base);
@@ -126,8 +121,7 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedConfig> {
         general: crate::config::GeneralConfig {
             worktree_base,
             base_branch: inputs.base_branch.clone(),
-            branch_template: inputs.branch_template.clone(),
-            username: inputs.username.clone(),
+            feature_branch_template: inputs.feature_branch_template.clone(),
         },
         repos: resolved_repos,
     })
@@ -200,8 +194,7 @@ mod tests {
         InitInputs {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
-            branch_template: "{user}/{name}".to_string(),
-            username: "testuser".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
             repos,
         }
     }
@@ -221,26 +214,6 @@ mod tests {
         assert_eq!(config.repos.len(), 1);
         assert_eq!(config.repos[0].name, "my-repo");
         assert_eq!(config.repos[0].base_branch, "dev");
-        assert_eq!(config.general.username, "testuser");
-    }
-
-    #[test]
-    fn validate_init_missing_username() {
-        let inputs = InitInputs {
-            worktree_base: "/tmp/worktrees".to_string(),
-            base_branch: "dev".to_string(),
-            branch_template: "{user}/{name}".to_string(),
-            username: String::new(),
-            repos: vec![RepoInput {
-                path: "/tmp/foo".to_string(),
-                name: None,
-                base_branch: None,
-            }],
-        };
-
-        let result = validate_init_inputs(&inputs);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("--username"));
     }
 
     #[test]
@@ -303,8 +276,7 @@ mod tests {
         let inputs = InitInputs {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
-            branch_template: "{user}/feature".to_string(),
-            username: "testuser".to_string(),
+            feature_branch_template: "dliv/feature".to_string(),
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -314,7 +286,10 @@ mod tests {
 
         let result = validate_init_inputs(&inputs);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("branch-template"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("feature-branch-template"));
     }
 
     #[test]
@@ -325,8 +300,7 @@ mod tests {
         let inputs = InitInputs {
             worktree_base: "~/worktrees".to_string(),
             base_branch: "dev".to_string(),
-            branch_template: "{user}/{name}".to_string(),
-            username: "testuser".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,

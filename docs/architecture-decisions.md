@@ -30,8 +30,7 @@ Example config:
 [general]
 worktree_base = "~/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "~/src/foo-api"        # name "foo-api" implicit, base_branch "dev" inherited

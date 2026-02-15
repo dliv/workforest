@@ -21,12 +21,9 @@ pub enum Command {
         /// Default base branch for repos
         #[arg(long, default_value = "dev")]
         base_branch: String,
-        /// Branch naming template (must contain {name})
-        #[arg(long, default_value = "{user}/{name}")]
-        branch_template: String,
-        /// Your username for branch templates
+        /// Feature branch naming template (must contain {name}, e.g. "yourname/{name}")
         #[arg(long)]
-        username: Option<String>,
+        feature_branch_template: Option<String>,
         /// Git repo paths to manage (repeatable)
         #[arg(long = "repo")]
         repos: Vec<String>,

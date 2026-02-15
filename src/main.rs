@@ -25,8 +25,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Init {
             worktree_base,
             base_branch,
-            branch_template,
-            username,
+            feature_branch_template,
             repos,
             repo_base_branches,
             force,
@@ -38,8 +37,8 @@ fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            let username = username.unwrap_or_else(|| {
-                eprintln!("error: --username is required\nHint: git forest init --username <your-name> --repo <path>");
+            let feature_branch_template = feature_branch_template.unwrap_or_else(|| {
+                eprintln!("error: --feature-branch-template is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
                 std::process::exit(1);
             });
 
@@ -88,8 +87,7 @@ fn run(cli: Cli) -> Result<()> {
             let inputs = commands::InitInputs {
                 worktree_base,
                 base_branch,
-                branch_template,
-                username,
+                feature_branch_template,
                 repos: repo_inputs,
             };
 

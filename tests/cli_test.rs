@@ -9,12 +9,16 @@ fn help_exits_zero() {
 }
 
 #[test]
-fn init_without_username_shows_hint() {
+fn init_without_feature_branch_template_shows_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("my-repo");
+    create_test_git_repo(&repo_dir);
+
     cargo_bin_cmd!("git-forest")
-        .arg("init")
+        .args(["init", "--repo", repo_dir.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("--username"));
+        .stderr(predicates::str::contains("--feature-branch-template"));
 }
 
 #[test]
@@ -63,8 +67,8 @@ fn init_creates_config() {
     cargo_bin_cmd!("git-forest")
         .args([
             "init",
-            "--username",
-            "testuser",
+            "--feature-branch-template",
+            "testuser/{name}",
             "--repo",
             repo_dir.to_str().unwrap(),
             "--force",
@@ -90,8 +94,8 @@ fn init_force_overwrites() {
         let mut cmd = cargo_bin_cmd!("git-forest");
         cmd.args([
             "init",
-            "--username",
-            "testuser",
+            "--feature-branch-template",
+            "testuser/{name}",
             "--repo",
             repo_dir.to_str().unwrap(),
         ]);
@@ -126,8 +130,8 @@ fn init_json_output() {
         .args([
             "--json",
             "init",
-            "--username",
-            "testuser",
+            "--feature-branch-template",
+            "testuser/{name}",
             "--repo",
             repo_dir.to_str().unwrap(),
             "--force",
@@ -267,8 +271,8 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
     cargo_bin_cmd!("git-forest")
         .args([
             "init",
-            "--username",
-            "testuser",
+            "--feature-branch-template",
+            "testuser/{name}",
             "--repo",
             repo_a.to_str().unwrap(),
             "--repo",

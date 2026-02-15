@@ -71,8 +71,7 @@ fn compute_target_branch(
     repo_name: &str,
     forest_name: &str,
     mode: &ForestMode,
-    branch_template: &str,
-    username: &str,
+    feature_branch_template: &str,
     branch_override: &Option<String>,
     repo_branches: &[(String, String)],
 ) -> String {
@@ -88,9 +87,7 @@ fn compute_target_branch(
 
     // Mode default
     match mode {
-        ForestMode::Feature => branch_template
-            .replace("{user}", username)
-            .replace("{name}", forest_name),
+        ForestMode::Feature => feature_branch_template.replace("{name}", forest_name),
         ForestMode::Review => format!("forest/{}", forest_name),
     }
 }
@@ -223,8 +220,7 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
             &repo.name,
             &inputs.name,
             &inputs.mode,
-            &config.general.branch_template,
-            &config.general.username,
+            &config.general.feature_branch_template,
             &inputs.branch_override,
             &inputs.repo_branches,
         );
@@ -450,13 +446,12 @@ mod tests {
     // --- Branch computation ---
 
     #[test]
-    fn feature_mode_uses_branch_template() {
+    fn feature_mode_uses_feature_branch_template() {
         let branch = compute_target_branch(
             "foo-api",
             "java-84/refactor-auth",
             &ForestMode::Feature,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &None,
             &[],
         );
@@ -469,8 +464,7 @@ mod tests {
             "foo-api",
             "review-sues-dialog",
             &ForestMode::Review,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &None,
             &[],
         );
@@ -484,8 +478,7 @@ mod tests {
             "foo-api",
             "test",
             &ForestMode::Feature,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &override_branch,
             &[],
         );
@@ -493,8 +486,7 @@ mod tests {
             "foo-web",
             "test",
             &ForestMode::Feature,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &override_branch,
             &[],
         );
@@ -509,8 +501,7 @@ mod tests {
             "foo-api",
             "review-pr",
             &ForestMode::Review,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &None,
             &repo_branches,
         );
@@ -518,8 +509,7 @@ mod tests {
             "foo-web",
             "review-pr",
             &ForestMode::Review,
-            "{user}/{name}",
-            "dliv",
+            "dliv/{name}",
             &None,
             &repo_branches,
         );
@@ -585,8 +575,7 @@ mod tests {
             general: GeneralConfig {
                 worktree_base: env.worktree_base(),
                 base_branch: "main".to_string(),
-                branch_template: "{user}/{name}".to_string(),
-                username: "testuser".to_string(),
+                feature_branch_template: "testuser/{name}".to_string(),
             },
             repos: vec![],
         };
@@ -607,8 +596,7 @@ mod tests {
             general: GeneralConfig {
                 worktree_base: env.worktree_base(),
                 base_branch: "main".to_string(),
-                branch_template: "{user}/{name}".to_string(),
-                username: "testuser".to_string(),
+                feature_branch_template: "testuser/{name}".to_string(),
             },
             repos: vec![crate::config::ResolvedRepo {
                 path: PathBuf::from("/nonexistent/repo"),

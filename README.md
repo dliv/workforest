@@ -18,7 +18,7 @@ just build
 
 # Configure repos and worktree base
 git forest init \
-  --username dliv \
+  --feature-branch-template "dliv/{name}" \
   --repo ~/src/foo-api \
   --repo ~/src/foo-web \
   --repo ~/src/foo-infra \
@@ -57,12 +57,12 @@ All commands support `--json` for structured output.
 ### `init`
 
 ```
-git forest init --username <name> --repo <path> [--repo <path>...] [options]
+git forest init --feature-branch-template <tmpl> --repo <path> [--repo <path>...] [options]
 
 Options:
   --worktree-base <path>              Base directory for forests (default: ~/worktrees)
   --base-branch <branch>              Default base branch (default: dev)
-  --branch-template <tmpl>            Branch naming template (default: {user}/{name})
+  --feature-branch-template <tmpl>    Feature branch naming template (must contain {name})
   --repo-base-branch <repo=branch>    Per-repo base branch override (repeatable)
   --force                             Overwrite existing config
   --show-path                         Print config path and exit
@@ -80,7 +80,7 @@ Options:
   --dry-run                           Show plan without executing
 ```
 
-**Feature mode:** All repos get `{user}/{name}` branch off their base branch.
+**Feature mode:** All repos get a branch from the feature branch template (e.g., `dliv/{name}`) off their base branch.
 
 **Review mode:** All repos get `forest/{name}` branch. Use `--repo-branch` to point specific repos at a PR branch.
 

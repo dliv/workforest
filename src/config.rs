@@ -15,8 +15,7 @@ pub struct Config {
 pub struct GeneralConfig {
     pub worktree_base: PathBuf,
     pub base_branch: String,
-    pub branch_template: String,
-    pub username: String,
+    pub feature_branch_template: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,15 +71,14 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
 
     let worktree_base = expand_tilde(raw.general.worktree_base.to_str().unwrap_or(""));
 
-    if !raw.general.branch_template.contains("{name}") {
-        bail!("branch_template must contain {{name}}");
+    if !raw.general.feature_branch_template.contains("{name}") {
+        bail!("feature_branch_template must contain {{name}}");
     }
 
     let general = GeneralConfig {
         worktree_base,
         base_branch: raw.general.base_branch,
-        branch_template: raw.general.branch_template,
-        username: raw.general.username,
+        feature_branch_template: raw.general.feature_branch_template,
     };
 
     let mut repos = Vec::new();
@@ -187,8 +185,7 @@ mod tests {
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo-api"
@@ -206,7 +203,7 @@ name = "foo-web"
             PathBuf::from("/tmp/worktrees")
         );
         assert_eq!(config.general.base_branch, "dev");
-        assert_eq!(config.general.username, "dliv");
+        assert_eq!(config.general.feature_branch_template, "dliv/{name}");
         assert_eq!(config.repos.len(), 2);
         assert_eq!(config.repos[0].name, "foo-api");
         assert_eq!(config.repos[0].remote, "upstream");
@@ -220,8 +217,7 @@ name = "foo-web"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo-api"
@@ -239,8 +235,7 @@ path = "/tmp/src/foo-api"
 [general]
 worktree_base = "~/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo"
@@ -259,8 +254,7 @@ path = "/tmp/src/foo"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "~/src/foo-api"
@@ -278,8 +272,7 @@ path = "~/src/foo-api"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/my-cool-repo"
@@ -294,8 +287,7 @@ path = "/tmp/src/my-cool-repo"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "develop"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo"
@@ -315,8 +307,7 @@ base_branch = "main"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo"
@@ -331,8 +322,7 @@ path = "/tmp/src/foo"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/{name}"
-username = "dliv"
+feature_branch_template = "dliv/{name}"
 
 [[repos]]
 path = "/tmp/src/foo"
@@ -366,14 +356,16 @@ worktree_base = "/tmp/worktrees"
 [general]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-branch_template = "{user}/feature"
-username = "dliv"
+feature_branch_template = "dliv/feature"
 
 [[repos]]
 path = "/tmp/src/foo"
 "#;
         let result = parse_config(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("branch_template"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("feature_branch_template"));
     }
 }
