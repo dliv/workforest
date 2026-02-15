@@ -1,12 +1,13 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::config::{ResolvedConfig, ResolvedRepo};
+use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
 use crate::paths::expand_tilde;
 
 pub struct InitInputs {
+    pub template_name: String,
     pub worktree_base: String,
     pub base_branch: String,
     pub feature_branch_template: String,
@@ -22,6 +23,7 @@ pub struct RepoInput {
 #[derive(Debug, Serialize)]
 pub struct InitResult {
     pub config_path: PathBuf,
+    pub template_name: String,
     pub worktree_base: PathBuf,
     pub repos: Vec<InitRepoSummary>,
 }
@@ -33,13 +35,20 @@ pub struct InitRepoSummary {
     pub base_branch: String,
 }
 
-pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedConfig> {
+pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
     if inputs.repos.is_empty() {
         bail!("at least one --repo is required\nHint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
     }
 
     if !inputs.feature_branch_template.contains("{name}") {
         bail!("--feature-branch-template must contain {{name}}");
+    }
+
+    if inputs.template_name.trim().is_empty() {
+        bail!("template name must not be empty");
+    }
+    if inputs.template_name != inputs.template_name.trim() {
+        bail!("template name must not have leading/trailing whitespace");
     }
 
     let worktree_base = expand_tilde(&inputs.worktree_base);
@@ -117,21 +126,37 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedConfig> {
         "all repo names must be non-empty"
     );
 
-    Ok(ResolvedConfig {
-        general: crate::config::GeneralConfig {
-            worktree_base,
-            base_branch: inputs.base_branch.clone(),
-            feature_branch_template: inputs.feature_branch_template.clone(),
-        },
+    Ok(ResolvedTemplate {
+        worktree_base,
+        base_branch: inputs.base_branch.clone(),
+        feature_branch_template: inputs.feature_branch_template.clone(),
         repos: resolved_repos,
     })
 }
 
 pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<InitResult> {
-    let resolved = validate_init_inputs(&inputs)?;
-    crate::config::write_config_atomic(config_path, &resolved, force)?;
+    let template = validate_init_inputs(&inputs)?;
+    let template_name = inputs.template_name.clone();
 
-    let repos = resolved
+    let mut config = if config_path.exists() {
+        crate::config::load_config(config_path)?
+    } else {
+        ResolvedConfig {
+            default_template: template_name.clone(),
+            templates: BTreeMap::new(),
+        }
+    };
+
+    // Only require --force when overwriting an existing template
+    if config.templates.contains_key(&template_name) && !force {
+        bail!(
+            "template {:?} already exists in config\n  hint: use --force to overwrite, or choose a different name",
+            template_name
+        );
+    }
+
+    let worktree_base = template.worktree_base.clone();
+    let repos: Vec<InitRepoSummary> = template
         .repos
         .iter()
         .map(|r| InitRepoSummary {
@@ -141,9 +166,13 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
         })
         .collect();
 
+    config.templates.insert(template_name.clone(), template);
+    crate::config::write_config_atomic(config_path, &config)?;
+
     Ok(InitResult {
         config_path: config_path.to_path_buf(),
-        worktree_base: resolved.general.worktree_base,
+        template_name,
+        worktree_base,
         repos,
     })
 }
@@ -154,6 +183,7 @@ pub fn format_init_human(result: &InitResult) -> String {
         "Config written to {}",
         result.config_path.display()
     ));
+    lines.push(format!("Template: {}", result.template_name));
     lines.push(format!("Worktree base: {}", result.worktree_base.display()));
     lines.push(format!("Repos ({}): ", result.repos.len()));
     for repo in &result.repos {
@@ -192,6 +222,7 @@ mod tests {
 
     fn make_init_inputs(repos: Vec<RepoInput>) -> InitInputs {
         InitInputs {
+            template_name: "default".to_string(),
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
@@ -210,10 +241,10 @@ mod tests {
             base_branch: None,
         }]);
 
-        let config = validate_init_inputs(&inputs).unwrap();
-        assert_eq!(config.repos.len(), 1);
-        assert_eq!(config.repos[0].name, "my-repo");
-        assert_eq!(config.repos[0].base_branch, "dev");
+        let template = validate_init_inputs(&inputs).unwrap();
+        assert_eq!(template.repos.len(), 1);
+        assert_eq!(template.repos[0].name, "my-repo");
+        assert_eq!(template.repos[0].base_branch, "dev");
     }
 
     #[test]
@@ -274,6 +305,7 @@ mod tests {
         let repo = create_test_git_repo(tmp.path(), "repo");
 
         let inputs = InitInputs {
+            template_name: "default".to_string(),
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "dliv/feature".to_string(),
@@ -298,6 +330,7 @@ mod tests {
         let repo = create_test_git_repo(tmp.path(), "repo");
 
         let inputs = InitInputs {
+            template_name: "default".to_string(),
             worktree_base: "~/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
@@ -308,10 +341,10 @@ mod tests {
             }],
         };
 
-        let config = validate_init_inputs(&inputs).unwrap();
+        let template = validate_init_inputs(&inputs).unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
-            config.general.worktree_base,
+            template.worktree_base,
             PathBuf::from(&home).join("worktrees")
         );
     }
@@ -330,16 +363,18 @@ mod tests {
 
         let result = cmd_init(inputs, &config_path, false).unwrap();
         assert_eq!(result.config_path, config_path);
+        assert_eq!(result.template_name, "default");
         assert_eq!(result.repos.len(), 1);
         assert!(config_path.exists());
 
         // Verify it's valid TOML that can be parsed back
         let loaded = crate::config::load_config(&config_path).unwrap();
-        assert_eq!(loaded.repos[0].name, "my-repo");
+        let tmpl = loaded.resolve_template(None).unwrap();
+        assert_eq!(tmpl.repos[0].name, "my-repo");
     }
 
     #[test]
-    fn cmd_init_force_overwrites() {
+    fn cmd_init_force_overwrites_template() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = create_test_git_repo(tmp.path(), "my-repo");
         let config_path = tmp.path().join("config").join("config.toml");
@@ -358,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_init_without_force_errors_on_existing() {
+    fn cmd_init_without_force_errors_on_existing_template() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = create_test_git_repo(tmp.path(), "my-repo");
         let config_path = tmp.path().join("config").join("config.toml");
@@ -389,5 +424,233 @@ mod tests {
         let result = validate_init_inputs(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    // --- New template-specific tests ---
+
+    #[test]
+    fn init_adds_second_template_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = create_test_git_repo(tmp.path(), "repo-a");
+        let repo_b = create_test_git_repo(tmp.path(), "repo-b");
+        let config_path = tmp.path().join("config").join("config.toml");
+
+        // First template
+        let inputs_a = InitInputs {
+            template_name: "alpha".to_string(),
+            worktree_base: "/tmp/worktrees/alpha".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_a.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_a, &config_path, false).unwrap();
+
+        // Second template — should work without --force
+        let inputs_b = InitInputs {
+            template_name: "beta".to_string(),
+            worktree_base: "/tmp/worktrees/beta".to_string(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_b.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_b, &config_path, false).unwrap();
+
+        // Verify both templates exist
+        let loaded = crate::config::load_config(&config_path).unwrap();
+        assert_eq!(loaded.templates.len(), 2);
+        assert!(loaded.templates.contains_key("alpha"));
+        assert!(loaded.templates.contains_key("beta"));
+    }
+
+    #[test]
+    fn init_first_template_becomes_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo");
+        let config_path = tmp.path().join("config").join("config.toml");
+
+        let inputs = InitInputs {
+            template_name: "my-project".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs, &config_path, false).unwrap();
+
+        let loaded = crate::config::load_config(&config_path).unwrap();
+        assert_eq!(loaded.default_template, "my-project");
+    }
+
+    #[test]
+    fn init_second_template_does_not_change_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = create_test_git_repo(tmp.path(), "repo-a");
+        let repo_b = create_test_git_repo(tmp.path(), "repo-b");
+        let config_path = tmp.path().join("config").join("config.toml");
+
+        let inputs_a = InitInputs {
+            template_name: "first".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_a.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_a, &config_path, false).unwrap();
+
+        let inputs_b = InitInputs {
+            template_name: "second".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_b.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_b, &config_path, false).unwrap();
+
+        let loaded = crate::config::load_config(&config_path).unwrap();
+        assert_eq!(loaded.default_template, "first");
+    }
+
+    #[test]
+    fn init_replaces_existing_template_with_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = create_test_git_repo(tmp.path(), "repo-a");
+        let repo_b = create_test_git_repo(tmp.path(), "repo-b");
+        let config_path = tmp.path().join("config").join("config.toml");
+
+        // Create template "alpha" with repo-a
+        let inputs_a = InitInputs {
+            template_name: "alpha".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_a.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_a, &config_path, false).unwrap();
+
+        // Add template "beta"
+        let inputs_b = InitInputs {
+            template_name: "beta".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_b.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_b, &config_path, false).unwrap();
+
+        // Overwrite "alpha" with repo-b using --force
+        let inputs_replace = InitInputs {
+            template_name: "alpha".to_string(),
+            worktree_base: "/tmp/worktrees/new".to_string(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo_b.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+        cmd_init(inputs_replace, &config_path, true).unwrap();
+
+        let loaded = crate::config::load_config(&config_path).unwrap();
+        assert_eq!(loaded.templates.len(), 2);
+        let alpha = loaded.resolve_template(Some("alpha")).unwrap();
+        assert_eq!(alpha.repos[0].name, "repo-b");
+        assert_eq!(alpha.worktree_base, PathBuf::from("/tmp/worktrees/new"));
+        // beta should be preserved
+        assert!(loaded.templates.contains_key("beta"));
+    }
+
+    #[test]
+    fn init_result_includes_template_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo");
+        let config_path = tmp.path().join("config").join("config.toml");
+
+        let inputs = InitInputs {
+            template_name: "my-project".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+
+        let result = cmd_init(inputs, &config_path, false).unwrap();
+        assert_eq!(result.template_name, "my-project");
+    }
+
+    #[test]
+    fn validate_init_template_name_empty_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo");
+
+        let inputs = InitInputs {
+            template_name: "".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+
+        let result = validate_init_inputs(&inputs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn validate_init_template_name_whitespace_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo");
+
+        let inputs = InitInputs {
+            template_name: " spaces ".to_string(),
+            worktree_base: "/tmp/worktrees".to_string(),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![RepoInput {
+                path: repo.display().to_string(),
+                name: None,
+                base_branch: None,
+            }],
+        };
+
+        let result = validate_init_inputs(&inputs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("whitespace"));
     }
 }

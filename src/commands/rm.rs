@@ -387,10 +387,10 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = env.default_config(&["foo-api", "foo-web"]);
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("plan-basic", ForestMode::Feature);
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
@@ -407,10 +407,10 @@ mod tests {
     fn plan_rm_detects_worktree_exists() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("wt-exists", ForestMode::Feature);
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
@@ -423,10 +423,10 @@ mod tests {
     fn plan_rm_detects_worktree_missing() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("wt-missing", ForestMode::Feature);
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
@@ -443,7 +443,7 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = env.default_config(&["foo-api", "foo-web"]);
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
         // Review mode with exception: foo-web gets an existing branch (branch_created=false)
         let repo = env.repo_path("foo-web");
@@ -451,7 +451,7 @@ mod tests {
 
         let mut inputs = make_new_inputs("branch-created", ForestMode::Review);
         inputs.repo_branches = vec![("foo-web".to_string(), "sue/fix-dialog".to_string())];
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
@@ -468,10 +468,10 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = env.default_config(&["foo-api", "foo-web"]);
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("rm-wt", ForestMode::Feature);
-        let new_result = cmd_new(inputs, &config).unwrap();
+        let new_result = cmd_new(inputs, &tmpl).unwrap();
         let forest_dir = new_result.forest_dir.clone();
 
         assert!(forest_dir.join("foo-api").exists());
@@ -489,12 +489,12 @@ mod tests {
     fn rm_deletes_created_branches() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-branch", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-branch");
+        let forest_dir = tmpl.worktree_base.join("rm-branch");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Verify branch exists before rm
@@ -517,7 +517,7 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = env.default_config(&["foo-api", "foo-web"]);
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
         // Create a local branch in foo-web so it's ExistingLocal (branch_created=false)
         let web_repo = env.repo_path("foo-web");
@@ -525,9 +525,9 @@ mod tests {
 
         let mut inputs = make_new_inputs("rm-skip-branch", ForestMode::Review);
         inputs.repo_branches = vec![("foo-web".to_string(), "sue/fix-dialog".to_string())];
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-skip-branch");
+        let forest_dir = tmpl.worktree_base.join("rm-skip-branch");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
@@ -550,12 +550,12 @@ mod tests {
     fn rm_removes_forest_dir() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-dir", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-dir");
+        let forest_dir = tmpl.worktree_base.join("rm-dir");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         assert!(forest_dir.exists());
@@ -569,12 +569,12 @@ mod tests {
     fn rm_removes_meta_file() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-meta", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-meta");
+        let forest_dir = tmpl.worktree_base.join("rm-meta");
         let meta_path = forest_dir.join(META_FILENAME);
         assert!(meta_path.exists());
 
@@ -589,12 +589,12 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = env.default_config(&["foo-api", "foo-web"]);
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("rm-best-effort", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-best-effort");
+        let forest_dir = tmpl.worktree_base.join("rm-best-effort");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make foo-api dirty so worktree remove fails without --force
@@ -620,12 +620,12 @@ mod tests {
     fn rm_force_removes_dirty_worktree() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-force-dirty", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-force-dirty");
+        let forest_dir = tmpl.worktree_base.join("rm-force-dirty");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make it dirty
@@ -646,12 +646,12 @@ mod tests {
     fn rm_force_deletes_unmerged_branch() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-force-unmerged", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-force-unmerged");
+        let forest_dir = tmpl.worktree_base.join("rm-force-unmerged");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Add a commit to the worktree branch to make it unmerged
@@ -676,12 +676,12 @@ mod tests {
     fn rm_missing_worktree_skips_gracefully() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-missing-wt", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-missing-wt");
+        let forest_dir = tmpl.worktree_base.join("rm-missing-wt");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Prune the worktree from git's perspective and delete the directory
@@ -707,12 +707,12 @@ mod tests {
     fn rm_source_repo_missing_handles_gracefully() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-src-missing", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-src-missing");
+        let forest_dir = tmpl.worktree_base.join("rm-src-missing");
         let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Point source to a nonexistent path
@@ -738,12 +738,12 @@ mod tests {
     fn cmd_rm_dry_run_no_changes() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-dry", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-dry");
+        let forest_dir = tmpl.worktree_base.join("rm-dry");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, true).unwrap();
@@ -759,12 +759,12 @@ mod tests {
     fn cmd_rm_returns_result() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         let inputs = make_new_inputs("rm-result", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = config.general.worktree_base.join("rm-result");
+        let forest_dir = tmpl.worktree_base.join("rm-result");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
@@ -866,23 +866,23 @@ mod tests {
     fn new_then_rm_then_ls_empty() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = env.default_config(&["foo-api"]);
+        let tmpl = env.default_template(&["foo-api"]);
 
         // Create
         let inputs = make_new_inputs("roundtrip", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let ls1 = cmd_ls(&config.general.worktree_base).unwrap();
+        let ls1 = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
         assert_eq!(ls1.forests.len(), 1);
 
         // Remove
-        let forest_dir = config.general.worktree_base.join("roundtrip");
+        let forest_dir = tmpl.worktree_base.join("roundtrip");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
         let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
         assert!(rm_result.errors.is_empty());
 
         // ls should show empty
-        let ls2 = cmd_ls(&config.general.worktree_base).unwrap();
+        let ls2 = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
         assert_eq!(ls2.forests.len(), 0);
     }
 }

@@ -15,6 +15,9 @@ pub struct Cli {
 pub enum Command {
     /// Initialize git-forest configuration
     Init {
+        /// Template name to create or update
+        #[arg(long, default_value = "default")]
+        template: String,
         /// Base directory for worktrees
         #[arg(long, default_value = "~/worktrees")]
         worktree_base: String,
@@ -30,7 +33,7 @@ pub enum Command {
         /// Per-repo base branch override (format: repo-name=branch, repeatable)
         #[arg(long = "repo-base-branch")]
         repo_base_branches: Vec<String>,
-        /// Overwrite existing config file
+        /// Overwrite existing template by the same name
         #[arg(long)]
         force: bool,
         /// Print config path and exit
@@ -44,6 +47,9 @@ pub enum Command {
         /// Mode: feature or review
         #[arg(long)]
         mode: ForestMode,
+        /// Template to use (default: from config's default_template)
+        #[arg(long)]
+        template: Option<String>,
         /// Override default branch for all repos
         #[arg(long)]
         branch: Option<String>,

@@ -1,10 +1,11 @@
 #![cfg(test)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-use crate::config::{GeneralConfig, RepoConfig, ResolvedConfig, ResolvedRepo};
+use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
 use chrono::{DateTime, Utc};
 
@@ -83,24 +84,6 @@ impl TestEnv {
         self.dir.path().join("src").join(name)
     }
 
-    pub fn write_config(&self, config: &ResolvedConfig) {
-        let raw = crate::config::Config {
-            general: config.general.clone(),
-            repos: config
-                .repos
-                .iter()
-                .map(|r| RepoConfig {
-                    path: r.path.clone(),
-                    name: Some(r.name.clone()),
-                    base_branch: Some(r.base_branch.clone()),
-                    remote: Some(r.remote.clone()),
-                })
-                .collect(),
-        };
-        let content = toml::to_string_pretty(&raw).expect("failed to serialize config");
-        std::fs::write(self.config_path(), content).expect("failed to write config");
-    }
-
     /// Creates a bare repo + a regular repo with the bare as `origin`.
     /// Runs `git fetch origin` after setup so remote-tracking refs exist.
     /// Returns the path to the regular (non-bare) repo.
@@ -154,7 +137,8 @@ impl TestEnv {
         repo_path
     }
 
-    pub fn default_config(&self, repo_names: &[&str]) -> ResolvedConfig {
+    /// Returns a ResolvedTemplate with repos at the given names, using this env's worktree_base.
+    pub fn default_template(&self, repo_names: &[&str]) -> ResolvedTemplate {
         let repos = repo_names
             .iter()
             .map(|name| ResolvedRepo {
@@ -165,13 +149,22 @@ impl TestEnv {
             })
             .collect();
 
-        ResolvedConfig {
-            general: GeneralConfig {
-                worktree_base: self.worktree_base(),
-                base_branch: "main".to_string(),
-                feature_branch_template: "testuser/{name}".to_string(),
-            },
+        ResolvedTemplate {
+            worktree_base: self.worktree_base(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
             repos,
+        }
+    }
+
+    /// Returns a ResolvedConfig with a single "default" template wrapping the given repos.
+    pub fn default_config(&self, repo_names: &[&str]) -> ResolvedConfig {
+        let tmpl = self.default_template(repo_names);
+        let mut templates = BTreeMap::new();
+        templates.insert("default".to_string(), tmpl);
+        ResolvedConfig {
+            default_template: "default".to_string(),
+            templates,
         }
     }
 }

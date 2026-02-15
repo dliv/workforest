@@ -78,10 +78,19 @@ pub fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, ForestMeta
     Ok(None)
 }
 
-pub fn resolve_forest(worktree_base: &Path, name: Option<&str>) -> Result<(PathBuf, ForestMeta)> {
+pub fn resolve_forest_multi(
+    worktree_bases: &[&Path],
+    name: Option<&str>,
+) -> Result<(PathBuf, ForestMeta)> {
     match name {
-        Some(n) => find_forest(worktree_base, n)?
-            .ok_or_else(|| anyhow::anyhow!("forest '{}' not found", n)),
+        Some(n) => {
+            for base in worktree_bases {
+                if let Some(found) = find_forest(base, n)? {
+                    return Ok(found);
+                }
+            }
+            Err(anyhow::anyhow!("forest '{}' not found", n))
+        }
         None => {
             let cwd = std::env::current_dir()?;
             detect_current_forest(&cwd)?
@@ -210,5 +219,40 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = detect_current_forest(tmp.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_forest_multi_finds_across_bases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_a = tmp.path().join("base-a");
+        let base_b = tmp.path().join("base-b");
+
+        // Put forest only in base_b
+        write_test_meta(
+            &base_b.join("my-feature"),
+            "my-feature",
+            ForestMode::Feature,
+        );
+        // base_a exists but is empty
+        std::fs::create_dir_all(&base_a).unwrap();
+
+        let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
+        let (path, meta) = resolve_forest_multi(&bases, Some("my-feature")).unwrap();
+        assert_eq!(meta.name, "my-feature");
+        assert_eq!(path, base_b.join("my-feature"));
+    }
+
+    #[test]
+    fn resolve_forest_multi_not_found_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_a = tmp.path().join("base-a");
+        let base_b = tmp.path().join("base-b");
+        std::fs::create_dir_all(&base_a).unwrap();
+        std::fs::create_dir_all(&base_b).unwrap();
+
+        let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
+        let result = resolve_forest_multi(&bases, Some("nonexistent"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

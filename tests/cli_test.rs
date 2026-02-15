@@ -623,3 +623,104 @@ fn rm_force_flag() {
 
     drop(tmp);
 }
+
+// --- multi-template integration tests ---
+
+#[test]
+fn init_with_template_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("my-repo");
+    create_test_git_repo(&repo_dir);
+
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--template",
+            "my-project",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo_dir.to_str().unwrap(),
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Template: my-project"));
+
+    drop(tmp);
+}
+
+#[test]
+fn new_with_template_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    let repo_a = create_repo_with_remote(tmp.path(), "alpha-api");
+    let repo_b = create_repo_with_remote(tmp.path(), "beta-api");
+    let wt_base = tmp.path().join("worktrees");
+
+    // Create template "alpha" with alpha-api
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--template",
+            "alpha",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo_a.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            wt_base.to_str().unwrap(),
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // Add template "beta" with beta-api
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--template",
+            "beta",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo_b.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            wt_base.to_str().unwrap(),
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // Create forest using --template beta → should only have beta-api
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "new",
+            "beta-feature",
+            "--mode",
+            "feature",
+            "--template",
+            "beta",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("beta-api"));
+
+    // Forest should exist with only beta-api worktree
+    let forest_dir = wt_base.join("beta-feature");
+    assert!(forest_dir.join("beta-api").exists());
+    assert!(!forest_dir.join("alpha-api").exists());
+
+    drop(tmp);
+}

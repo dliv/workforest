@@ -23,6 +23,7 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init {
+            template,
             worktree_base,
             base_branch,
             feature_branch_template,
@@ -85,6 +86,7 @@ fn run(cli: Cli) -> Result<()> {
             }
 
             let inputs = commands::InitInputs {
+                template_name: template,
                 worktree_base,
                 base_branch,
                 feature_branch_template,
@@ -97,12 +99,14 @@ fn run(cli: Cli) -> Result<()> {
         Command::New {
             name,
             mode,
+            template,
             branch,
             repo_branches,
             no_fetch,
             dry_run,
         } => {
             let config = config::load_default_config()?;
+            let tmpl = config.resolve_template(template.as_deref())?;
 
             // Parse --repo-branch strings ("repo=branch") into tuples
             let mut parsed_repo_branches = Vec::new();
@@ -129,7 +133,7 @@ fn run(cli: Cli) -> Result<()> {
                 dry_run,
             };
 
-            let result = commands::cmd_new(inputs, &config)?;
+            let result = commands::cmd_new(inputs, tmpl)?;
             output(&result, cli.json, commands::format_new_human)?;
         }
         Command::Rm {
@@ -138,8 +142,8 @@ fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => {
             let config = config::load_default_config()?;
-            let (dir, meta) =
-                forest::resolve_forest(&config.general.worktree_base, name.as_deref())?;
+            let bases = config.all_worktree_bases();
+            let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
             let result = commands::cmd_rm(&dir, &meta, force, dry_run)?;
             let has_errors = !result.errors.is_empty();
             output(&result, cli.json, commands::format_rm_human)?;
@@ -149,20 +153,21 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Ls => {
             let config = config::load_default_config()?;
-            let result = commands::cmd_ls(&config.general.worktree_base)?;
+            let bases = config.all_worktree_bases();
+            let result = commands::cmd_ls(&bases)?;
             output(&result, cli.json, commands::format_ls_human)?;
         }
         Command::Status { name } => {
             let config = config::load_default_config()?;
-            let (dir, meta) =
-                forest::resolve_forest(&config.general.worktree_base, name.as_deref())?;
+            let bases = config.all_worktree_bases();
+            let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
             let result = commands::cmd_status(&dir, &meta)?;
             output(&result, cli.json, commands::format_status_human)?;
         }
         Command::Exec { name, cmd } => {
             let config = config::load_default_config()?;
-            let (dir, meta) =
-                forest::resolve_forest(&config.general.worktree_base, Some(name.as_str()))?;
+            let bases = config.all_worktree_bases();
+            let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
             let result = commands::cmd_exec(&dir, &meta, &cmd)?;
             let has_failures = !result.failures.is_empty();
             output(&result, cli.json, commands::format_exec_human)?;

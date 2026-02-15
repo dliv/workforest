@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::ResolvedConfig;
+use crate::config::ResolvedTemplate;
 use crate::git::ref_exists;
 use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
 use crate::paths::{forest_dir, sanitize_forest_name};
@@ -110,7 +110,7 @@ fn validate_branch_name(branch: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<ForestPlan> {
+pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<ForestPlan> {
     // Validate forest name
     if inputs.name.is_empty() || inputs.name == "." || inputs.name == ".." {
         bail!(
@@ -126,8 +126,8 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
         );
     }
 
-    // Validate config has repos
-    if config.repos.is_empty() {
+    // Validate template has repos
+    if tmpl.repos.is_empty() {
         bail!("no repos configured\n  hint: run `git forest init --repo <path>` to add repos");
     }
 
@@ -144,12 +144,12 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
         }
     }
 
-    // Validate --repo-branch keys: all match config repos
+    // Validate --repo-branch keys: all match template repos
     {
-        let known_names: HashSet<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
+        let known_names: HashSet<&str> = tmpl.repos.iter().map(|r| r.name.as_str()).collect();
         for (repo_name, _) in &inputs.repo_branches {
             if !known_names.contains(repo_name.as_str()) {
-                let known: Vec<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
+                let known: Vec<&str> = tmpl.repos.iter().map(|r| r.name.as_str()).collect();
                 bail!(
                     "unknown repo: {}\n  hint: known repos: {}",
                     repo_name,
@@ -160,11 +160,11 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
     }
 
     // Compute forest directory
-    let fdir = forest_dir(&config.general.worktree_base, &inputs.name);
+    let fdir = forest_dir(&tmpl.worktree_base, &inputs.name);
 
     // Create worktree_base if it doesn't exist (match discover_forests leniency)
-    if !config.general.worktree_base.exists() {
-        std::fs::create_dir_all(&config.general.worktree_base)?;
+    if !tmpl.worktree_base.exists() {
+        std::fs::create_dir_all(&tmpl.worktree_base)?;
     }
 
     // Check for directory/name collision
@@ -176,7 +176,7 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
     }
     // Also check for name collision via meta scan
     if let Some((existing_dir, existing_meta)) =
-        crate::forest::find_forest(&config.general.worktree_base, &inputs.name)?
+        crate::forest::find_forest(&tmpl.worktree_base, &inputs.name)?
     {
         bail!(
             "forest name {:?} collides with existing forest {:?} at {}\n  hint: choose a different name",
@@ -187,7 +187,7 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
     }
 
     // Validate source repos exist and branch names
-    for repo in &config.repos {
+    for repo in &tmpl.repos {
         if !repo.path.is_dir() {
             bail!(
                 "source repo not found: {}\n  hint: check that the path exists, or update config with `git forest init --force`",
@@ -199,12 +199,12 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
     // Validate all branch names (global override, per-repo overrides, and computed defaults)
     if let Some(ref branch) = inputs.branch_override {
         // Validate against all remotes — use first repo's remote as representative
-        if let Some(repo) = config.repos.first() {
+        if let Some(repo) = tmpl.repos.first() {
             validate_branch_name(branch, &repo.remote)?;
         }
     }
     for (repo_name, branch) in &inputs.repo_branches {
-        let remote = config
+        let remote = tmpl
             .repos
             .iter()
             .find(|r| r.name == *repo_name)
@@ -215,12 +215,12 @@ pub fn plan_forest(inputs: &NewInputs, config: &ResolvedConfig) -> Result<Forest
 
     // Build repo plans
     let mut repo_plans = Vec::new();
-    for repo in &config.repos {
+    for repo in &tmpl.repos {
         let branch = compute_target_branch(
             &repo.name,
             &inputs.name,
             &inputs.mode,
-            &config.general.feature_branch_template,
+            &tmpl.feature_branch_template,
             &inputs.branch_override,
             &inputs.repo_branches,
         );
@@ -374,17 +374,17 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     Ok(plan_to_result(plan, false))
 }
 
-pub fn cmd_new(inputs: NewInputs, config: &ResolvedConfig) -> Result<NewResult> {
+pub fn cmd_new(inputs: NewInputs, tmpl: &ResolvedTemplate) -> Result<NewResult> {
     // Fetch unless --no-fetch
     if !inputs.no_fetch {
-        for repo in &config.repos {
+        for repo in &tmpl.repos {
             if repo.path.is_dir() {
                 crate::git::git(&repo.path, &["fetch", &repo.remote])?;
             }
         }
     }
 
-    let plan = plan_forest(&inputs, config)?;
+    let plan = plan_forest(&inputs, tmpl)?;
 
     if inputs.dry_run {
         return Ok(plan_to_result(&plan, true));
@@ -424,7 +424,7 @@ pub fn format_new_human(result: &NewResult) -> String {
 mod tests {
     use super::*;
     use crate::commands::cmd_ls;
-    use crate::config::GeneralConfig;
+    use crate::config::{ResolvedRepo, ResolvedTemplate};
     use crate::testutil::TestEnv;
     use std::path::PathBuf;
 
@@ -439,8 +439,8 @@ mod tests {
         }
     }
 
-    fn make_config_with_repos(env: &TestEnv, repo_names: &[&str]) -> ResolvedConfig {
-        env.default_config(repo_names)
+    fn make_template_with_repos(env: &TestEnv, repo_names: &[&str]) -> ResolvedTemplate {
+        env.default_template(repo_names)
     }
 
     // --- Branch computation ---
@@ -523,11 +523,11 @@ mod tests {
     fn plan_empty_name_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
         let mut inputs = make_new_inputs("", ForestMode::Feature);
         inputs.no_fetch = true;
 
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -539,11 +539,11 @@ mod tests {
     fn plan_dot_name_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         for name in &[".", ".."] {
             let inputs = make_new_inputs(name, ForestMode::Feature);
-            let result = plan_forest(&inputs, &config);
+            let result = plan_forest(&inputs, &tmpl);
             assert!(result.is_err(), "expected error for name {:?}", name);
             assert!(result
                 .unwrap_err()
@@ -556,14 +556,14 @@ mod tests {
     fn plan_forest_dir_collision_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         // Pre-create the forest directory
-        let fdir = forest_dir(&config.general.worktree_base, "my-feature");
+        let fdir = forest_dir(&tmpl.worktree_base, "my-feature");
         std::fs::create_dir_all(&fdir).unwrap();
 
         let inputs = make_new_inputs("my-feature", ForestMode::Feature);
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -571,17 +571,15 @@ mod tests {
     #[test]
     fn plan_empty_config_repos_errors() {
         let env = TestEnv::new();
-        let config = ResolvedConfig {
-            general: GeneralConfig {
-                worktree_base: env.worktree_base(),
-                base_branch: "main".to_string(),
-                feature_branch_template: "testuser/{name}".to_string(),
-            },
+        let tmpl = ResolvedTemplate {
+            worktree_base: env.worktree_base(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![],
         };
 
         let inputs = make_new_inputs("test", ForestMode::Feature);
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -592,12 +590,10 @@ mod tests {
     #[test]
     fn plan_source_repo_missing_errors() {
         let env = TestEnv::new();
-        let config = ResolvedConfig {
-            general: GeneralConfig {
-                worktree_base: env.worktree_base(),
-                base_branch: "main".to_string(),
-                feature_branch_template: "testuser/{name}".to_string(),
-            },
+        let tmpl = ResolvedTemplate {
+            worktree_base: env.worktree_base(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![crate::config::ResolvedRepo {
                 path: PathBuf::from("/nonexistent/repo"),
                 name: "missing".to_string(),
@@ -607,7 +603,7 @@ mod tests {
         };
 
         let inputs = make_new_inputs("test", ForestMode::Feature);
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -619,12 +615,12 @@ mod tests {
     fn repo_branch_override_unknown_repo_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let mut inputs = make_new_inputs("test", ForestMode::Feature);
         inputs.repo_branches = vec![("nonexistent".to_string(), "branch".to_string())];
 
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown repo"), "error: {}", err);
@@ -635,7 +631,7 @@ mod tests {
     fn duplicate_repo_branch_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let mut inputs = make_new_inputs("test", ForestMode::Feature);
         inputs.repo_branches = vec![
@@ -643,7 +639,7 @@ mod tests {
             ("foo-api".to_string(), "branch-b".to_string()),
         ];
 
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -655,12 +651,12 @@ mod tests {
     fn plan_ambiguous_branch_refs_prefix_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let mut inputs = make_new_inputs("test", ForestMode::Feature);
         inputs.branch_override = Some("refs/heads/my-branch".to_string());
 
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -672,12 +668,12 @@ mod tests {
     fn plan_ambiguous_branch_remote_prefix_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let mut inputs = make_new_inputs("test", ForestMode::Feature);
         inputs.branch_override = Some("origin/my-branch".to_string());
 
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -690,11 +686,11 @@ mod tests {
         let env = TestEnv::new();
         // create_repo_with_remote sets up origin/main. Set base_branch to "dev" (doesn't exist).
         env.create_repo_with_remote("foo-api");
-        let mut config = make_config_with_repos(&env, &["foo-api"]);
-        config.repos[0].base_branch = "dev".to_string();
+        let mut tmpl = make_template_with_repos(&env, &["foo-api"]);
+        tmpl.repos[0].base_branch = "dev".to_string();
 
         let inputs = make_new_inputs("test", ForestMode::Feature);
-        let result = plan_forest(&inputs, &config);
+        let result = plan_forest(&inputs, &tmpl);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("origin/dev not found"), "error: {}", err);
@@ -709,10 +705,10 @@ mod tests {
         // Create a local branch
         crate::git::git(&repo, &["branch", "testuser/my-feature"]).unwrap();
 
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
         let inputs = make_new_inputs("my-feature", ForestMode::Feature);
 
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
         assert_eq!(plan.repo_plans.len(), 1);
         assert!(matches!(
             plan.repo_plans[0].checkout,
@@ -731,10 +727,10 @@ mod tests {
         crate::git::git(&repo, &["branch", "-D", "testuser/my-feature"]).unwrap();
         crate::git::git(&repo, &["fetch", "origin"]).unwrap();
 
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
         let inputs = make_new_inputs("my-feature", ForestMode::Feature);
 
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
         assert_eq!(plan.repo_plans.len(), 1);
         assert!(matches!(
             plan.repo_plans[0].checkout,
@@ -747,11 +743,11 @@ mod tests {
     fn plan_resolves_new_branch() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let inputs = make_new_inputs("brand-new-feature", ForestMode::Feature);
 
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
         assert_eq!(plan.repo_plans.len(), 1);
         assert!(matches!(
             plan.repo_plans[0].checkout,
@@ -767,10 +763,10 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = make_config_with_repos(&env, &["foo-api", "foo-web"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("java-84/refactor-auth", ForestMode::Feature);
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
 
         assert_eq!(plan.forest_name, "java-84/refactor-auth");
         assert_eq!(plan.mode, ForestMode::Feature);
@@ -788,12 +784,12 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = make_config_with_repos(&env, &["foo-api", "foo-web"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api", "foo-web"]);
 
         let mut inputs = make_new_inputs("review-sues-dialog", ForestMode::Review);
         inputs.repo_branches = vec![("foo-web".to_string(), "sue/fix-dialog".to_string())];
 
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
 
         assert_eq!(plan.repo_plans.len(), 2);
         // foo-api gets the default review branch
@@ -809,10 +805,10 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = make_config_with_repos(&env, &["foo-api", "foo-web"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("exec-test", ForestMode::Feature);
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
         let result = execute_plan(&plan).unwrap();
 
         assert_eq!(result.repos.len(), 2);
@@ -831,10 +827,10 @@ mod tests {
     fn execute_meta_matches_plan() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let inputs = make_new_inputs("meta-test", ForestMode::Feature);
-        let plan = plan_forest(&inputs, &config).unwrap();
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
         execute_plan(&plan).unwrap();
 
         let meta_path = plan.forest_dir.join(META_FILENAME);
@@ -856,10 +852,10 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = make_config_with_repos(&env, &["foo-api", "foo-web"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api", "foo-web"]);
 
         let inputs = make_new_inputs("e2e-feature", ForestMode::Feature);
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         assert_eq!(result.forest_name, "e2e-feature");
         assert_eq!(result.mode, ForestMode::Feature);
@@ -874,12 +870,12 @@ mod tests {
     fn cmd_new_dry_run_does_not_create() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let mut inputs = make_new_inputs("dry-run-test", ForestMode::Feature);
         inputs.dry_run = true;
 
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         assert!(result.dry_run);
         assert_eq!(result.repos.len(), 1);
@@ -892,12 +888,12 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let config = make_config_with_repos(&env, &["foo-api", "foo-web"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api", "foo-web"]);
 
         let mut inputs = make_new_inputs("review-test", ForestMode::Review);
         inputs.repo_branches = vec![("foo-web".to_string(), "sue/fix-dialog".to_string())];
 
-        let result = cmd_new(inputs, &config).unwrap();
+        let result = cmd_new(inputs, &tmpl).unwrap();
 
         assert_eq!(result.repos.len(), 2);
         assert_eq!(result.repos[0].branch, "forest/review-test");
@@ -908,29 +904,73 @@ mod tests {
     fn cmd_new_duplicate_forest_name_errors() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         // First create succeeds
         let inputs = make_new_inputs("dup-test", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
         // Second create should fail
         let inputs2 = make_new_inputs("dup-test", ForestMode::Feature);
-        let result = cmd_new(inputs2, &config);
+        let result = cmd_new(inputs2, &tmpl);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn new_with_explicit_template() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("alpha-api");
+        env.create_repo_with_remote("beta-api");
+
+        // Template "alpha" has alpha-api, template "beta" has beta-api
+        let tmpl_alpha = ResolvedTemplate {
+            worktree_base: env.worktree_base(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![ResolvedRepo {
+                path: env.repo_path("alpha-api"),
+                name: "alpha-api".to_string(),
+                base_branch: "main".to_string(),
+                remote: "origin".to_string(),
+            }],
+        };
+
+        let tmpl_beta = ResolvedTemplate {
+            worktree_base: env.worktree_base(),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos: vec![ResolvedRepo {
+                path: env.repo_path("beta-api"),
+                name: "beta-api".to_string(),
+                base_branch: "main".to_string(),
+                remote: "origin".to_string(),
+            }],
+        };
+
+        // Using tmpl_alpha creates worktrees only for alpha-api
+        let inputs = make_new_inputs("alpha-feature", ForestMode::Feature);
+        let result = cmd_new(inputs, &tmpl_alpha).unwrap();
+        assert_eq!(result.repos.len(), 1);
+        assert_eq!(result.repos[0].name, "alpha-api");
+
+        // Using tmpl_beta creates worktrees only for beta-api
+        let inputs = make_new_inputs("beta-feature", ForestMode::Feature);
+        let result = cmd_new(inputs, &tmpl_beta).unwrap();
+        assert_eq!(result.repos.len(), 1);
+        assert_eq!(result.repos[0].name, "beta-api");
     }
 
     #[test]
     fn ls_shows_new_forest() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let config = make_config_with_repos(&env, &["foo-api"]);
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         let inputs = make_new_inputs("ls-test", ForestMode::Feature);
-        cmd_new(inputs, &config).unwrap();
+        cmd_new(inputs, &tmpl).unwrap();
 
-        let ls_result = cmd_ls(&config.general.worktree_base).unwrap();
+        let ls_result = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
         assert_eq!(ls_result.forests.len(), 1);
         assert_eq!(ls_result.forests[0].name, "ls-test");
         assert_eq!(ls_result.forests[0].mode, ForestMode::Feature);

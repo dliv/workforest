@@ -27,8 +27,11 @@ pub struct BranchCount {
     pub count: usize,
 }
 
-pub fn cmd_ls(worktree_base: &Path) -> Result<LsResult> {
-    let mut forests = discover_forests(worktree_base)?;
+pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
+    let mut forests = Vec::new();
+    for base in worktree_bases {
+        forests.extend(discover_forests(base)?);
+    }
     forests.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     let summaries = forests.iter().map(summarize_forest).collect();
@@ -196,13 +199,13 @@ mod tests {
     #[test]
     fn cmd_ls_empty_worktree_base() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = cmd_ls(tmp.path()).unwrap();
+        let result = cmd_ls(&[tmp.path()]).unwrap();
         assert!(result.forests.is_empty());
     }
 
     #[test]
     fn cmd_ls_nonexistent_dir() {
-        let result = cmd_ls(Path::new("/nonexistent/path")).unwrap();
+        let result = cmd_ls(&[Path::new("/nonexistent/path")]).unwrap();
         assert!(result.forests.is_empty());
     }
 
@@ -237,7 +240,7 @@ mod tests {
         meta_a.write(&dir_a.join(".forest-meta.toml")).unwrap();
         meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
 
-        let result = cmd_ls(base).unwrap();
+        let result = cmd_ls(&[base]).unwrap();
         assert_eq!(result.forests.len(), 2);
 
         let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
@@ -261,6 +264,81 @@ mod tests {
             .unwrap();
         assert_eq!(review_pr.mode, ForestMode::Review);
         assert_eq!(review_pr.branch_summary.len(), 2);
+    }
+
+    #[test]
+    fn cmd_ls_scans_multiple_worktree_bases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_a = tmp.path().join("base-a");
+        let base_b = tmp.path().join("base-b");
+
+        // Write forests into separate base directories
+        let meta_a = make_meta(
+            "forest-alpha",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/alpha")],
+        );
+        let meta_b = make_meta(
+            "forest-beta",
+            Utc::now(),
+            ForestMode::Review,
+            vec![make_repo("web", "forest/beta")],
+        );
+
+        let dir_a = base_a.join("forest-alpha");
+        let dir_b = base_b.join("forest-beta");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        meta_a.write(&dir_a.join(".forest-meta.toml")).unwrap();
+        meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
+
+        // Scanning both bases should find both forests
+        let result = cmd_ls(&[base_a.as_path(), base_b.as_path()]).unwrap();
+        assert_eq!(result.forests.len(), 2);
+        let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"forest-alpha"));
+        assert!(names.contains(&"forest-beta"));
+    }
+
+    #[test]
+    fn cmd_ls_nested_bases_no_cross_contamination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_outer = tmp.path().join("worktrees");
+        let base_inner = base_outer.join("acme");
+
+        // Forest in outer base
+        let meta_outer = make_meta(
+            "outer-forest",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/outer")],
+        );
+        let dir_outer = base_outer.join("outer-forest");
+        std::fs::create_dir_all(&dir_outer).unwrap();
+        meta_outer
+            .write(&dir_outer.join(".forest-meta.toml"))
+            .unwrap();
+
+        // Forest in inner (nested) base
+        let meta_inner = make_meta(
+            "inner-forest",
+            Utc::now(),
+            ForestMode::Review,
+            vec![make_repo("web", "forest/inner")],
+        );
+        let dir_inner = base_inner.join("inner-forest");
+        std::fs::create_dir_all(&dir_inner).unwrap();
+        meta_inner
+            .write(&dir_inner.join(".forest-meta.toml"))
+            .unwrap();
+
+        // Scanning both bases: each finds only its direct children, no duplicates
+        let result = cmd_ls(&[base_outer.as_path(), base_inner.as_path()]).unwrap();
+        assert_eq!(result.forests.len(), 2);
+        let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"outer-forest"));
+        assert!(names.contains(&"inner-forest"));
     }
 
     #[test]
