@@ -28,6 +28,7 @@ fn run(cli: Cli) -> Result<()> {
             branch_template,
             username,
             repos,
+            repo_base_branches,
             force,
             show_path,
         } => {
@@ -42,14 +43,47 @@ fn run(cli: Cli) -> Result<()> {
                 std::process::exit(1);
             });
 
+            // Parse --repo-base-branch strings ("repo=branch") into a lookup
+            let mut base_branch_overrides = std::collections::HashMap::new();
+            for rbb in repo_base_branches {
+                match rbb.split_once('=') {
+                    Some((repo, branch)) => {
+                        base_branch_overrides.insert(repo.to_string(), branch.to_string());
+                    }
+                    None => {
+                        bail!(
+                            "invalid --repo-base-branch format: {:?}\n  hint: use --repo-base-branch repo-name=branch",
+                            rbb
+                        );
+                    }
+                }
+            }
+
             let repo_inputs = repos
                 .into_iter()
-                .map(|r| commands::RepoInput {
-                    path: r,
-                    name: None,
-                    base_branch: None,
+                .map(|r| {
+                    // Derive name from path for base_branch lookup
+                    let name = std::path::Path::new(&r)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let repo_base = base_branch_overrides.remove(&name);
+                    commands::RepoInput {
+                        path: r,
+                        name: None,
+                        base_branch: repo_base,
+                    }
                 })
                 .collect();
+
+            // Warn about unmatched --repo-base-branch keys
+            if !base_branch_overrides.is_empty() {
+                let unknown: Vec<&str> = base_branch_overrides.keys().map(|k| k.as_str()).collect();
+                bail!(
+                    "unknown repo(s) in --repo-base-branch: {}\n  hint: repo names are derived from the last path segment of --repo",
+                    unknown.join(", ")
+                );
+            }
 
             let inputs = commands::InitInputs {
                 worktree_base,

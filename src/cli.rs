@@ -30,6 +30,9 @@ pub enum Command {
         /// Git repo paths to manage (repeatable)
         #[arg(long = "repo")]
         repos: Vec<String>,
+        /// Per-repo base branch override (format: repo-name=branch, repeatable)
+        #[arg(long = "repo-base-branch")]
+        repo_base_branches: Vec<String>,
         /// Overwrite existing config file
         #[arg(long)]
         force: bool,
