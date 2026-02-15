@@ -371,6 +371,7 @@ Currently the config is a singleton — one set of repos, one `worktree_base`. T
 - Auto-detect current forest when inside one (for `rm`, already works for `status`).
 - `git forest path <name>` — print forest path for shell integration.
 - Improve error messages and edge case handling.
+- **Bug: `rm` partial failure leaves orphaned directory.** When `rm` without `--force` fails on a worktree, it still removes the meta file, so a follow-up `rm --force` can't find the forest. Fix: don't remove meta until all worktrees are handled, or re-write a partial meta with remaining repos. Add a test: `rm` partial failure then `rm --force` should recover.
 - `--verbose` flag for debugging.
 - `--yes` flag for non-interactive use (skip confirmations).
 - Detect dirty worktrees and warn before `rm`.
