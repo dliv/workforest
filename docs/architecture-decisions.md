@@ -338,7 +338,7 @@ Uses plan/execute pattern (Decision 9): `plan_forest()` returns `Vec<RepoAction>
 **3c — Polish:**
 - Better error messages for common failures (branch exists in another worktree, etc.).
 
-### Phase 4 — `rm <name>`
+### Phase 4 — `rm <name>` (COMPLETE)
 
 **Goal:** Clean up forests safely.
 
@@ -347,19 +347,43 @@ Uses plan/execute pattern (Decision 9): `plan_forest()` returns `Vec<RepoAction>
 - Handle partial forests gracefully.
 - Uses plan/execute pattern (Decision 9): `--dry-run` to preview what would be deleted.
 - `--force` flag for destructive operations.
+- 138 tests (113 unit + 25 integration).
 
-### Phase 5 — Hardening & UX
+### Phase 5 — Multi-Template Config
 
-**Goal:** Polish for daily use. Human-friendly layer on top of agent-friendly core.
+**Goal:** Support multiple repo groups ("templates") so a developer can manage more than one faux-monorepo on a single machine.
 
-- Interactive wizard for `init` using `dialoguer` (deferred from Phase 2).
-- Interactive prompts for `new` (mode + exceptions flow).
+Currently the config is a singleton — one set of repos, one `worktree_base`. This is like git only allowing one repo per machine. A developer with opencop-* repos and a separate product's repos needs separate templates.
+
+- Named templates (e.g., `[template.opencop]`, `[template.acme]`), each with its own repos and defaults.
+- Default template: when `--template` is omitted, use the default (e.g., `default_template = "opencop"`).
+- `git forest new <name> --template acme` to create a forest from a non-default template.
+- `git forest init` evolves to create/update templates within the config.
+- Backward compatible: existing single-template configs continue to work (treated as the default template).
+- `git forest config` subcommand for editing config (add-repo, remove-repo, set defaults).
+
+### Phase 6 — Hardening
+
+**Goal:** Polish the agent-friendly core for reliable daily use.
+
 - Accept both original and sanitized names everywhere.
-- Auto-detect current forest when inside one.
+- Auto-detect current forest when inside one (for `rm`, already works for `status`).
 - `git forest path <name>` — print forest path for shell integration.
 - Improve error messages and edge case handling.
-- `--yes` flag for non-interactive use (skip confirmations).
 - `--verbose` flag for debugging.
+- `--yes` flag for non-interactive use (skip confirmations).
+- Detect dirty worktrees and warn before `rm`.
+- Tab completion.
+
+### Phase 7 — Interactive UX (optional)
+
+**Goal:** Human-friendly interactive layer on top of the agent-friendly core. Evaluate whether `dialoguer` prompts or a TUI (e.g., `ratatui`) is the right approach.
+
+- Interactive wizard for `init` — guided repo discovery and template setup.
+- Interactive prompts for `new` — mode + defaults + exceptions flow (see Phase 3 design).
+- Confirmation prompt before `rm` (unless `--yes`).
+- Consider TUI for operations like `status` (live-updating multi-repo dashboard) and `new` (interactive repo/branch picker).
+- Decision: dialoguer (simple inline prompts) vs. ratatui TUI (richer but heavier) — decide based on which operations benefit from spatial layout vs. simple Q&A.
 
 ---
 
@@ -368,12 +392,9 @@ Uses plan/execute pattern (Decision 9): `plan_forest()` returns `Vec<RepoAction>
 Captured from the original spec plus review discussion:
 
 - `git forest cd <name>` / `git forest switch <name>` — shell/editor integration.
-- Detect dirty worktrees and warn before `rm`.
 - Hook into `just` — auto-detect justfile and expose recipes.
-- Tab completion.
 - `git forest edit` — modify an existing forest's branches.
 - Parallel execution in `exec`.
 - Multi-remote branch discovery.
 - Config migrations / schema versioning.
 - MCP tool integration.
-- `git forest config` subcommand for editing config.
