@@ -208,3 +208,236 @@ fn exec_without_config_shows_init_hint() {
 fn no_args_shows_help() {
     cargo_bin_cmd!("git-forest").assert().failure();
 }
+
+// --- new command integration tests ---
+
+/// Creates a bare repo + regular repo with the bare as origin, returns the regular repo path.
+fn create_repo_with_remote(base: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let bare_path = base.join("bare").join(format!("{}.git", name));
+    let repo_path = base.join("src").join(name);
+
+    std::fs::create_dir_all(&bare_path).unwrap();
+    std::fs::create_dir_all(&repo_path).unwrap();
+
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} in {} failed: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run(&bare_path, &["init", "--bare", "-b", "main"]);
+    run(&repo_path, &["init", "-b", "main"]);
+    run(
+        &repo_path,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
+    run(&repo_path, &["commit", "--allow-empty", "-m", "initial"]);
+    run(&repo_path, &["push", "origin", "main"]);
+    run(&repo_path, &["fetch", "origin"]);
+
+    repo_path
+}
+
+/// Sets up a complete test environment: fake HOME, two repos with remotes, and a config.
+/// Returns (tmpdir, fake_home, worktree_base).
+fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    let repo_a = create_repo_with_remote(tmp.path(), "foo-api");
+    let repo_b = create_repo_with_remote(tmp.path(), "foo-web");
+    let worktree_base = tmp.path().join("worktrees");
+
+    // Init config
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--username",
+            "testuser",
+            "--repo",
+            repo_a.to_str().unwrap(),
+            "--repo",
+            repo_b.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            worktree_base.to_str().unwrap(),
+            "--force",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    (tmp, fake_home, worktree_base)
+}
+
+#[test]
+fn new_feature_mode_creates_forest() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "my-feature", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("my-feature"))
+        .stdout(predicates::str::contains("feature"));
+
+    // Verify forest directory and worktrees exist
+    let forest_dir = worktree_base.join("my-feature");
+    assert!(forest_dir.exists());
+    assert!(forest_dir.join("foo-api").exists());
+    assert!(forest_dir.join("foo-web").exists());
+    assert!(forest_dir.join(".forest-meta.toml").exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn new_review_mode_with_repo_branch() {
+    let (tmp, fake_home, _worktree_base) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "new",
+            "review-pr",
+            "--mode",
+            "review",
+            "--repo-branch",
+            "foo-web=custom/branch",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("forest/review-pr"))
+        .stdout(predicates::str::contains("custom/branch"));
+
+    drop(tmp);
+}
+
+#[test]
+fn new_dry_run_does_not_create() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "new",
+            "dry-test",
+            "--mode",
+            "feature",
+            "--no-fetch",
+            "--dry-run",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Dry run"))
+        .stdout(predicates::str::contains("dry-test"));
+
+    // Forest directory should NOT exist
+    let forest_dir = worktree_base.join("dry-test");
+    assert!(!forest_dir.exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn new_json_output() {
+    let (tmp, fake_home, _) = setup_new_env();
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args([
+            "--json",
+            "new",
+            "json-test",
+            "--mode",
+            "feature",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["forest_name"], "json-test");
+    assert_eq!(json["mode"], "feature");
+    assert_eq!(json["dry_run"], false);
+    assert!(json["repos"].is_array());
+    assert_eq!(json["repos"].as_array().unwrap().len(), 2);
+    assert!(json["repos"][0]["checkout_kind"].is_string());
+
+    drop(tmp);
+}
+
+#[test]
+fn new_duplicate_forest_name_errors() {
+    let (tmp, fake_home, _) = setup_new_env();
+
+    // First create succeeds
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // Second create fails
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already exists"));
+
+    drop(tmp);
+}
+
+#[test]
+fn new_no_fetch_skips_fetch() {
+    let (tmp, fake_home, _) = setup_new_env();
+
+    // --no-fetch should work even if we can't reach the remote
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "no-fetch-test", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    drop(tmp);
+}
+
+#[test]
+fn ls_shows_new_forest() {
+    let (tmp, fake_home, _) = setup_new_env();
+
+    cargo_bin_cmd!("git-forest")
+        .args(["new", "visible-forest", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("git-forest")
+        .arg("ls")
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("visible-forest"));
+
+    drop(tmp);
+}
