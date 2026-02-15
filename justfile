@@ -10,3 +10,6 @@ build:
 
 test:
     cargo test
+
+loc:
+    tokei src tests
