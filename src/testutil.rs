@@ -1,10 +1,12 @@
 #![cfg(test)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
 use crate::config::{GeneralConfig, RepoConfig, ResolvedConfig, ResolvedRepo};
+use crate::meta::{ForestMeta, ForestMode, RepoMeta};
+use chrono::{DateTime, Utc};
 
 pub struct TestEnv {
     dir: TempDir,
@@ -173,4 +175,63 @@ impl TestEnv {
             repos,
         }
     }
+}
+
+// --- Shared test helpers ---
+
+pub fn make_meta(
+    name: &str,
+    created_at: DateTime<Utc>,
+    mode: ForestMode,
+    repos: Vec<RepoMeta>,
+) -> ForestMeta {
+    ForestMeta {
+        name: name.to_string(),
+        created_at,
+        mode,
+        repos,
+    }
+}
+
+pub fn make_repo(name: &str, branch: &str) -> RepoMeta {
+    RepoMeta {
+        name: name.to_string(),
+        source: PathBuf::from(format!("/tmp/src/{}", name)),
+        branch: branch.to_string(),
+        base_branch: "dev".to_string(),
+        branch_created: true,
+    }
+}
+
+pub fn setup_forest_with_git_repos(base: &Path) -> (PathBuf, ForestMeta) {
+    let forest_dir = base.join("test-forest");
+    std::fs::create_dir_all(&forest_dir).unwrap();
+
+    // Create real git repos as worktrees
+    for name in &["api", "web"] {
+        let repo_dir = forest_dir.join(name);
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "initial"]);
+    }
+
+    let meta = make_meta(
+        "test-forest",
+        Utc::now(),
+        ForestMode::Feature,
+        vec![make_repo("api", "main"), make_repo("web", "main")],
+    );
+
+    (forest_dir, meta)
 }
