@@ -1,6 +1,6 @@
 /// Result structs for command output. Commands return these instead of printing
 /// directly — main.rs formats them as human-readable or JSON based on --json.
-/// See architecture-decisions.md, Decision 8.
+/// See docs/decisions/0002-functional-core-imperative-shell.md.
 mod exec;
 mod init;
 mod ls;

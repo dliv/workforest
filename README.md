@@ -120,10 +120,11 @@ just loc      # count lines of code
 
 ## Design
 
-See [docs/architecture-decisions.md](docs/architecture-decisions.md) for architectural decisions and the phased build plan.
+See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs). Key principles:
 
-Key principles:
-- **Agent-drivable first** — all inputs expressible as flags, `--json` on every command
-- **Commands return data, don't print** — typed result structs, formatted at the edge
-- **Plan/execute for mutations** — `new` and `rm` use a plan/execute split with `--dry-run`
-- **Best-effort cleanup** — `rm` continues on failures, accumulates and reports errors
+- **Agent-drivable first** ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)) — all inputs as flags, `--json` on every command
+- **Commands return data, don't print** ([ADR 0002](docs/decisions/0002-functional-core-imperative-shell.md)) — typed result structs, formatted at the edge
+- **Plan/execute for mutations** ([ADR 0003](docs/decisions/0003-plan-execute-split.md)) — `new` and `rm` use plan/execute split with `--dry-run`
+- **Best-effort cleanup** ([ADR 0009](docs/decisions/0009-best-effort-error-accumulation.md)) — `rm` continues on failures, accumulates and reports errors
+
+Historical planning docs are in [docs/archive/](docs/archive/).
