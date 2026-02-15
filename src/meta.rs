@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::paths::AbsolutePath;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -31,7 +33,7 @@ pub struct ForestMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoMeta {
     pub name: String,
-    pub source: PathBuf,
+    pub source: AbsolutePath,
     pub branch: String,
     pub base_branch: String,
     pub branch_created: bool,
@@ -60,6 +62,7 @@ pub const META_FILENAME: &str = ".forest-meta.toml";
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::path::PathBuf;
 
     fn sample_meta() -> ForestMeta {
         ForestMeta {
@@ -69,14 +72,14 @@ mod tests {
             repos: vec![
                 RepoMeta {
                     name: "foo-api".to_string(),
-                    source: PathBuf::from("/Users/dliv/src/foo-api"),
+                    source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-api")).unwrap(),
                     branch: "forest/review-sues-dialog".to_string(),
                     base_branch: "dev".to_string(),
                     branch_created: true,
                 },
                 RepoMeta {
                     name: "foo-web".to_string(),
-                    source: PathBuf::from("/Users/dliv/src/foo-web"),
+                    source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-web")).unwrap(),
                     branch: "sue/gh-100/fix-dialog".to_string(),
                     base_branch: "dev".to_string(),
                     branch_created: false,
@@ -135,7 +138,7 @@ branch_created = true
         assert_eq!(meta.repos.len(), 2);
         assert_eq!(
             meta.repos[0].source,
-            PathBuf::from("/Users/dliv/src/foo-api")
+            AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-api")).unwrap()
         );
         assert_eq!(meta.repos[1].base_branch, "main");
     }

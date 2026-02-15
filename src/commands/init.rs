@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
-use crate::paths::expand_tilde;
+use crate::paths::{expand_tilde, AbsolutePath};
 
 pub struct InitInputs {
     pub template_name: String,
@@ -24,14 +24,14 @@ pub struct RepoInput {
 pub struct InitResult {
     pub config_path: PathBuf,
     pub template_name: String,
-    pub worktree_base: PathBuf,
+    pub worktree_base: AbsolutePath,
     pub repos: Vec<InitRepoSummary>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct InitRepoSummary {
     pub name: String,
-    pub path: PathBuf,
+    pub path: AbsolutePath,
     pub base_branch: String,
 }
 
@@ -51,13 +51,13 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
         bail!("template name must not have leading/trailing whitespace");
     }
 
-    let worktree_base = expand_tilde(&inputs.worktree_base);
+    let worktree_base = expand_tilde(&inputs.worktree_base)?;
 
     let mut resolved_repos = Vec::new();
     let mut names = HashSet::new();
 
     for repo_input in &inputs.repos {
-        let path = expand_tilde(&repo_input.path);
+        let path = expand_tilde(&repo_input.path)?;
 
         if !path.exists() {
             bail!(
@@ -117,10 +117,6 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
         });
     }
 
-    debug_assert!(
-        worktree_base.is_absolute() || inputs.worktree_base.starts_with("~/"),
-        "worktree_base should be absolute after tilde expansion"
-    );
     debug_assert!(
         resolved_repos.iter().all(|r| !r.name.is_empty()),
         "all repo names must be non-empty"
@@ -344,8 +340,8 @@ mod tests {
         let template = validate_init_inputs(&inputs).unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
-            template.worktree_base,
-            PathBuf::from(&home).join("worktrees")
+            *template.worktree_base,
+            *PathBuf::from(&home).join("worktrees")
         );
     }
 
@@ -583,7 +579,7 @@ mod tests {
         assert_eq!(loaded.templates.len(), 2);
         let alpha = loaded.resolve_template(Some("alpha")).unwrap();
         assert_eq!(alpha.repos[0].name, "repo-b");
-        assert_eq!(alpha.worktree_base, PathBuf::from("/tmp/worktrees/new"));
+        assert_eq!(*alpha.worktree_base, *PathBuf::from("/tmp/worktrees/new"));
         // beta should be preserved
         assert!(loaded.templates.contains_key("beta"));
     }

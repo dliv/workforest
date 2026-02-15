@@ -25,6 +25,7 @@ pub enum RepoStatusKind {
 }
 
 pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> {
+    debug_assert!(forest_dir.is_absolute(), "forest_dir must be absolute");
     let mut repos = Vec::new();
 
     for repo in &meta.repos {

@@ -11,6 +11,7 @@ pub struct ExecResult {
 }
 
 pub fn cmd_exec(forest_dir: &Path, meta: &ForestMeta, cmd: &[String]) -> Result<ExecResult> {
+    debug_assert!(forest_dir.is_absolute(), "forest_dir must be absolute");
     if cmd.is_empty() {
         bail!("no command specified");
     }

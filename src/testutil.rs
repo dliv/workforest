@@ -6,6 +6,7 @@ use tempfile::TempDir;
 
 use crate::config::{ResolvedRepo, ResolvedTemplate};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
+use crate::paths::AbsolutePath;
 use chrono::{DateTime, Utc};
 
 pub struct TestEnv {
@@ -21,7 +22,7 @@ impl TestEnv {
         Self { dir }
     }
 
-    pub fn create_repo(&self, name: &str) -> PathBuf {
+    pub fn create_repo(&self, name: &str) -> AbsolutePath {
         let repo_path = self.dir.path().join("src").join(name);
         std::fs::create_dir_all(&repo_path).unwrap();
 
@@ -46,21 +47,21 @@ impl TestEnv {
         run(&["init", "-b", "main"]);
         run(&["commit", "--allow-empty", "-m", "initial"]);
 
-        repo_path
+        AbsolutePath::new(repo_path).unwrap()
     }
 
-    pub fn worktree_base(&self) -> PathBuf {
-        self.dir.path().join("worktrees")
+    pub fn worktree_base(&self) -> AbsolutePath {
+        AbsolutePath::new(self.dir.path().join("worktrees")).unwrap()
     }
 
-    pub fn repo_path(&self, name: &str) -> PathBuf {
-        self.dir.path().join("src").join(name)
+    pub fn repo_path(&self, name: &str) -> AbsolutePath {
+        AbsolutePath::new(self.dir.path().join("src").join(name)).unwrap()
     }
 
     /// Creates a bare repo + a regular repo with the bare as `origin`.
     /// Runs `git fetch origin` after setup so remote-tracking refs exist.
     /// Returns the path to the regular (non-bare) repo.
-    pub fn create_repo_with_remote(&self, name: &str) -> PathBuf {
+    pub fn create_repo_with_remote(&self, name: &str) -> AbsolutePath {
         let bare_path = self.dir.path().join("bare").join(format!("{}.git", name));
         let repo_path = self.dir.path().join("src").join(name);
 
@@ -107,7 +108,7 @@ impl TestEnv {
         // 6. Fetch to ensure refs/remotes/origin/main exists
         run(&repo_path, &["fetch", "origin"]);
 
-        repo_path
+        AbsolutePath::new(repo_path).unwrap()
     }
 
     /// Returns a ResolvedTemplate with repos at the given names, using this env's worktree_base.
@@ -150,7 +151,7 @@ pub fn make_meta(
 pub fn make_repo(name: &str, branch: &str) -> RepoMeta {
     RepoMeta {
         name: name.to_string(),
-        source: PathBuf::from(format!("/tmp/src/{}", name)),
+        source: AbsolutePath::new(PathBuf::from(format!("/tmp/src/{}", name))).unwrap(),
         branch: branch.to_string(),
         base_branch: "dev".to_string(),
         branch_created: true,

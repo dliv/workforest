@@ -106,6 +106,7 @@ pub fn resolve_forest_multi(
 mod tests {
     use super::*;
     use crate::meta::{ForestMode, RepoMeta};
+    use crate::paths::AbsolutePath;
     use chrono::Utc;
 
     fn write_test_meta(dir: &Path, name: &str, mode: ForestMode) {
@@ -115,7 +116,7 @@ mod tests {
             mode,
             repos: vec![RepoMeta {
                 name: "foo".to_string(),
-                source: PathBuf::from("/tmp/foo"),
+                source: AbsolutePath::new(PathBuf::from("/tmp/foo")).unwrap(),
                 branch: format!("forest/{}", name),
                 base_branch: "dev".to_string(),
                 branch_created: true,

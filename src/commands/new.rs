@@ -2,12 +2,11 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use crate::config::ResolvedTemplate;
 use crate::git::ref_exists;
 use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-use crate::paths::{forest_dir, sanitize_forest_name};
+use crate::paths::{forest_dir, sanitize_forest_name, AbsolutePath};
 
 pub struct NewInputs {
     pub name: String,
@@ -21,7 +20,7 @@ pub struct NewInputs {
 #[derive(Debug)]
 pub struct ForestPlan {
     pub forest_name: String,
-    pub forest_dir: PathBuf,
+    pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
     pub repo_plans: Vec<RepoPlan>,
 }
@@ -29,8 +28,8 @@ pub struct ForestPlan {
 #[derive(Debug)]
 pub struct RepoPlan {
     pub name: String,
-    pub source: PathBuf,
-    pub dest: PathBuf,
+    pub source: AbsolutePath,
+    pub dest: AbsolutePath,
     pub branch: String,
     pub base_branch: String,
     pub remote: String,
@@ -51,7 +50,7 @@ pub enum CheckoutKind {
 #[derive(Debug, Serialize)]
 pub struct NewResult {
     pub forest_name: String,
-    pub forest_dir: PathBuf,
+    pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
     pub dry_run: bool,
     pub repos: Vec<NewRepoResult>,
@@ -64,7 +63,7 @@ pub struct NewRepoResult {
     pub base_branch: String,
     pub branch_created: bool,
     pub checkout_kind: CheckoutKind,
-    pub worktree_path: PathBuf,
+    pub worktree_path: AbsolutePath,
 }
 
 fn compute_target_branch(
@@ -425,6 +424,7 @@ mod tests {
     use super::*;
     use crate::commands::cmd_ls;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
+    use crate::paths::AbsolutePath;
     use crate::testutil::TestEnv;
     use std::path::PathBuf;
 
@@ -595,7 +595,7 @@ mod tests {
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![crate::config::ResolvedRepo {
-                path: PathBuf::from("/nonexistent/repo"),
+                path: AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap(),
                 name: "missing".to_string(),
                 base_branch: "main".to_string(),
                 remote: "origin".to_string(),
@@ -924,17 +924,7 @@ mod tests {
         env.create_repo_with_remote("beta-api");
 
         // Template "alpha" has alpha-api, template "beta" has beta-api
-        let tmpl_alpha = ResolvedTemplate {
-            worktree_base: env.worktree_base(),
-            base_branch: "main".to_string(),
-            feature_branch_template: "testuser/{name}".to_string(),
-            repos: vec![ResolvedRepo {
-                path: env.repo_path("alpha-api"),
-                name: "alpha-api".to_string(),
-                base_branch: "main".to_string(),
-                remote: "origin".to_string(),
-            }],
-        };
+        let tmpl_alpha = env.default_template(&["alpha-api"]);
 
         let tmpl_beta = ResolvedTemplate {
             worktree_base: env.worktree_base(),
@@ -970,7 +960,7 @@ mod tests {
         let inputs = make_new_inputs("ls-test", ForestMode::Feature);
         cmd_new(inputs, &tmpl).unwrap();
 
-        let ls_result = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
+        let ls_result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls_result.forests.len(), 1);
         assert_eq!(ls_result.forests[0].name, "ls-test");
         assert_eq!(ls_result.forests[0].mode, ForestMode::Feature);

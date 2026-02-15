@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::meta::{ForestMeta, META_FILENAME};
+use crate::paths::AbsolutePath;
 
 // --- Types ---
 
@@ -15,7 +16,7 @@ pub struct RmPlan {
 pub struct RepoRmPlan {
     pub name: String,
     pub worktree_path: PathBuf,
-    pub source: PathBuf,
+    pub source: AbsolutePath,
     pub branch: String,
     pub branch_created: bool,
     pub worktree_exists: bool,
@@ -367,6 +368,7 @@ mod tests {
     use crate::commands::cmd_new;
     use crate::commands::NewInputs;
     use crate::meta::ForestMode;
+    use crate::paths::AbsolutePath;
     use crate::testutil::TestEnv;
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
@@ -397,7 +399,7 @@ mod tests {
         let plan = plan_rm(&forest_dir, &meta);
 
         assert_eq!(plan.forest_name, "plan-basic");
-        assert_eq!(plan.forest_dir, forest_dir);
+        assert_eq!(*plan.forest_dir, *forest_dir);
         assert_eq!(plan.repo_plans.len(), 2);
         assert_eq!(plan.repo_plans[0].name, "foo-api");
         assert_eq!(plan.repo_plans[1].name, "foo-web");
@@ -716,7 +718,7 @@ mod tests {
         let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Point source to a nonexistent path
-        meta.repos[0].source = PathBuf::from("/nonexistent/repo");
+        meta.repos[0].source = AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
 
@@ -872,7 +874,7 @@ mod tests {
         let inputs = make_new_inputs("roundtrip", ForestMode::Feature);
         cmd_new(inputs, &tmpl).unwrap();
 
-        let ls1 = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
+        let ls1 = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls1.forests.len(), 1);
 
         // Remove
@@ -882,7 +884,7 @@ mod tests {
         assert!(rm_result.errors.is_empty());
 
         // ls should show empty
-        let ls2 = cmd_ls(&[tmpl.worktree_base.as_path()]).unwrap();
+        let ls2 = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls2.forests.len(), 0);
     }
 }

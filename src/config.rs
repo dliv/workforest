@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::paths::expand_tilde;
+use crate::paths::{expand_tilde, AbsolutePath};
 
 // --- Raw deserialization structs (TOML shape) ---
 
@@ -36,7 +36,7 @@ pub struct RepoConfig {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedRepo {
-    pub path: PathBuf,
+    pub path: AbsolutePath,
     pub name: String,
     pub base_branch: String,
     pub remote: String,
@@ -50,7 +50,7 @@ pub struct ResolvedConfig {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTemplate {
-    pub worktree_base: PathBuf,
+    pub worktree_base: AbsolutePath,
     pub base_branch: String,
     pub feature_branch_template: String,
     pub repos: Vec<ResolvedRepo>,
@@ -76,7 +76,7 @@ impl ResolvedConfig {
         let mut bases: Vec<&Path> = self
             .templates
             .values()
-            .map(|t| t.worktree_base.as_path())
+            .map(|t| t.worktree_base.as_ref())
             .collect();
         bases.sort();
         bases.dedup();
@@ -116,7 +116,8 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
     let mut templates = BTreeMap::new();
 
     for (tmpl_name, tmpl_config) in &raw.template {
-        let worktree_base = expand_tilde(tmpl_config.worktree_base.to_str().unwrap_or(""));
+        let worktree_base = expand_tilde(tmpl_config.worktree_base.to_str().unwrap_or(""))
+            .with_context(|| format!("template {:?}: invalid worktree_base", tmpl_name))?;
 
         if tmpl_config.repos.is_empty() {
             bail!("template {:?}: must have at least one repo", tmpl_name);
@@ -133,7 +134,8 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
         let mut names = HashSet::new();
 
         for repo in &tmpl_config.repos {
-            let path = expand_tilde(repo.path.to_str().unwrap_or(""));
+            let path = expand_tilde(repo.path.to_str().unwrap_or(""))
+                .with_context(|| format!("template {:?}: invalid repo path", tmpl_name))?;
 
             let name = repo.name.clone().unwrap_or_else(|| {
                 path.file_name()
@@ -175,10 +177,6 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
             repos,
         };
 
-        debug_assert!(
-            resolved_tmpl.worktree_base.is_absolute(),
-            "worktree_base must be absolute after parsing"
-        );
         debug_assert!(
             resolved_tmpl.repos.iter().all(|r| !r.name.is_empty()),
             "all repo names must be non-empty"
@@ -232,14 +230,14 @@ pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
                 (
                     name.clone(),
                     TemplateConfig {
-                        worktree_base: tmpl.worktree_base.clone(),
+                        worktree_base: tmpl.worktree_base.clone().into_inner(),
                         base_branch: tmpl.base_branch.clone(),
                         feature_branch_template: tmpl.feature_branch_template.clone(),
                         repos: tmpl
                             .repos
                             .iter()
                             .map(|r| RepoConfig {
-                                path: r.path.clone(),
+                                path: r.path.clone().into_inner(),
                                 name: Some(r.name.clone()),
                                 base_branch: Some(r.base_branch.clone()),
                                 remote: Some(r.remote.clone()),
@@ -288,7 +286,7 @@ name = "foo-web"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.worktree_base, PathBuf::from("/tmp/worktrees"));
+        assert_eq!(*tmpl.worktree_base, *PathBuf::from("/tmp/worktrees"));
         assert_eq!(tmpl.base_branch, "dev");
         assert_eq!(tmpl.feature_branch_template, "dliv/{name}");
         assert_eq!(tmpl.repos.len(), 2);
@@ -334,7 +332,7 @@ path = "/tmp/src/foo"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.worktree_base, PathBuf::from(&home).join("worktrees"));
+        assert_eq!(*tmpl.worktree_base, *PathBuf::from(&home).join("worktrees"));
     }
 
     #[test]
@@ -353,7 +351,10 @@ path = "~/src/foo-api"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.repos[0].path, PathBuf::from(&home).join("src/foo-api"));
+        assert_eq!(
+            *tmpl.repos[0].path,
+            *PathBuf::from(&home).join("src/foo-api")
+        );
     }
 
     #[test]
@@ -648,7 +649,7 @@ path = "/tmp/src/foo"
         templates.insert(
             "a".to_string(),
             ResolvedTemplate {
-                worktree_base: PathBuf::from("/tmp/worktrees"),
+                worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
                 repos: vec![],
@@ -657,7 +658,7 @@ path = "/tmp/src/foo"
         templates.insert(
             "b".to_string(),
             ResolvedTemplate {
-                worktree_base: PathBuf::from("/tmp/worktrees"),
+                worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
                 repos: vec![],
@@ -677,7 +678,7 @@ path = "/tmp/src/foo"
         templates.insert(
             "a".to_string(),
             ResolvedTemplate {
-                worktree_base: PathBuf::from("/tmp/worktrees/a"),
+                worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees/a")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
                 repos: vec![],
@@ -686,7 +687,7 @@ path = "/tmp/src/foo"
         templates.insert(
             "b".to_string(),
             ResolvedTemplate {
-                worktree_base: PathBuf::from("/tmp/worktrees/b"),
+                worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees/b")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
                 repos: vec![],
