@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
 pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -56,18 +56,6 @@ pub fn ref_exists(repo: &Path, refname: &str) -> Result<bool> {
     }
 }
 
-pub fn git_stream(repo: &Path, args: &[&str]) -> Result<ExitStatus> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| format!("failed to run git {:?} in {}", args, repo.display()))?;
-
-    Ok(status)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,22 +82,6 @@ mod tests {
             "error should mention failure: {}",
             err
         );
-    }
-
-    #[test]
-    fn git_stream_returns_exit_status() {
-        let env = TestEnv::new();
-        let repo = env.create_repo("test-repo");
-        let status = git_stream(&repo, &["status"]).unwrap();
-        assert!(status.success());
-    }
-
-    #[test]
-    fn git_stream_returns_failure_status() {
-        let env = TestEnv::new();
-        let repo = env.create_repo("test-repo");
-        let status = git_stream(&repo, &["checkout", "nonexistent-branch"]).unwrap();
-        assert!(!status.success());
     }
 
     #[test]

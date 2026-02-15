@@ -1,4 +1,5 @@
 use assert_cmd::cargo_bin_cmd;
+use predicates::prelude::PredicateBooleanExt;
 
 #[test]
 fn help_exits_zero() {
@@ -721,6 +722,129 @@ fn new_with_template_flag() {
     let forest_dir = wt_base.join("beta-feature");
     assert!(forest_dir.join("beta-api").exists());
     assert!(!forest_dir.join("alpha-api").exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn multi_template_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    let repo_alpha = create_repo_with_remote(tmp.path(), "foo-api");
+    let repo_beta = create_repo_with_remote(tmp.path(), "foo-web");
+
+    let wt_alpha = tmp.path().join("worktrees").join("alpha");
+    let wt_beta = tmp.path().join("worktrees").join("beta");
+
+    // init --template alpha with repo foo-api
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--template",
+            "alpha",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo_alpha.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            wt_alpha.to_str().unwrap(),
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // init --template beta with repo foo-web
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "init",
+            "--template",
+            "beta",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo_beta.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            wt_beta.to_str().unwrap(),
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // new alpha-feature --mode feature --template alpha --no-fetch
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "new",
+            "alpha-feature",
+            "--mode",
+            "feature",
+            "--template",
+            "alpha",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // new beta-feature --mode feature --template beta --no-fetch
+    cargo_bin_cmd!("git-forest")
+        .args([
+            "new",
+            "beta-feature",
+            "--mode",
+            "feature",
+            "--template",
+            "beta",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // ls → both forests visible
+    cargo_bin_cmd!("git-forest")
+        .arg("ls")
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("alpha-feature"))
+        .stdout(predicates::str::contains("beta-feature"));
+
+    // rm alpha-feature
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "alpha-feature"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // ls → only beta-feature remains
+    cargo_bin_cmd!("git-forest")
+        .arg("ls")
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("beta-feature"))
+        .stdout(predicates::str::contains("alpha-feature").not());
+
+    // rm beta-feature
+    cargo_bin_cmd!("git-forest")
+        .args(["rm", "beta-feature"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success();
+
+    // ls → empty
+    cargo_bin_cmd!("git-forest")
+        .arg("ls")
+        .env("HOME", fake_home.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No forests found"));
 
     drop(tmp);
 }

@@ -1,11 +1,10 @@
 #![cfg(test)]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
+use crate::config::{ResolvedRepo, ResolvedTemplate};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
 use chrono::{DateTime, Utc};
 
@@ -48,32 +47,6 @@ impl TestEnv {
         run(&["commit", "--allow-empty", "-m", "initial"]);
 
         repo_path
-    }
-
-    pub fn create_repo_with_branch(&self, name: &str, branch: &str) -> PathBuf {
-        let repo_path = self.create_repo(name);
-
-        let output = Command::new("git")
-            .args(["checkout", "-b", branch])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to run git checkout");
-        assert!(
-            output.status.success(),
-            "git checkout -b {} failed: {}",
-            branch,
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        repo_path
-    }
-
-    pub fn config_path(&self) -> PathBuf {
-        self.dir.path().join("config").join("config.toml")
-    }
-
-    pub fn src_dir(&self) -> PathBuf {
-        self.dir.path().join("src")
     }
 
     pub fn worktree_base(&self) -> PathBuf {
@@ -154,17 +127,6 @@ impl TestEnv {
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
             repos,
-        }
-    }
-
-    /// Returns a ResolvedConfig with a single "default" template wrapping the given repos.
-    pub fn default_config(&self, repo_names: &[&str]) -> ResolvedConfig {
-        let tmpl = self.default_template(repo_names);
-        let mut templates = BTreeMap::new();
-        templates.insert("default".to_string(), tmpl);
-        ResolvedConfig {
-            default_template: "default".to_string(),
-            templates,
         }
     }
 }

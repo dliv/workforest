@@ -89,12 +89,15 @@ pub fn resolve_forest_multi(
                     return Ok(found);
                 }
             }
-            Err(anyhow::anyhow!("forest '{}' not found", n))
+            Err(anyhow::anyhow!(
+                "forest {:?} not found\n  hint: run `git forest ls` to see available forests",
+                n
+            ))
         }
         None => {
             let cwd = std::env::current_dir()?;
             detect_current_forest(&cwd)?
-                .ok_or_else(|| anyhow::anyhow!("not inside a forest directory"))
+                .ok_or_else(|| anyhow::anyhow!("not inside a forest directory\n  hint: specify a forest name, or cd into a forest directory"))
         }
     }
 }

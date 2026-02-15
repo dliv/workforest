@@ -8,7 +8,7 @@ Installs as `git-forest`, invoked as `git forest <command>`.
 
 ## Status
 
-Phase 4 complete. All core commands work: `init`, `new`, `rm`, `ls`, `status`, `exec`. 138 tests.
+Phase 5B complete. Multi-template config support. All core commands work: `init`, `new`, `rm`, `ls`, `status`, `exec`. 160+ tests.
 
 ## Quick Start
 
@@ -60,11 +60,12 @@ All commands support `--json` for structured output.
 git forest init --feature-branch-template <tmpl> --repo <path> [--repo <path>...] [options]
 
 Options:
+  --template <name>                   Template name to create or update (default: default)
   --worktree-base <path>              Base directory for forests (default: ~/worktrees)
   --base-branch <branch>              Default base branch (default: dev)
   --feature-branch-template <tmpl>    Feature branch naming template (must contain {name})
   --repo-base-branch <repo=branch>    Per-repo base branch override (repeatable)
-  --force                             Overwrite existing config
+  --force                             Overwrite existing template by the same name
   --show-path                         Print config path and exit
 ```
 
@@ -74,6 +75,7 @@ Options:
 git forest new <name> --mode <feature|review> [options]
 
 Options:
+  --template <name>                   Template to use (default: from config)
   --branch <branch>                   Override branch for all repos
   --repo-branch <repo=branch>         Per-repo branch override (repeatable)
   --no-fetch                          Skip fetching remotes

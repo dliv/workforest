@@ -975,4 +975,28 @@ mod tests {
         assert_eq!(ls_result.forests[0].name, "ls-test");
         assert_eq!(ls_result.forests[0].mode, ForestMode::Feature);
     }
+
+    #[test]
+    fn plan_forest_name_all_slashes_works() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        // "////" sanitizes to "----" which is valid
+        let inputs = make_new_inputs("////", ForestMode::Feature);
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
+        assert_eq!(plan.forest_name, "////");
+        assert!(plan.forest_dir.to_string_lossy().contains("----"));
+    }
+
+    #[test]
+    fn plan_forest_name_with_spaces_works() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        let inputs = make_new_inputs("my feature", ForestMode::Feature);
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
+        assert_eq!(plan.forest_name, "my feature");
+    }
 }

@@ -1,3 +1,5 @@
+#![warn(clippy::all)]
+
 mod cli;
 mod commands;
 mod config;
@@ -38,10 +40,12 @@ fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            let feature_branch_template = feature_branch_template.unwrap_or_else(|| {
-                eprintln!("error: --feature-branch-template is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
-                std::process::exit(1);
-            });
+            let feature_branch_template = match feature_branch_template {
+                Some(t) => t,
+                None => {
+                    bail!("--feature-branch-template is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
+                }
+            };
 
             // Parse --repo-base-branch strings ("repo=branch") into a lookup
             let mut base_branch_overrides = std::collections::HashMap::new();

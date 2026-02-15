@@ -37,11 +37,11 @@ pub struct InitRepoSummary {
 
 pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
     if inputs.repos.is_empty() {
-        bail!("at least one --repo is required\nHint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
+        bail!("at least one --repo is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
     }
 
     if !inputs.feature_branch_template.contains("{name}") {
-        bail!("--feature-branch-template must contain {{name}}");
+        bail!("--feature-branch-template must contain {{name}}\n  hint: use a template like \"yourname/{{name}}\"");
     }
 
     if inputs.template_name.trim().is_empty() {
@@ -61,7 +61,7 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
 
         if !path.exists() {
             bail!(
-                "repo path does not exist: {}\nHint: provide an absolute path to a git repository",
+                "repo path does not exist: {}\n  hint: provide an absolute path to a git repository",
                 path.display()
             );
         }
@@ -77,7 +77,7 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
         match git_check {
             Ok(s) if !s.success() => {
                 bail!(
-                    "not a git repository: {}\nHint: provide a path to a git repository",
+                    "not a git repository: {}\n  hint: provide a path to a git repository",
                     path.display()
                 );
             }
@@ -99,7 +99,7 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
 
         if !names.insert(name.clone()) {
             bail!(
-                "duplicate repo name: {}\nHint: use --repo /path:custom-name to disambiguate",
+                "duplicate repo name: {}\n  hint: use --repo /path:custom-name to disambiguate",
                 name
             );
         }

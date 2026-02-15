@@ -96,7 +96,7 @@ pub fn load_default_config() -> Result<ResolvedConfig> {
     let path = default_config_path()?;
     if !path.exists() {
         bail!(
-            "config not found at {}\nRun `git forest init` to create one.",
+            "config not found at {}\n  hint: run `git forest init` to create one",
             path.display()
         );
     }
@@ -117,6 +117,10 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
 
     for (tmpl_name, tmpl_config) in &raw.template {
         let worktree_base = expand_tilde(tmpl_config.worktree_base.to_str().unwrap_or(""));
+
+        if tmpl_config.repos.is_empty() {
+            bail!("template {:?}: must have at least one repo", tmpl_name);
+        }
 
         if !tmpl_config.feature_branch_template.contains("{name}") {
             bail!(
@@ -694,5 +698,42 @@ path = "/tmp/src/foo"
         };
         let bases = config.all_worktree_bases();
         assert_eq!(bases.len(), 2);
+    }
+
+    #[test]
+    fn template_with_zero_repos_errors() {
+        let toml = r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "dliv/{name}"
+repos = []
+"#;
+        let result = parse_config(toml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("at least one repo"), "error: {}", err);
+    }
+
+    #[test]
+    fn valid_toml_wrong_shape_errors() {
+        // template is a string instead of a table
+        let toml = r#"
+default_template = "default"
+template = "not a table"
+"#;
+        let result = parse_config(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_toml_missing_template_section_errors() {
+        let toml = r#"
+default_template = "default"
+"#;
+        let result = parse_config(toml);
+        assert!(result.is_err());
     }
 }
