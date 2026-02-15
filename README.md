@@ -129,4 +129,23 @@ See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs).
 - **Plan/execute for mutations** ([ADR 0003](docs/decisions/0003-plan-execute-split.md)) — `new` and `rm` use plan/execute split with `--dry-run`
 - **Best-effort cleanup** ([ADR 0009](docs/decisions/0009-best-effort-error-accumulation.md)) — `rm` continues on failures, accumulates and reports errors
 
+## AI Agent Integration
+
+git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
+
+**For AI agents:** Run `git forest agent-instructions` for usage guidance, or install the [Amp skill](.agents/skills/using-git-forest/SKILL.md):
+```sh
+amp skill add dliv/workforest/using-git-forest
+```
+
+**For your project's agents:** Add the following to your project's `AGENTS.md` or `CLAUDE.md` so agents know git-forest is available:
+
+```markdown
+## git-forest
+
+This project uses `git forest` to manage multi-repo worktrees for feature development and PR review.
+When the user asks to create a forest, worktree environment, or review a PR across repos,
+run `git forest agent-instructions` for full usage guidance.
+```
+
 Historical planning docs are in [docs/archive/](docs/archive/).

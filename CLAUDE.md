@@ -19,3 +19,7 @@ cargo check          # typecheck only
 - AI agents set human as author, agent as committer, and add a co-author trailer using the agent's own identity:
   - Amp: `Co-authored-by: Amp <amp@ampcode.com>`
   - Claude Code: `Co-authored-by: Claude <noreply@anthropic.com>`
+
+## Using git-forest
+
+For AI agent usage instructions for the git-forest CLI itself, run `git forest agent-instructions` or see the [Amp skill](.agents/skills/using-git-forest/SKILL.md).

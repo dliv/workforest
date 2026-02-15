@@ -179,6 +179,9 @@ fn run(cli: Cli) -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::AgentInstructions => {
+            print!("{}", include_str!("../docs/agent-instructions.md"));
+        }
     }
     Ok(())
 }

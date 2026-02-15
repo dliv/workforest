@@ -2,7 +2,11 @@ use crate::meta::ForestMode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "git-forest", about = "Multi-repo worktree orchestrator")]
+#[command(
+    name = "git-forest",
+    about = "Multi-repo worktree orchestrator",
+    after_help = "For AI agent usage instructions: git forest agent-instructions"
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
@@ -89,4 +93,6 @@ pub enum Command {
         #[arg(last = true)]
         cmd: Vec<String>,
     },
+    /// Print AI agent usage instructions
+    AgentInstructions,
 }
