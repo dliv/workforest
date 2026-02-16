@@ -31,6 +31,33 @@ fn init_show_path() {
         .stdout(predicates::str::contains("config.toml"));
 }
 
+/// Returns the env vars needed to isolate config to a fake home directory.
+/// On macOS, `directories` uses `$HOME/Library/Application Support/`.
+/// On Linux, `directories` uses `$XDG_CONFIG_HOME` (or `$HOME/.config`).
+/// We set both HOME and XDG_CONFIG_HOME to ensure isolation on all platforms.
+fn config_env(fake_home: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    vec![
+        ("HOME", fake_home.to_path_buf()),
+        ("XDG_CONFIG_HOME", fake_home.join(".config")),
+    ]
+}
+
+/// Returns the expected config path under a fake home directory (platform-aware).
+fn expected_config_path(fake_home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        fake_home
+            .join("Library")
+            .join("Application Support")
+            .join("git-forest")
+            .join("config.toml")
+    } else {
+        fake_home
+            .join(".config")
+            .join("git-forest")
+            .join("config.toml")
+    }
+}
+
 fn create_test_git_repo(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
     let run = |args: &[&str]| {
@@ -54,28 +81,24 @@ fn init_creates_config() {
     let repo_dir = tmp.path().join("my-repo");
     create_test_git_repo(&repo_dir);
 
-    // Use HOME override so directories crate writes to our temp dir
     let fake_home = tmp.path().join("home");
     std::fs::create_dir_all(&fake_home).unwrap();
 
-    // On macOS: ~/Library/Application Support/git-forest/config.toml
-    let expected_config = fake_home
-        .join("Library")
-        .join("Application Support")
-        .join("git-forest")
-        .join("config.toml");
+    let expected_config = expected_config_path(&fake_home);
 
-    cargo_bin_cmd!("git-forest")
-        .args([
-            "init",
-            "--feature-branch-template",
-            "testuser/{name}",
-            "--repo",
-            repo_dir.to_str().unwrap(),
-            "--force",
-        ])
-        .env("HOME", fake_home.to_str().unwrap())
-        .assert()
+    let mut cmd = cargo_bin_cmd!("git-forest");
+    cmd.args([
+        "init",
+        "--feature-branch-template",
+        "testuser/{name}",
+        "--repo",
+        repo_dir.to_str().unwrap(),
+        "--force",
+    ]);
+    for (k, v) in config_env(&fake_home) {
+        cmd.env(k, v);
+    }
+    cmd.assert()
         .success()
         .stdout(predicates::str::contains("Config written to"));
 
@@ -103,7 +126,9 @@ fn init_force_overwrites() {
         if force {
             cmd.arg("--force");
         }
-        cmd.env("HOME", fake_home.to_str().unwrap());
+        for (k, v) in config_env(&fake_home) {
+            cmd.env(k, v);
+        }
         cmd
     };
 
@@ -138,6 +163,7 @@ fn init_json_output() {
             "--force",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("\"config_path\""))
@@ -177,7 +203,9 @@ fn with_no_config() -> assert_cmd::Command {
     let fake_home = tmp.path().join("empty-home");
     std::fs::create_dir_all(&fake_home).unwrap();
     let mut cmd = cargo_bin_cmd!("git-forest");
-    cmd.env("HOME", fake_home.to_str().unwrap());
+    for (k, v) in config_env(&fake_home) {
+        cmd.env(k, v);
+    }
     // Keep tmpdir alive by leaking it (tests are short-lived)
     std::mem::forget(tmp);
     cmd
@@ -285,6 +313,7 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
             "--force",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -298,6 +327,7 @@ fn new_feature_mode_creates_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "my-feature", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("my-feature"))
@@ -328,6 +358,7 @@ fn new_review_mode_with_repo_branch() {
             "--no-fetch",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("forest/review-pr"))
@@ -350,6 +381,7 @@ fn new_dry_run_does_not_create() {
             "--dry-run",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("Dry run"))
@@ -376,6 +408,7 @@ fn new_json_output() {
             "--no-fetch",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .output()
         .unwrap();
 
@@ -400,6 +433,7 @@ fn new_duplicate_forest_name_errors() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -407,6 +441,7 @@ fn new_duplicate_forest_name_errors() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .failure()
         .stderr(predicates::str::contains("already exists"));
@@ -422,6 +457,7 @@ fn new_no_fetch_skips_fetch() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "no-fetch-test", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -435,12 +471,14 @@ fn ls_shows_new_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "visible-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
     cargo_bin_cmd!("git-forest")
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("visible-forest"));
@@ -458,6 +496,7 @@ fn rm_removes_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "rm-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -470,6 +509,7 @@ fn rm_removes_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "rm-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("Removed forest"));
@@ -489,6 +529,7 @@ fn rm_dry_run_preserves_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "rm-dry-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -499,6 +540,7 @@ fn rm_dry_run_preserves_forest() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "rm-dry-e2e", "--dry-run"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("Dry run"))
@@ -519,12 +561,14 @@ fn rm_json_output() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "rm-json-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
     let output = cargo_bin_cmd!("git-forest")
         .args(["--json", "rm", "rm-json-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .output()
         .unwrap();
 
@@ -548,6 +592,7 @@ fn rm_nonexistent_forest_errors() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "does-not-exist"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .failure()
         .stderr(predicates::str::contains("not found"));
@@ -560,6 +605,7 @@ fn rm_force_flag() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -585,6 +631,7 @@ fn rm_force_flag() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "rm-force-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .failure();
 
@@ -604,6 +651,7 @@ fn rm_force_flag() {
     cargo_bin_cmd!("git-forest")
         .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -616,6 +664,7 @@ fn rm_force_flag() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "rm-force-e2e", "--force"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("Removed forest"));
@@ -647,6 +696,7 @@ fn init_with_template_name() {
             repo_dir.to_str().unwrap(),
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("Template: my-project"));
@@ -680,6 +730,7 @@ fn new_with_template_flag() {
             wt_base.to_str().unwrap(),
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -699,6 +750,7 @@ fn new_with_template_flag() {
             wt_base.to_str().unwrap(),
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -714,6 +766,7 @@ fn new_with_template_flag() {
             "--no-fetch",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("beta-api"));
@@ -754,6 +807,7 @@ fn multi_template_round_trip() {
             wt_alpha.to_str().unwrap(),
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -773,6 +827,7 @@ fn multi_template_round_trip() {
             wt_beta.to_str().unwrap(),
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -788,6 +843,7 @@ fn multi_template_round_trip() {
             "--no-fetch",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -803,6 +859,7 @@ fn multi_template_round_trip() {
             "--no-fetch",
         ])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -810,6 +867,7 @@ fn multi_template_round_trip() {
     cargo_bin_cmd!("git-forest")
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("alpha-feature"))
@@ -819,6 +877,7 @@ fn multi_template_round_trip() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "alpha-feature"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -826,6 +885,7 @@ fn multi_template_round_trip() {
     cargo_bin_cmd!("git-forest")
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("beta-feature"))
@@ -835,6 +895,7 @@ fn multi_template_round_trip() {
     cargo_bin_cmd!("git-forest")
         .args(["rm", "beta-feature"])
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
@@ -842,6 +903,7 @@ fn multi_template_round_trip() {
     cargo_bin_cmd!("git-forest")
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
         .stdout(predicates::str::contains("No forests found"));
