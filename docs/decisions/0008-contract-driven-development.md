@@ -23,4 +23,7 @@ The development cycle is: plan → review → implement → archive. Plans becom
 - Implementation fills in a pre-defined shape — types exist in the plan before they exist in code.
 - Review docs prevent rework by catching design issues early.
 - Plans are disposable after implementation; ADRs are the durable record.
-- ADR 0010 is the code-level complement: `debug_assert!` postconditions enforce contracts at function boundaries. Together, 0008 (human-level contracts in plans) and 0010 (machine-checked contracts as assertions) form a two-tier contract approach.
+- Three-tier contract approach:
+  1. **Human-level contracts** (this ADR) — plans define types, interfaces, and test cases before implementation.
+  2. **Compile-time contracts** — newtypes (`AbsolutePath`, `RepoName`, `ForestName`, `BranchName`) make illegal states unrepresentable. Validate once at construction; the type system enforces invariants everywhere else.
+  3. **Runtime contracts** (ADR 0010) — `debug_assert!` for invariants that types cannot express (collection-level properties, `&Path` boundary preconditions).

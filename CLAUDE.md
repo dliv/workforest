@@ -20,6 +20,13 @@ cargo check          # typecheck only
   - Amp: `Co-authored-by: Amp <amp@ampcode.com>`
   - Claude Code: `Co-authored-by: Claude <noreply@anthropic.com>`
 
+## Design philosophy
+
+- **Make illegal states unrepresentable.** Prefer newtypes (`AbsolutePath`, `RepoName`, `ForestName`, `BranchName`) over runtime validation. Validate once at construction; the type system enforces the invariant everywhere else.
+- **Don't add `bail!` or `debug_assert!` for something a type already guarantees.** If a field is `RepoName`, it's already non-empty — no need to check again.
+- **Validate at boundaries, trust internally.** Raw strings enter from CLI args and config files. Wrap them in newtypes at the command boundary (e.g., `ForestName::new()` at the top of `plan_forest()`). Internal code receives validated types.
+- **`debug_assert!` is for invariants types can't express** — collection-level properties (uniqueness), or preconditions at `&Path` boundaries where `AbsolutePath` isn't in the signature.
+
 ## Using git-forest
 
 For AI agent usage instructions for the git-forest CLI itself, run `git forest agent-instructions` or see the [Amp skill](.agents/skills/using-git-forest/SKILL.md).
