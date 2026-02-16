@@ -35,10 +35,10 @@ just build
 # Configure repos and worktree base
 git forest init \
   --feature-branch-template "dliv/{name}" \
-  --repo ~/src/foo-api \
-  --repo ~/src/foo-web \
-  --repo ~/src/foo-infra \
-  --repo ~/src/dev-docs \
+  --repo ~/foo-api \
+  --repo ~/foo-web \
+  --repo ~/foo-infra \
+  --repo ~/dev-docs \
   --base-branch dev \
   --repo-base-branch dev-docs=main \
   --worktree-base ~/worktrees
