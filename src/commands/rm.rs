@@ -661,6 +661,8 @@ mod tests {
 
         // Add a commit to the worktree branch to make it unmerged
         let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
         std::fs::write(wt_dir.join("new-file.txt"), "content").unwrap();
         crate::git::git(&wt_dir, &["add", "new-file.txt"]).unwrap();
         crate::git::git(&wt_dir, &["commit", "-m", "unmerged commit"]).unwrap();
