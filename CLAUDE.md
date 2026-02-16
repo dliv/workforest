@@ -26,6 +26,7 @@ cargo check          # typecheck only
 - **Don't add `bail!` or `debug_assert!` for something a type already guarantees.** If a field is `RepoName`, it's already non-empty — no need to check again.
 - **Validate at boundaries, trust internally.** Raw strings enter from CLI args and config files. Wrap them in newtypes at the command boundary (e.g., `ForestName::new()` at the top of `plan_forest()`). Internal code receives validated types.
 - **`debug_assert!` is for invariants types can't express** — collection-level properties (uniqueness), or preconditions at `&Path` boundaries where `AbsolutePath` isn't in the signature.
+- Architecture decisions are recorded in [`docs/decisions/ADR_INDEX.md`](docs/decisions/ADR_INDEX.md). Read relevant ADRs before changing patterns they govern.
 
 ## Using git-forest
 
