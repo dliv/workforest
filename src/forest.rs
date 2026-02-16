@@ -55,7 +55,7 @@ pub fn find_forest(
         };
 
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        if meta.name == name_or_dir || dir_name == sanitized {
+        if meta.name.as_str() == name_or_dir || dir_name == sanitized {
             return Ok(Some((entry.path(), meta)));
         }
     }
@@ -106,16 +106,16 @@ pub fn resolve_forest_multi(
 mod tests {
     use super::*;
     use crate::meta::{ForestMode, RepoMeta};
-    use crate::paths::AbsolutePath;
+    use crate::paths::{AbsolutePath, ForestName, RepoName};
     use chrono::Utc;
 
     fn write_test_meta(dir: &Path, name: &str, mode: ForestMode) {
         let meta = ForestMeta {
-            name: name.to_string(),
+            name: ForestName::new(name.to_string()).unwrap(),
             created_at: Utc::now(),
             mode,
             repos: vec![RepoMeta {
-                name: "foo".to_string(),
+                name: RepoName::new("foo".to_string()).unwrap(),
                 source: AbsolutePath::new(PathBuf::from("/tmp/foo")).unwrap(),
                 branch: format!("forest/{}", name),
                 base_branch: "dev".to_string(),
@@ -168,7 +168,7 @@ mod tests {
         let result = find_forest(base, "java-84/refactor-auth").unwrap();
         assert!(result.is_some());
         let (_, meta) = result.unwrap();
-        assert_eq!(meta.name, "java-84/refactor-auth");
+        assert_eq!(meta.name.as_str(), "java-84/refactor-auth");
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
         let result = detect_current_forest(&subdir).unwrap();
         assert!(result.is_some());
         let (path, meta) = result.unwrap();
-        assert_eq!(meta.name, "my-forest");
+        assert_eq!(meta.name.as_str(), "my-forest");
         assert_eq!(path, forest_dir);
     }
 
@@ -242,7 +242,7 @@ mod tests {
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
         let (path, meta) = resolve_forest_multi(&bases, Some("my-feature")).unwrap();
-        assert_eq!(meta.name, "my-feature");
+        assert_eq!(meta.name.as_str(), "my-feature");
         assert_eq!(path, base_b.join("my-feature"));
     }
 

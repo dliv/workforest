@@ -3,16 +3,17 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::meta::ForestMeta;
+use crate::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct StatusResult {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub repos: Vec<RepoStatus>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RepoStatus {
-    pub name: String,
+    pub name: RepoName,
     pub status: RepoStatusKind,
 }
 
@@ -29,7 +30,7 @@ pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> 
     let mut repos = Vec::new();
 
     for repo in &meta.repos {
-        let worktree = forest_dir.join(&repo.name);
+        let worktree = forest_dir.join(repo.name.as_str());
 
         let status = if !worktree.exists() {
             RepoStatusKind::Missing {

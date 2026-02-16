@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::paths::{expand_tilde, AbsolutePath};
+use crate::paths::{expand_tilde, AbsolutePath, RepoName};
 
 // --- Raw deserialization structs (TOML shape) ---
 
@@ -37,7 +37,7 @@ pub struct RepoConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedRepo {
     pub path: AbsolutePath,
-    pub name: String,
+    pub name: RepoName,
     pub base_branch: String,
     pub remote: String,
 }
@@ -137,21 +137,21 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
             let path = expand_tilde(repo.path.to_str().unwrap_or(""))
                 .with_context(|| format!("template {:?}: invalid repo path", tmpl_name))?;
 
-            let name = repo.name.clone().unwrap_or_else(|| {
+            let name_str = repo.name.clone().unwrap_or_else(|| {
                 path.file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default()
             });
 
-            if name.is_empty() {
-                bail!(
+            let name = RepoName::new(name_str).with_context(|| {
+                format!(
                     "template {:?}: repo has empty name (path: {})",
                     tmpl_name,
                     path.display()
-                );
-            }
+                )
+            })?;
 
-            if !names.insert(name.clone()) {
+            if !names.insert(name.to_string()) {
                 bail!("template {:?}: duplicate repo name: {}", tmpl_name, name);
             }
 
@@ -177,10 +177,7 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
             repos,
         };
 
-        debug_assert!(
-            resolved_tmpl.repos.iter().all(|r| !r.name.is_empty()),
-            "all repo names must be non-empty"
-        );
+        // Collection-level invariant, not expressible as newtype
         debug_assert!(
             {
                 let names: HashSet<&str> = resolved_tmpl
@@ -238,7 +235,7 @@ pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
                             .iter()
                             .map(|r| RepoConfig {
                                 path: r.path.clone().into_inner(),
-                                name: Some(r.name.clone()),
+                                name: Some(r.name.to_string()),
                                 base_branch: Some(r.base_branch.clone()),
                                 remote: Some(r.remote.clone()),
                             })
@@ -290,9 +287,9 @@ name = "foo-web"
         assert_eq!(tmpl.base_branch, "dev");
         assert_eq!(tmpl.feature_branch_template, "dliv/{name}");
         assert_eq!(tmpl.repos.len(), 2);
-        assert_eq!(tmpl.repos[0].name, "foo-api");
+        assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
         assert_eq!(tmpl.repos[0].remote, "upstream");
-        assert_eq!(tmpl.repos[1].name, "foo-web");
+        assert_eq!(tmpl.repos[1].name.as_str(), "foo-web");
         assert_eq!(tmpl.repos[1].remote, "origin");
     }
 
@@ -311,7 +308,7 @@ path = "/tmp/src/foo-api"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.repos[0].name, "foo-api");
+        assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
         assert_eq!(tmpl.repos[0].base_branch, "dev");
         assert_eq!(tmpl.repos[0].remote, "origin");
     }
@@ -372,7 +369,7 @@ path = "/tmp/src/my-cool-repo"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.repos[0].name, "my-cool-repo");
+        assert_eq!(tmpl.repos[0].name.as_str(), "my-cool-repo");
     }
 
     #[test]

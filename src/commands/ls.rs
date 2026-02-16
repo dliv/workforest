@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::forest::discover_forests;
 use crate::meta::{ForestMeta, ForestMode};
+use crate::paths::ForestName;
 
 #[derive(Debug, Serialize)]
 pub struct LsResult {
@@ -14,7 +15,7 @@ pub struct LsResult {
 
 #[derive(Debug, Serialize)]
 pub struct ForestSummary {
-    pub name: String,
+    pub name: ForestName,
     pub age_seconds: i64,
     pub age_display: String,
     pub mode: ForestMode,
@@ -100,7 +101,7 @@ pub fn format_ls_human(result: &LsResult) -> String {
     let name_width = result
         .forests
         .iter()
-        .map(|f| f.name.len())
+        .map(|f| f.name.as_str().len())
         .max()
         .unwrap_or(0)
         .max(4);
@@ -125,6 +126,7 @@ pub fn format_ls_human(result: &LsResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::ForestName;
     use crate::testutil::{make_meta, make_repo};
     use chrono::TimeZone;
 
@@ -250,7 +252,7 @@ mod tests {
         let feature_a = result
             .forests
             .iter()
-            .find(|f| f.name == "feature-a")
+            .find(|f| f.name.as_str() == "feature-a")
             .unwrap();
         assert_eq!(feature_a.mode, ForestMode::Feature);
         assert_eq!(feature_a.branch_summary.len(), 1);
@@ -260,7 +262,7 @@ mod tests {
         let review_pr = result
             .forests
             .iter()
-            .find(|f| f.name == "review-pr")
+            .find(|f| f.name.as_str() == "review-pr")
             .unwrap();
         assert_eq!(review_pr.mode, ForestMode::Review);
         assert_eq!(review_pr.branch_summary.len(), 2);
@@ -352,7 +354,7 @@ mod tests {
     fn format_ls_human_with_data() {
         let result = LsResult {
             forests: vec![ForestSummary {
-                name: "my-feature".to_string(),
+                name: ForestName::new("my-feature".to_string()).unwrap(),
                 age_seconds: 7200,
                 age_display: "2h ago".to_string(),
                 mode: ForestMode::Feature,

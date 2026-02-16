@@ -3,10 +3,11 @@ use serde::Serialize;
 use std::path::Path;
 
 use crate::meta::ForestMeta;
+use crate::paths::ForestName;
 
 #[derive(Debug, Serialize)]
 pub struct ExecResult {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub failures: Vec<String>,
 }
 
@@ -19,12 +20,12 @@ pub fn cmd_exec(forest_dir: &Path, meta: &ForestMeta, cmd: &[String]) -> Result<
     let mut failures = Vec::new();
 
     for repo in &meta.repos {
-        let worktree = forest_dir.join(&repo.name);
+        let worktree = forest_dir.join(repo.name.as_str());
         eprintln!("=== {} ===", repo.name);
 
         if !worktree.exists() {
             eprintln!("  warning: worktree missing at {}", worktree.display());
-            failures.push(repo.name.clone());
+            failures.push(repo.name.to_string());
             continue;
         }
 
@@ -37,11 +38,11 @@ pub fn cmd_exec(forest_dir: &Path, meta: &ForestMeta, cmd: &[String]) -> Result<
 
         match status {
             Ok(s) if !s.success() => {
-                failures.push(repo.name.clone());
+                failures.push(repo.name.to_string());
             }
             Err(e) => {
                 eprintln!("  error: {}", e);
-                failures.push(repo.name.clone());
+                failures.push(repo.name.to_string());
             }
             _ => {}
         }

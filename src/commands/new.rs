@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::config::ResolvedTemplate;
 use crate::git::ref_exists;
 use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-use crate::paths::{forest_dir, sanitize_forest_name, AbsolutePath};
+use crate::paths::{forest_dir, AbsolutePath, BranchName, ForestName, RepoName};
 
 pub struct NewInputs {
     pub name: String,
@@ -19,7 +19,7 @@ pub struct NewInputs {
 
 #[derive(Debug)]
 pub struct ForestPlan {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
     pub repo_plans: Vec<RepoPlan>,
@@ -27,10 +27,10 @@ pub struct ForestPlan {
 
 #[derive(Debug)]
 pub struct RepoPlan {
-    pub name: String,
+    pub name: RepoName,
     pub source: AbsolutePath,
     pub dest: AbsolutePath,
-    pub branch: String,
+    pub branch: BranchName,
     pub base_branch: String,
     pub remote: String,
     pub checkout: CheckoutKind,
@@ -49,7 +49,7 @@ pub enum CheckoutKind {
 
 #[derive(Debug, Serialize)]
 pub struct NewResult {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
     pub dry_run: bool,
@@ -58,7 +58,7 @@ pub struct NewResult {
 
 #[derive(Debug, Serialize)]
 pub struct NewRepoResult {
-    pub name: String,
+    pub name: RepoName,
     pub branch: String,
     pub base_branch: String,
     pub branch_created: bool,
@@ -91,39 +91,9 @@ fn compute_target_branch(
     }
 }
 
-fn validate_branch_name(branch: &str, remote: &str) -> Result<()> {
-    if branch.starts_with("refs/") {
-        bail!(
-            "branch name {:?} looks like a ref path\n  hint: pass the branch name without the refs/ prefix",
-            branch
-        );
-    }
-    let remote_prefix = format!("{}/", remote);
-    if branch.starts_with(&remote_prefix) {
-        bail!(
-            "branch name {:?} looks like a remote ref\n  hint: pass the branch name without the remote prefix: {:?}",
-            branch,
-            &branch[remote_prefix.len()..]
-        );
-    }
-    Ok(())
-}
-
 pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<ForestPlan> {
     // Validate forest name
-    if inputs.name.is_empty() || inputs.name == "." || inputs.name == ".." {
-        bail!(
-            "invalid forest name: {:?}\n  hint: provide a descriptive name like \"java-84/refactor-auth\"",
-            inputs.name
-        );
-    }
-    let sanitized = sanitize_forest_name(&inputs.name);
-    if sanitized.is_empty() {
-        bail!(
-            "forest name {:?} sanitizes to empty\n  hint: provide a name with at least one alphanumeric character",
-            inputs.name
-        );
-    }
+    let forest_name = ForestName::new(inputs.name.clone())?;
 
     // Validate template has repos
     if tmpl.repos.is_empty() {
@@ -159,7 +129,7 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     }
 
     // Compute forest directory
-    let fdir = forest_dir(&tmpl.worktree_base, &inputs.name);
+    let fdir = forest_dir(&tmpl.worktree_base, &forest_name);
 
     // Create worktree_base if it doesn't exist (match discover_forests leniency)
     if !tmpl.worktree_base.exists() {
@@ -175,12 +145,12 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     }
     // Also check for name collision via meta scan
     if let Some((existing_dir, existing_meta)) =
-        crate::forest::find_forest(&tmpl.worktree_base, &inputs.name)?
+        crate::forest::find_forest(&tmpl.worktree_base, forest_name.as_str())?
     {
         bail!(
             "forest name {:?} collides with existing forest {:?} at {}\n  hint: choose a different name",
-            inputs.name,
-            existing_meta.name,
+            forest_name.as_str(),
+            existing_meta.name.as_str(),
             existing_dir.display()
         );
     }
@@ -195,36 +165,36 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
         }
     }
 
-    // Validate all branch names (global override, per-repo overrides, and computed defaults)
+    // Validate all branch names (global override, per-repo overrides)
     if let Some(ref branch) = inputs.branch_override {
         // Validate against all remotes — use first repo's remote as representative
         if let Some(repo) = tmpl.repos.first() {
-            validate_branch_name(branch, &repo.remote)?;
+            BranchName::new(branch.clone(), &repo.remote)?;
         }
     }
     for (repo_name, branch) in &inputs.repo_branches {
         let remote = tmpl
             .repos
             .iter()
-            .find(|r| r.name == *repo_name)
+            .find(|r| r.name.as_str() == repo_name.as_str())
             .map(|r| r.remote.as_str())
             .unwrap_or("origin");
-        validate_branch_name(branch, remote)?;
+        BranchName::new(branch.clone(), remote)?;
     }
 
     // Build repo plans
     let mut repo_plans = Vec::new();
     for repo in &tmpl.repos {
-        let branch = compute_target_branch(
-            &repo.name,
-            &inputs.name,
+        let branch_str = compute_target_branch(
+            repo.name.as_str(),
+            forest_name.as_str(),
             &inputs.mode,
             &tmpl.feature_branch_template,
             &inputs.branch_override,
             &inputs.repo_branches,
         );
 
-        validate_branch_name(&branch, &repo.remote)?;
+        let branch = BranchName::new(branch_str, &repo.remote)?;
 
         // Branch resolution
         let local_ref = format!("refs/heads/{}", branch);
@@ -252,7 +222,7 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
             CheckoutKind::NewBranch
         };
 
-        let dest = fdir.join(&repo.name);
+        let dest = fdir.join(repo.name.as_str());
 
         repo_plans.push(RepoPlan {
             name: repo.name.clone(),
@@ -266,7 +236,7 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     }
 
     Ok(ForestPlan {
-        forest_name: inputs.name.clone(),
+        forest_name,
         forest_dir: fdir,
         mode: inputs.mode.clone(),
         repo_plans,
@@ -287,7 +257,7 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
         .iter()
         .map(|rp| NewRepoResult {
             name: rp.name.clone(),
-            branch: rp.branch.clone(),
+            branch: rp.branch.to_string(),
             base_branch: rp.base_branch.clone(),
             branch_created: branch_created(&rp.checkout),
             checkout_kind: rp.checkout.clone(),
@@ -315,6 +285,7 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
         mode: plan.mode.clone(),
         repos: vec![],
     };
+    // RepoMeta.branch is String, not BranchName, so we use to_string() below
     let meta_path = plan.forest_dir.join(META_FILENAME);
     meta.write(&meta_path)?;
 
@@ -322,39 +293,26 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     for repo_plan in &plan.repo_plans {
         let dest_str = repo_plan.dest.to_string_lossy();
 
+        let branch_str = repo_plan.branch.as_str();
         match &repo_plan.checkout {
             CheckoutKind::ExistingLocal => {
                 crate::git::git(
                     &repo_plan.source,
-                    &["worktree", "add", &dest_str, &repo_plan.branch],
+                    &["worktree", "add", &dest_str, branch_str],
                 )?;
             }
             CheckoutKind::TrackRemote => {
-                let start = format!("{}/{}", repo_plan.remote, repo_plan.branch);
+                let start = format!("{}/{}", repo_plan.remote, branch_str);
                 crate::git::git(
                     &repo_plan.source,
-                    &[
-                        "worktree",
-                        "add",
-                        &dest_str,
-                        "-b",
-                        &repo_plan.branch,
-                        &start,
-                    ],
+                    &["worktree", "add", &dest_str, "-b", branch_str, &start],
                 )?;
             }
             CheckoutKind::NewBranch => {
                 let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
                 crate::git::git(
                     &repo_plan.source,
-                    &[
-                        "worktree",
-                        "add",
-                        &dest_str,
-                        "-b",
-                        &repo_plan.branch,
-                        &start,
-                    ],
+                    &["worktree", "add", &dest_str, "-b", branch_str, &start],
                 )?;
             }
         }
@@ -363,7 +321,7 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
         meta.repos.push(RepoMeta {
             name: repo_plan.name.clone(),
             source: repo_plan.source.clone(),
-            branch: repo_plan.branch.clone(),
+            branch: repo_plan.branch.to_string(),
             base_branch: repo_plan.base_branch.clone(),
             branch_created: branch_created(&repo_plan.checkout),
         });
@@ -402,7 +360,8 @@ pub fn format_new_human(result: &NewResult) -> String {
 
     lines.push(format!(
         "Forest {:?} ({} mode)",
-        result.forest_name, result.mode
+        result.forest_name.as_str(),
+        result.mode
     ));
     lines.push(format!("  {}", result.forest_dir.display()));
     lines.push(String::new());
@@ -559,7 +518,8 @@ mod tests {
         let tmpl = make_template_with_repos(&env, &["foo-api"]);
 
         // Pre-create the forest directory
-        let fdir = forest_dir(&tmpl.worktree_base, "my-feature");
+        let fname = ForestName::new("my-feature".to_string()).unwrap();
+        let fdir = forest_dir(&tmpl.worktree_base, &fname);
         std::fs::create_dir_all(&fdir).unwrap();
 
         let inputs = make_new_inputs("my-feature", ForestMode::Feature);
@@ -596,7 +556,7 @@ mod tests {
             feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![crate::config::ResolvedRepo {
                 path: AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap(),
-                name: "missing".to_string(),
+                name: RepoName::new("missing".to_string()).unwrap(),
                 base_branch: "main".to_string(),
                 remote: "origin".to_string(),
             }],
@@ -768,11 +728,17 @@ mod tests {
         let inputs = make_new_inputs("java-84/refactor-auth", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
 
-        assert_eq!(plan.forest_name, "java-84/refactor-auth");
+        assert_eq!(plan.forest_name.as_str(), "java-84/refactor-auth");
         assert_eq!(plan.mode, ForestMode::Feature);
         assert_eq!(plan.repo_plans.len(), 2);
-        assert_eq!(plan.repo_plans[0].branch, "testuser/java-84/refactor-auth");
-        assert_eq!(plan.repo_plans[1].branch, "testuser/java-84/refactor-auth");
+        assert_eq!(
+            plan.repo_plans[0].branch.as_str(),
+            "testuser/java-84/refactor-auth"
+        );
+        assert_eq!(
+            plan.repo_plans[1].branch.as_str(),
+            "testuser/java-84/refactor-auth"
+        );
         assert!(matches!(
             plan.repo_plans[0].checkout,
             CheckoutKind::NewBranch
@@ -793,9 +759,12 @@ mod tests {
 
         assert_eq!(plan.repo_plans.len(), 2);
         // foo-api gets the default review branch
-        assert_eq!(plan.repo_plans[0].branch, "forest/review-sues-dialog");
+        assert_eq!(
+            plan.repo_plans[0].branch.as_str(),
+            "forest/review-sues-dialog"
+        );
         // foo-web gets the exception branch
-        assert_eq!(plan.repo_plans[1].branch, "sue/fix-dialog");
+        assert_eq!(plan.repo_plans[1].branch.as_str(), "sue/fix-dialog");
     }
 
     // --- execute_plan ---
@@ -836,10 +805,10 @@ mod tests {
         let meta_path = plan.forest_dir.join(META_FILENAME);
         let meta = ForestMeta::read(&meta_path).unwrap();
 
-        assert_eq!(meta.name, "meta-test");
+        assert_eq!(meta.name.as_str(), "meta-test");
         assert_eq!(meta.mode, ForestMode::Feature);
         assert_eq!(meta.repos.len(), 1);
-        assert_eq!(meta.repos[0].name, "foo-api");
+        assert_eq!(meta.repos[0].name.as_str(), "foo-api");
         assert_eq!(meta.repos[0].branch, "testuser/meta-test");
         assert_eq!(meta.repos[0].base_branch, "main");
         assert!(meta.repos[0].branch_created);
@@ -857,7 +826,7 @@ mod tests {
         let inputs = make_new_inputs("e2e-feature", ForestMode::Feature);
         let result = cmd_new(inputs, &tmpl).unwrap();
 
-        assert_eq!(result.forest_name, "e2e-feature");
+        assert_eq!(result.forest_name.as_str(), "e2e-feature");
         assert_eq!(result.mode, ForestMode::Feature);
         assert!(!result.dry_run);
         assert_eq!(result.repos.len(), 2);
@@ -932,7 +901,7 @@ mod tests {
             feature_branch_template: "testuser/{name}".to_string(),
             repos: vec![ResolvedRepo {
                 path: env.repo_path("beta-api"),
-                name: "beta-api".to_string(),
+                name: RepoName::new("beta-api".to_string()).unwrap(),
                 base_branch: "main".to_string(),
                 remote: "origin".to_string(),
             }],
@@ -942,13 +911,13 @@ mod tests {
         let inputs = make_new_inputs("alpha-feature", ForestMode::Feature);
         let result = cmd_new(inputs, &tmpl_alpha).unwrap();
         assert_eq!(result.repos.len(), 1);
-        assert_eq!(result.repos[0].name, "alpha-api");
+        assert_eq!(result.repos[0].name.as_str(), "alpha-api");
 
         // Using tmpl_beta creates worktrees only for beta-api
         let inputs = make_new_inputs("beta-feature", ForestMode::Feature);
         let result = cmd_new(inputs, &tmpl_beta).unwrap();
         assert_eq!(result.repos.len(), 1);
-        assert_eq!(result.repos[0].name, "beta-api");
+        assert_eq!(result.repos[0].name.as_str(), "beta-api");
     }
 
     #[test]
@@ -962,7 +931,7 @@ mod tests {
 
         let ls_result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls_result.forests.len(), 1);
-        assert_eq!(ls_result.forests[0].name, "ls-test");
+        assert_eq!(ls_result.forests[0].name.as_str(), "ls-test");
         assert_eq!(ls_result.forests[0].mode, ForestMode::Feature);
     }
 
@@ -975,7 +944,7 @@ mod tests {
         // "////" sanitizes to "----" which is valid
         let inputs = make_new_inputs("////", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
-        assert_eq!(plan.forest_name, "////");
+        assert_eq!(plan.forest_name.as_str(), "////");
         assert!(plan.forest_dir.to_string_lossy().contains("----"));
     }
 
@@ -987,6 +956,6 @@ mod tests {
 
         let inputs = make_new_inputs("my feature", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
-        assert_eq!(plan.forest_name, "my feature");
+        assert_eq!(plan.forest_name.as_str(), "my feature");
     }
 }

@@ -3,18 +3,18 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::meta::{ForestMeta, META_FILENAME};
-use crate::paths::AbsolutePath;
+use crate::paths::{AbsolutePath, ForestName, RepoName};
 
 // --- Types ---
 
 pub struct RmPlan {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub forest_dir: PathBuf,
     pub repo_plans: Vec<RepoRmPlan>,
 }
 
 pub struct RepoRmPlan {
-    pub name: String,
+    pub name: RepoName,
     pub worktree_path: PathBuf,
     pub source: AbsolutePath,
     pub branch: String,
@@ -25,7 +25,7 @@ pub struct RepoRmPlan {
 
 #[derive(Debug, Serialize)]
 pub struct RmResult {
-    pub forest_name: String,
+    pub forest_name: ForestName,
     pub forest_dir: PathBuf,
     pub dry_run: bool,
     pub force: bool,
@@ -36,7 +36,7 @@ pub struct RmResult {
 
 #[derive(Debug, Serialize)]
 pub struct RepoRmResult {
-    pub name: String,
+    pub name: RepoName,
     pub worktree_removed: RmOutcome,
     pub branch_deleted: RmOutcome,
 }
@@ -56,7 +56,7 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
         .repos
         .iter()
         .map(|repo| {
-            let worktree_path = forest_dir.join(&repo.name);
+            let worktree_path = forest_dir.join(repo.name.as_str());
             RepoRmPlan {
                 name: repo.name.clone(),
                 worktree_path: worktree_path.clone(),
@@ -298,13 +298,16 @@ pub fn format_rm_human(result: &RmResult) -> String {
     if result.dry_run {
         lines.push("Dry run — no changes will be made.".to_string());
         lines.push(String::new());
-        lines.push(format!("Would remove forest {:?}", result.forest_name));
+        lines.push(format!(
+            "Would remove forest {:?}",
+            result.forest_name.as_str()
+        ));
     } else if result.errors.is_empty() {
-        lines.push(format!("Removed forest {:?}", result.forest_name));
+        lines.push(format!("Removed forest {:?}", result.forest_name.as_str()));
     } else {
         lines.push(format!(
             "Removed forest {:?} (with errors)",
-            result.forest_name
+            result.forest_name.as_str()
         ));
     }
 
@@ -368,7 +371,7 @@ mod tests {
     use crate::commands::cmd_new;
     use crate::commands::NewInputs;
     use crate::meta::ForestMode;
-    use crate::paths::AbsolutePath;
+    use crate::paths::{AbsolutePath, ForestName, RepoName};
     use crate::testutil::TestEnv;
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
@@ -398,11 +401,11 @@ mod tests {
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
         let plan = plan_rm(&forest_dir, &meta);
 
-        assert_eq!(plan.forest_name, "plan-basic");
+        assert_eq!(plan.forest_name.as_str(), "plan-basic");
         assert_eq!(*plan.forest_dir, *forest_dir);
         assert_eq!(plan.repo_plans.len(), 2);
-        assert_eq!(plan.repo_plans[0].name, "foo-api");
-        assert_eq!(plan.repo_plans[1].name, "foo-web");
+        assert_eq!(plan.repo_plans[0].name.as_str(), "foo-api");
+        assert_eq!(plan.repo_plans[1].name.as_str(), "foo-web");
     }
 
     #[test]
@@ -771,7 +774,7 @@ mod tests {
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
 
-        assert_eq!(rm_result.forest_name, "rm-result");
+        assert_eq!(rm_result.forest_name.as_str(), "rm-result");
         assert!(!rm_result.dry_run);
         assert!(!rm_result.force);
         assert!(rm_result.forest_dir_removed);
@@ -782,18 +785,18 @@ mod tests {
     #[test]
     fn format_rm_human_success() {
         let result = RmResult {
-            forest_name: "test-forest".to_string(),
+            forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: false,
             force: false,
             repos: vec![
                 RepoRmResult {
-                    name: "foo-api".to_string(),
+                    name: RepoName::new("foo-api".to_string()).unwrap(),
                     worktree_removed: RmOutcome::Success,
                     branch_deleted: RmOutcome::Success,
                 },
                 RepoRmResult {
-                    name: "foo-web".to_string(),
+                    name: RepoName::new("foo-web".to_string()).unwrap(),
                     worktree_removed: RmOutcome::Success,
                     branch_deleted: RmOutcome::Skipped {
                         reason: "branch not created by forest".to_string(),
@@ -816,12 +819,12 @@ mod tests {
     #[test]
     fn format_rm_human_dry_run() {
         let result = RmResult {
-            forest_name: "test-forest".to_string(),
+            forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: true,
             force: false,
             repos: vec![RepoRmResult {
-                name: "foo-api".to_string(),
+                name: RepoName::new("foo-api".to_string()).unwrap(),
                 worktree_removed: RmOutcome::Success,
                 branch_deleted: RmOutcome::Success,
             }],
@@ -839,12 +842,12 @@ mod tests {
     #[test]
     fn format_rm_human_with_errors() {
         let result = RmResult {
-            forest_name: "test-forest".to_string(),
+            forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: false,
             force: false,
             repos: vec![RepoRmResult {
-                name: "foo-api".to_string(),
+                name: RepoName::new("foo-api".to_string()).unwrap(),
                 worktree_removed: RmOutcome::Failed {
                     error: "git worktree remove failed".to_string(),
                 },

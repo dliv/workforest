@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use crate::config::{ResolvedRepo, ResolvedTemplate};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
-use crate::paths::AbsolutePath;
+use crate::paths::{AbsolutePath, ForestName, RepoName};
 use chrono::{DateTime, Utc};
 
 pub struct TestEnv {
@@ -117,7 +117,7 @@ impl TestEnv {
             .iter()
             .map(|name| ResolvedRepo {
                 path: self.repo_path(name),
-                name: name.to_string(),
+                name: RepoName::new(name.to_string()).unwrap(),
                 base_branch: "main".to_string(),
                 remote: "origin".to_string(),
             })
@@ -141,7 +141,7 @@ pub fn make_meta(
     repos: Vec<RepoMeta>,
 ) -> ForestMeta {
     ForestMeta {
-        name: name.to_string(),
+        name: ForestName::new(name.to_string()).unwrap(),
         created_at,
         mode,
         repos,
@@ -150,7 +150,7 @@ pub fn make_meta(
 
 pub fn make_repo(name: &str, branch: &str) -> RepoMeta {
     RepoMeta {
-        name: name.to_string(),
+        name: RepoName::new(name.to_string()).unwrap(),
         source: AbsolutePath::new(PathBuf::from(format!("/tmp/src/{}", name))).unwrap(),
         branch: branch.to_string(),
         base_branch: "dev".to_string(),

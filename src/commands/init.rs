@@ -1,10 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
-use crate::paths::{expand_tilde, AbsolutePath};
+use crate::paths::{expand_tilde, AbsolutePath, RepoName};
 
 pub struct InitInputs {
     pub template_name: String,
@@ -87,17 +87,16 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
             _ => {}
         }
 
-        let name = repo_input.name.clone().unwrap_or_else(|| {
+        let name_str = repo_input.name.clone().unwrap_or_else(|| {
             path.file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()
         });
 
-        if name.is_empty() {
-            bail!("repo has empty name (path: {})", path.display());
-        }
+        let name = RepoName::new(name_str)
+            .with_context(|| format!("repo has empty name (path: {})", path.display()))?;
 
-        if !names.insert(name.clone()) {
+        if !names.insert(name.to_string()) {
             bail!(
                 "duplicate repo name: {}\n  hint: use --repo /path:custom-name to disambiguate",
                 name
@@ -116,11 +115,6 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
             remote: "origin".to_string(),
         });
     }
-
-    debug_assert!(
-        resolved_repos.iter().all(|r| !r.name.is_empty()),
-        "all repo names must be non-empty"
-    );
 
     Ok(ResolvedTemplate {
         worktree_base,
@@ -156,7 +150,7 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
         .repos
         .iter()
         .map(|r| InitRepoSummary {
-            name: r.name.clone(),
+            name: r.name.to_string(),
             path: r.path.clone(),
             base_branch: r.base_branch.clone(),
         })
@@ -239,7 +233,7 @@ mod tests {
 
         let template = validate_init_inputs(&inputs).unwrap();
         assert_eq!(template.repos.len(), 1);
-        assert_eq!(template.repos[0].name, "my-repo");
+        assert_eq!(template.repos[0].name.as_str(), "my-repo");
         assert_eq!(template.repos[0].base_branch, "dev");
     }
 
@@ -366,7 +360,7 @@ mod tests {
         // Verify it's valid TOML that can be parsed back
         let loaded = crate::config::load_config(&config_path).unwrap();
         let tmpl = loaded.resolve_template(None).unwrap();
-        assert_eq!(tmpl.repos[0].name, "my-repo");
+        assert_eq!(tmpl.repos[0].name.as_str(), "my-repo");
     }
 
     #[test]
@@ -578,7 +572,7 @@ mod tests {
         let loaded = crate::config::load_config(&config_path).unwrap();
         assert_eq!(loaded.templates.len(), 2);
         let alpha = loaded.resolve_template(Some("alpha")).unwrap();
-        assert_eq!(alpha.repos[0].name, "repo-b");
+        assert_eq!(alpha.repos[0].name.as_str(), "repo-b");
         assert_eq!(*alpha.worktree_base, *PathBuf::from("/tmp/worktrees/new"));
         // beta should be preserved
         assert!(loaded.templates.contains_key("beta"));

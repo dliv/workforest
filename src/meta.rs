@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-use crate::paths::AbsolutePath;
+use crate::paths::{AbsolutePath, ForestName, RepoName};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -24,7 +24,7 @@ impl fmt::Display for ForestMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForestMeta {
-    pub name: String,
+    pub name: ForestName,
     pub created_at: DateTime<Utc>,
     pub mode: ForestMode,
     pub repos: Vec<RepoMeta>,
@@ -32,7 +32,7 @@ pub struct ForestMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoMeta {
-    pub name: String,
+    pub name: RepoName,
     pub source: AbsolutePath,
     pub branch: String,
     pub base_branch: String,
@@ -66,19 +66,19 @@ mod tests {
 
     fn sample_meta() -> ForestMeta {
         ForestMeta {
-            name: "review-sues-dialog".to_string(),
+            name: ForestName::new("review-sues-dialog".to_string()).unwrap(),
             created_at: Utc.with_ymd_and_hms(2026, 2, 7, 14, 30, 0).unwrap(),
             mode: ForestMode::Review,
             repos: vec![
                 RepoMeta {
-                    name: "foo-api".to_string(),
+                    name: RepoName::new("foo-api".to_string()).unwrap(),
                     source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-api")).unwrap(),
                     branch: "forest/review-sues-dialog".to_string(),
                     base_branch: "dev".to_string(),
                     branch_created: true,
                 },
                 RepoMeta {
-                    name: "foo-web".to_string(),
+                    name: RepoName::new("foo-web".to_string()).unwrap(),
                     source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-web")).unwrap(),
                     branch: "sue/gh-100/fix-dialog".to_string(),
                     base_branch: "dev".to_string(),
@@ -101,9 +101,9 @@ mod tests {
         assert_eq!(loaded.created_at, original.created_at);
         assert_eq!(loaded.mode, original.mode);
         assert_eq!(loaded.repos.len(), original.repos.len());
-        assert_eq!(loaded.repos[0].name, "foo-api");
+        assert_eq!(loaded.repos[0].name.as_str(), "foo-api");
         assert!(loaded.repos[0].branch_created);
-        assert_eq!(loaded.repos[1].name, "foo-web");
+        assert_eq!(loaded.repos[1].name.as_str(), "foo-web");
         assert!(!loaded.repos[1].branch_created);
     }
 
@@ -133,7 +133,7 @@ branch_created = true
         std::fs::write(&path, toml).unwrap();
 
         let meta = ForestMeta::read(&path).unwrap();
-        assert_eq!(meta.name, "test-forest");
+        assert_eq!(meta.name.as_str(), "test-forest");
         assert_eq!(meta.mode, ForestMode::Feature);
         assert_eq!(meta.repos.len(), 2);
         assert_eq!(
