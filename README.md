@@ -2,9 +2,29 @@
 
 Multi-repo worktree orchestrator. If your repos _should_ be a monorepo but aren't, this tool makes worktrees across all of them feel like one.
 
-Human: Every line of code, and most documentation, in this repo was LLM generated.
+The code and documentation in this repo was entirely LLM generated.
 
 Installs as `git-forest`, invoked as `git forest <command>`.
+
+## AI Agent Integration
+
+git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
+
+**For AI agents:** Run `git forest agent-instructions` for usage guidance, or install the [Amp skill](.agents/skills/using-git-forest/SKILL.md):
+
+```sh
+amp skill add dliv/workforest/using-git-forest
+```
+
+**For your project's agents:** Add the following to your project's `AGENTS.md` or `CLAUDE.md` so agents know git-forest is available:
+
+```markdown
+## git-forest
+
+This project uses `git forest` to manage multi-repo worktrees for feature development and PR review.
+When the user asks to create a forest, worktree environment, or review a PR across repos,
+run `git forest agent-instructions` for full usage guidance.
+```
 
 ## Quick Start
 
@@ -123,26 +143,6 @@ See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs).
 - **Agent-drivable first** ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)) — all inputs as flags, `--json` on every command
 - **Commands return data, don't print** ([ADR 0002](docs/decisions/0002-functional-core-imperative-shell.md)) — typed result structs, formatted at the edge
 - **Plan/execute for mutations** ([ADR 0003](docs/decisions/0003-plan-execute-split.md)) — `new` and `rm` use plan/execute split with `--dry-run`
-- **Best-effort cleanup** ([ADR 0009](docs/decisions/0009-best-effort-error-accumulation.md)) — `rm` continues on failures, accumulates and reports errors
-
-## AI Agent Integration
-
-git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
-
-**For AI agents:** Run `git forest agent-instructions` for usage guidance, or install the [Amp skill](.agents/skills/using-git-forest/SKILL.md):
-
-```sh
-amp skill add dliv/workforest/using-git-forest
-```
-
-**For your project's agents:** Add the following to your project's `AGENTS.md` or `CLAUDE.md` so agents know git-forest is available:
-
-```markdown
-## git-forest
-
-This project uses `git forest` to manage multi-repo worktrees for feature development and PR review.
-When the user asks to create a forest, worktree environment, or review a PR across repos,
-run `git forest agent-instructions` for full usage guidance.
-```
+- **Self-contained forest meta** ([ADR 0004](docs/decisions/0004-forest-meta-self-contained.md)) — `.forest-meta.toml` captures all resolved values at creation; post-creation commands never re-consult config
 
 Historical planning docs are in [docs/archive/](docs/archive/).

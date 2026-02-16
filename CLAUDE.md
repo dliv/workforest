@@ -2,6 +2,10 @@
 
 Canonical agent instructions for this project. AGENTS.md is only a pointer to this file.
 
+## Working with humans
+
+- **Push back on suggestions that don't make sense.** Don't blindly execute every request — if something is wrong or inapplicable, say so. Example: git-forest is a single-repo project, so "add git-forest multi-repo instructions to our own CLAUDE.md" doesn't apply here — we don't consume git-forest, we build it.
+
 ## Commands
 
 ```
