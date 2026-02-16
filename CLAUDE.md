@@ -17,8 +17,8 @@ cargo check          # typecheck only
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `type: short description` (e.g., `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 - Always ask the user before committing. Suggest whether a new commit or amending the previous one makes more sense given the change.
 - AI agents set human as author, agent as committer, and add a co-author trailer using the agent's own identity:
-  - Amp: `Co-authored-by: Amp <amp@ampcode.com>`
-  - Claude Code: `Co-authored-by: Claude <noreply@anthropic.com>`
+  - Amp: `Co-authored-by: Amp {{model/oracle if applicable}} <amp@ampcode.com>`
+  - Claude Code: `Co-authored-by: Claude {{model}} <noreply@anthropic.com>`
 
 ## Design philosophy
 

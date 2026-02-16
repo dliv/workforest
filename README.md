@@ -1,14 +1,10 @@
 # git-forest
 
-Multi-repo worktree orchestrator. Manages collections of git worktrees ("forests") across multiple repositories for parallel development and PR review workflows.
+Multi-repo worktree orchestrator. If your repos _should_ be a monorepo but aren't, this tool makes worktrees across all of them feel like one.
 
-If your repos *should* be a monorepo but aren't, this tool makes worktrees across all of them feel like one.
+Human: Every line of code, and most documentation, in this repo was LLM generated.
 
 Installs as `git-forest`, invoked as `git forest <command>`.
-
-## Status
-
-Phase 5B complete. Multi-template config support. All core commands work: `init`, `new`, `rm`, `ls`, `status`, `exec`. 160+ tests.
 
 ## Quick Start
 
@@ -134,6 +130,7 @@ See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs).
 git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
 
 **For AI agents:** Run `git forest agent-instructions` for usage guidance, or install the [Amp skill](.agents/skills/using-git-forest/SKILL.md):
+
 ```sh
 amp skill add dliv/workforest/using-git-forest
 ```
