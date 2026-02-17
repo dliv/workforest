@@ -17,16 +17,18 @@ Get git-forest installable via Homebrew with automatic update notifications, tar
 
 ## Phases
 
-### Phase 1 — Code Changes + Homebrew Tap (today)
+### Phase 1 — Code Changes + Homebrew Tap ✅
 
-All changes to `dliv/workforest` repo, plus creating `dliv/homebrew-tools`.
+All changes to `dliv/workforest` repo, plus creating `dliv/homebrew-tools`. **Complete.**
 
-1. `git forest version` / `--version` with compiled-in version
-2. GitHub Actions release workflow (macOS aarch64 + x86_64, triggered on `v*` tags)
-3. Client-side version check module (`ureq`, 500ms timeout, daily cache, graceful failure)
-4. Version check opt-out in config (`[version_check]` section)
-5. `git forest update` convenience command
-6. Create `dliv/homebrew-tools` repo with Homebrew formula
+1. ✅ `git forest version` / `--version` / `--debug` with compiled-in version
+2. ✅ GitHub Actions release workflow (macOS aarch64 + x86_64, triggered on `v*` tags)
+3. ✅ Client-side version check module (`ureq` v3, 500ms timeout, daily cache, graceful failure)
+4. ✅ Version check opt-out in config (`[version_check]` section)
+5. ✅ `git forest update` convenience command (runs `brew update` before `brew upgrade`)
+6. ✅ `dliv/homebrew-tools` repo with Homebrew formula
+
+Shipped as v0.2.3. Install: `brew tap dliv/tools && brew install git-forest`
 
 See: [DISTRIBUTION_PHASE_1.md](DISTRIBUTION_PHASE_1.md)
 
