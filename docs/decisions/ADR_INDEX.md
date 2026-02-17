@@ -18,3 +18,4 @@ Format: `NNNN-short-title.md` with sections: Context, Decision, Consequences.
 | [0010](0010-debug-assertions-for-invariants.md) | Debug Assertions for Invariants | Accepted |
 | [0011](0011-incremental-meta-writing.md) | Incremental Meta Writing | Accepted |
 | [0012](0012-forests-template-agnostic-after-creation.md) | Forests Are Template-Agnostic After Creation | Accepted (Phase 5B) |
+| [0013](0013-rust-language-choice.md) | Rust Language Choice | Accepted |
