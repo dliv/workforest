@@ -4,12 +4,16 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "git-forest",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Multi-repo worktree orchestrator",
     after_help = "For AI agent usage instructions: git forest agent-instructions"
 )]
 pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
+
+    #[arg(long, global = true)]
+    pub debug: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -95,4 +99,12 @@ pub enum Command {
     },
     /// Print AI agent usage instructions
     AgentInstructions,
+    /// Show version information
+    Version {
+        /// Check for updates (network call)
+        #[arg(long)]
+        check: bool,
+    },
+    /// Update git-forest to the latest version
+    Update,
 }

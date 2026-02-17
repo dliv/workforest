@@ -134,6 +134,7 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
         ResolvedConfig {
             default_template: template_name.clone(),
             templates: BTreeMap::new(),
+            version_check: None,
         }
     };
 

@@ -11,6 +11,18 @@ use crate::paths::{expand_tilde, AbsolutePath, RepoName};
 pub struct MultiTemplateConfig {
     pub default_template: String,
     pub template: BTreeMap<String, TemplateConfig>,
+    #[serde(default)]
+    pub version_check: Option<VersionCheckConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionCheckConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +58,7 @@ pub struct ResolvedRepo {
 pub struct ResolvedConfig {
     pub default_template: String,
     pub templates: BTreeMap<String, ResolvedTemplate>,
+    pub version_check: Option<VersionCheckConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +209,7 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
     let resolved = ResolvedConfig {
         default_template: raw.default_template.clone(),
         templates,
+        version_check: raw.version_check.clone(),
     };
 
     // Validate default_template references an existing key
@@ -220,6 +234,7 @@ pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
 
     let raw = MultiTemplateConfig {
         default_template: config.default_template.clone(),
+        version_check: config.version_check.clone(),
         template: config
             .templates
             .iter()
@@ -590,6 +605,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "default".to_string(),
             templates: BTreeMap::new(),
+            version_check: None,
         };
         let result = config.resolve_template(None);
         assert!(result.is_err());
@@ -664,6 +680,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "a".to_string(),
             templates,
+            version_check: None,
         };
         let bases = config.all_worktree_bases();
         assert_eq!(bases.len(), 1);
@@ -693,6 +710,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "a".to_string(),
             templates,
+            version_check: None,
         };
         let bases = config.all_worktree_bases();
         assert_eq!(bases.len(), 2);
@@ -733,5 +751,64 @@ default_template = "default"
 "#;
         let result = parse_config(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_without_version_check_still_parses() {
+        // Existing configs without [version_check] section must still parse
+        let toml = r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "dliv/{name}"
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#;
+        let config = parse_config(toml).unwrap();
+        assert!(config.version_check.is_none());
+    }
+
+    #[test]
+    fn config_with_version_check_enabled() {
+        let toml = r#"
+default_template = "default"
+
+[version_check]
+enabled = false
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "dliv/{name}"
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#;
+        let config = parse_config(toml).unwrap();
+        let vc = config.version_check.unwrap();
+        assert!(!vc.enabled);
+    }
+
+    #[test]
+    fn config_with_version_check_defaults_to_enabled() {
+        let toml = r#"
+default_template = "default"
+
+[version_check]
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "dliv/{name}"
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#;
+        let config = parse_config(toml).unwrap();
+        let vc = config.version_check.unwrap();
+        assert!(vc.enabled);
     }
 }

@@ -910,3 +910,58 @@ fn multi_template_round_trip() {
 
     drop(tmp);
 }
+
+// --- version / update command integration tests ---
+
+#[test]
+fn version_flag_outputs_version() {
+    cargo_bin_cmd!("git-forest")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git-forest 0.1.0"));
+}
+
+#[test]
+fn version_subcommand_outputs_version() {
+    cargo_bin_cmd!("git-forest")
+        .arg("version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git-forest 0.1.0"));
+}
+
+#[test]
+fn version_check_graceful_failure() {
+    // --check should succeed even when the endpoint is unreachable
+    cargo_bin_cmd!("git-forest")
+        .args(["version", "--check"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git-forest 0.1.0"));
+}
+
+#[test]
+fn debug_version_check_shows_debug_output() {
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["--debug", "version", "--check"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("[debug]"),
+        "expected debug output on stderr, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn update_command_does_not_crash() {
+    // Should print either brew output or download link
+    cargo_bin_cmd!("git-forest")
+        .arg("update")
+        .assert()
+        .success();
+}

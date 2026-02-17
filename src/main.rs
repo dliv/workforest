@@ -8,6 +8,7 @@ mod git;
 mod meta;
 mod paths;
 mod testutil;
+mod version_check;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -15,10 +16,30 @@ use cli::{Cli, Command};
 
 fn main() {
     let cli = Cli::parse();
+    let debug = cli.debug;
+
+    let should_version_check = matches!(
+        cli.command,
+        Command::Init { .. }
+            | Command::New { .. }
+            | Command::Rm { .. }
+            | Command::Ls
+            | Command::Status { .. }
+            | Command::Exec { .. }
+    );
 
     if let Err(e) = run(cli) {
         eprintln!("error: {:#}", e);
         std::process::exit(1);
+    }
+
+    if should_version_check {
+        if let Some(notice) = version_check::check_for_update(debug) {
+            eprintln!(
+                "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
+                notice.latest, notice.current
+            );
+        }
     }
 }
 
@@ -181,6 +202,44 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::AgentInstructions => {
             print!("{}", include_str!("../docs/agent-instructions.md"));
+        }
+        Command::Version { check } => {
+            println!("git-forest {}", env!("CARGO_PKG_VERSION"));
+            if check {
+                if !version_check::is_enabled() {
+                    eprintln!("Version check is disabled in config.");
+                } else {
+                    match version_check::force_check(cli.debug) {
+                        Some(notice) => {
+                            eprintln!(
+                                "Update available: git-forest v{} (current: v{}).",
+                                notice.latest, notice.current
+                            );
+                        }
+                        None => {
+                            eprintln!("You are up to date (or the update server is unreachable).");
+                        }
+                    }
+                }
+            }
+        }
+        Command::Update => {
+            let brew_check = std::process::Command::new("brew")
+                .args(["--prefix", "git-forest"])
+                .output();
+
+            if brew_check.map(|o| o.status.success()).unwrap_or(false) {
+                println!("Updating via Homebrew...");
+                let status = std::process::Command::new("brew")
+                    .args(["upgrade", "git-forest"])
+                    .status()?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            } else {
+                println!("Download the latest release:");
+                println!("  https://github.com/dliv/workforest/releases/latest");
+            }
         }
     }
     Ok(())
