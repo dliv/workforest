@@ -48,7 +48,7 @@ See: [DISTRIBUTION_PHASE_2.md](DISTRIBUTION_PHASE_2.md)
 ```
 git forest <cmd>                Cloudflare Worker                Cloudflare D1 / KV
 ────────────────                ─────────────────                ──────────────────
-GET forest.dliv.gg/api/latest     log(ip, version, ts) → D1
+GET forest.dliv.gg/api/latest     log(city, country, version) → D1
     ?v=0.1.0                      read latest_version  ← KV
                                 ← { "version": "0.2.0" }
 
