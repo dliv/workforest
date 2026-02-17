@@ -230,6 +230,10 @@ fn run(cli: Cli) -> Result<()> {
 
             if brew_check.map(|o| o.status.success()).unwrap_or(false) {
                 println!("Updating via Homebrew...");
+                // Fetch latest formula before upgrading
+                let _ = std::process::Command::new("brew")
+                    .args(["update", "--quiet"])
+                    .status();
                 let status = std::process::Command::new("brew")
                     .args(["upgrade", "git-forest"])
                     .status()?;

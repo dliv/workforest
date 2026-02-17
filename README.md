@@ -6,6 +6,15 @@ The code and documentation in this repo was entirely LLM generated.
 
 Installs as `git-forest`, invoked as `git forest <command>`.
 
+## Install
+
+```sh
+brew tap dliv/tools
+brew install git-forest
+```
+
+Or download a binary from [GitHub Releases](https://github.com/dliv/workforest/releases).
+
 ## AI Agent Integration
 
 git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
@@ -66,6 +75,8 @@ git forest rm       Remove a forest (worktrees, branches, directory)
 git forest ls       List all forests
 git forest status   Show git status per repo in a forest
 git forest exec     Run a command in each repo of a forest
+git forest version  Show version (--check to check for updates)
+git forest update   Update git-forest to the latest version
 ```
 
 All commands support `--json` for structured output.
