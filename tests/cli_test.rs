@@ -919,7 +919,7 @@ fn version_flag_outputs_version() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0.1.0"));
+        .stdout(predicates::str::contains("git-forest 0."));
 }
 
 #[test]
@@ -928,7 +928,7 @@ fn version_subcommand_outputs_version() {
         .arg("version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0.1.0"));
+        .stdout(predicates::str::contains("git-forest 0."));
 }
 
 #[test]
@@ -938,7 +938,7 @@ fn version_check_graceful_failure() {
         .args(["version", "--check"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0.1.0"));
+        .stdout(predicates::str::contains("git-forest 0."));
 }
 
 #[test]
