@@ -17,10 +17,30 @@ Use git-forest when the user needs an isolated worktree environment across multi
 - **Feature work:** Starting a new feature that may touch one or more repos, without disrupting existing checkouts.
 - **Cross-repo commands:** Running the same command (test, build, lint) across all repos in a forest.
 
+## Setup
+
+Check if configured:
+```sh
+git forest init --show-path
+```
+
+If not configured, initialize a template (first template becomes the default):
+```sh
+git forest init \
+  --template myproject \
+  --worktree-base ~/worktrees \
+  --base-branch main \
+  --feature-branch-template "username/{name}" \
+  --repo ~/code/repo-a \
+  --repo ~/code/repo-b \
+  --repo-base-branch repo-b=develop
+```
+
+Add more templates with another `init --template other-name`. Use `--force` to overwrite.
+
 ## Quick Reference
 
 ```sh
-git forest init --show-path                     # check if configured
 git forest new <name> --mode feature            # create forest for feature work
 git forest new <name> --mode review             # create forest for PR review
 git forest new <name> --mode feature --dry-run --json  # preview before creating

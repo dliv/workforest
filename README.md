@@ -2,7 +2,7 @@
 
 Multi-repo worktree orchestrator. If your repos _should_ be a monorepo but aren't, this tool makes worktrees across all of them feel like one.
 
-The code and documentation in this repo was entirely LLM generated.
+The code and documentation in this repo were at least 99% LLM generated.
 
 Installs as `git-forest`, invoked as `git forest <command>`.
 

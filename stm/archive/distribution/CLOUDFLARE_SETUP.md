@@ -1,6 +1,6 @@
-# Cloudflare Setup Checklist
+# Cloudflare Setup Checklist ✅
 
-Manual steps to stand up the worker backend for `forest.dliv.gg/api/latest`.
+All steps completed 2026-02-17.
 
 ## 0. Prerequisites
 
@@ -38,12 +38,13 @@ Manual steps to stand up the worker backend for `forest.dliv.gg/api/latest`.
 
 ## 7. GitHub Secrets (for release workflow)
 
-values also in .env file
+Values also in `worker/.env` (gitignored).
 
-- [ ] `CLOUDFLARE_API_TOKEN` — create a Cloudflare API token with KV write permission (Account > API Tokens > Create Token)
-- [ ] `CLOUDFLARE_ACCOUNT_ID` — from Cloudflare dashboard (sidebar, bottom of any zone overview)
-- [ ] `CF_KV_NAMESPACE_ID`
-- [ ] Add all three to GitHub: repo Settings > Secrets and variables > Actions
+- [x] `CLOUDFLARE_API_TOKEN` — Cloudflare API token with KV write permission
+- [x] `CLOUDFLARE_ACCOUNT_ID`
+- [x] `CF_KV_NAMESPACE_ID`
+- [x] `HOMEBREW_TAP_TOKEN` — fine-grained PAT with contents write on `dliv/homebrew-tools`
+- [x] All four added to GitHub: repo Settings > Secrets and variables > Actions (repo secrets)
 
 ## 8. Back up secrets
 

@@ -32,16 +32,29 @@ Shipped as v0.2.3. Install: `brew tap dliv/tools && brew install git-forest`
 
 See: [DISTRIBUTION_PHASE_1.md](DISTRIBUTION_PHASE_1.md)
 
-### Phase 2 — Cloudflare Infrastructure (tomorrow)
+### Phase 2 — Cloudflare Infrastructure ✅
 
-Standing up the backend that the version check calls.
+Standing up the backend that the version check calls. **Complete.**
 
-1. Cloudflare Worker + D1 + KV for version check endpoint
-2. DNS: `forest.dliv.gg` subdomain pointing to worker
-3. Wire `update-version` step into release workflow (writes new version to KV after build)
-4. End-to-end test
+1. ✅ Cloudflare Worker + D1 + KV for version check endpoint
+2. ✅ DNS: `forest.dliv.gg` custom domain via `wrangler.toml` (no dashboard needed)
+3. ✅ `update-version` job in release workflow (writes new version to KV after build)
+4. ✅ `update-homebrew` job in release workflow (auto-updates formula in `dliv/homebrew-tools`)
+5. ✅ Shared types via ts-rs (Rust → TypeScript, one source of truth)
+6. ✅ CI: npm audit for worker deps
+7. ✅ End-to-end tested through v0.2.6
 
-See: [DISTRIBUTION_PHASE_2.md](DISTRIBUTION_PHASE_2.md)
+See: [DISTRIBUTION_PHASE_2.md](DISTRIBUTION_PHASE_2.md) and [CLOUDFLARE_SETUP.md](CLOUDFLARE_SETUP.md)
+
+## Release Pipeline
+
+Pushing a `v*` tag triggers a fully automated pipeline:
+
+1. **build** — Compile macOS aarch64 + x86_64 binaries, upload to GitHub Release
+2. **update-version** — Write new version to Cloudflare KV (version check endpoint)
+3. **update-homebrew** — Download tarballs, compute SHA256, push updated formula to `dliv/homebrew-tools`
+
+GitHub Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CF_KV_NAMESPACE_ID`, `HOMEBREW_TAP_TOKEN`
 
 ## Architecture
 
@@ -72,3 +85,9 @@ brew upgrade git-forest
 # Or via built-in command
 git forest update
 ```
+
+## Future Improvements
+
+- Add Linux builds to the release matrix
+- Retention policy for D1 events (delete old rows periodically)
+- Worker deploy via CI (currently manual `just worker-deploy`)

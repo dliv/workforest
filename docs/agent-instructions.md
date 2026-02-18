@@ -17,7 +17,20 @@ git-forest must be configured before use. Check with:
 ```sh
 git forest init --show-path
 ```
-If not configured, the user needs to provide repo paths and a feature branch template. See `git forest init --help`.
+
+If not configured, initialize a template. The first template becomes the default:
+```sh
+git forest init \
+  --template myproject \
+  --worktree-base ~/worktrees \
+  --base-branch main \
+  --feature-branch-template "username/{name}" \
+  --repo ~/code/repo-a \
+  --repo ~/code/repo-b \
+  --repo-base-branch repo-b=develop
+```
+
+Add more templates with another `init --template other-name`. Use `--force` to overwrite an existing template.
 
 ## Core Workflow
 
