@@ -25,6 +25,10 @@ cargo check          # typecheck only
   - Amp: `Co-authored-by: Amp {{model/oracle if applicable}} <amp@ampcode.com>`
   - Claude Code: `Co-authored-by: Claude {{model}} <noreply@anthropic.com>`
 
+## Releases
+
+Version bump workflow: update `Cargo.toml`, commit, tag, push. Always push the tag by name — `git push origin v0.x.y` — not `--tags`. Pushing all tags at once doesn't trigger the GitHub Actions release workflow.
+
 ## Design philosophy
 
 - **Make illegal states unrepresentable.** Prefer newtypes (`AbsolutePath`, `RepoName`, `ForestName`, `BranchName`) over runtime validation. Validate once at construction; the type system enforces the invariant everywhere else.
