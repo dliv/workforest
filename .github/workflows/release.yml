@@ -58,3 +58,39 @@ jobs:
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             -H "Content-Type: text/plain" \
             --data "$VERSION"
+
+  update-homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="dliv/workforest"
+          TAP_REPO="dliv/homebrew-tools"
+
+          # Download release tarballs and compute SHA256
+          AARCH64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-aarch64-apple-darwin.tar.gz"
+          X86_64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-x86_64-apple-darwin.tar.gz"
+
+          AARCH64_SHA=$(curl -sL "$AARCH64_URL" | shasum -a 256 | cut -d' ' -f1)
+          X86_64_SHA=$(curl -sL "$X86_64_URL" | shasum -a 256 | cut -d' ' -f1)
+
+          echo "aarch64 SHA256: $AARCH64_SHA"
+          echo "x86_64 SHA256: $X86_64_SHA"
+
+          # Clone the tap repo, update formula, push
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/$TAP_REPO.git" tap
+          cd tap
+
+          sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/git-forest.rb
+          sed -i "/CPU.arm?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$AARCH64_SHA\"/}" Formula/git-forest.rb
+          sed -i "/CPU.intel?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$X86_64_SHA\"/}" Formula/git-forest.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/git-forest.rb
+          git commit -m "chore: bump git-forest to $VERSION"
+          git push
