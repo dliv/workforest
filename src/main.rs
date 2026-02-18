@@ -15,6 +15,13 @@ use clap::Parser;
 use cli::{Cli, Command};
 
 fn main() {
+    // Internal subprocess entry point for non-blocking version check.
+    // Intercepted before CLI parsing — not a real subcommand.
+    if std::env::args().any(|a| a == "--internal-version-check") {
+        version_check::run_background_version_check();
+        return;
+    }
+
     let cli = Cli::parse();
     let debug = cli.debug;
 
@@ -35,12 +42,7 @@ fn main() {
     }
 
     if should_version_check {
-        if let Some(notice) = version_check::check_for_update(debug) {
-            eprintln!(
-                "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
-                notice.latest, notice.current
-            );
-        }
+        version_check::check_cache_and_notify(debug);
     }
 }
 
@@ -224,14 +226,17 @@ fn run(cli: Cli) -> Result<()> {
                     eprintln!("Version check is disabled in config.");
                 } else {
                     match version_check::force_check(cli.debug) {
-                        Some(notice) => {
+                        version_check::ForceCheckResult::UpdateAvailable(notice) => {
                             eprintln!(
                                 "Update available: git-forest v{} (current: v{}).",
                                 notice.latest, notice.current
                             );
                         }
-                        None => {
-                            eprintln!("You are up to date (or the update server is unreachable).");
+                        version_check::ForceCheckResult::UpToDate => {
+                            eprintln!("You are up to date.");
+                        }
+                        version_check::ForceCheckResult::FetchFailed => {
+                            eprintln!("Could not reach the update server.");
                         }
                     }
                 }

@@ -910,6 +910,279 @@ fn multi_template_round_trip() {
     drop(tmp);
 }
 
+// --- non-blocking version check integration tests ---
+
+fn write_version_state(
+    fake_home: &std::path::Path,
+    last_checked: &str,
+    latest_version: Option<&str>,
+) {
+    let state_dir = fake_home.join(".local").join("state").join("git-forest");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let mut content = format!("[version_check]\nlast_checked = \"{}\"\n", last_checked);
+    if let Some(v) = latest_version {
+        content.push_str(&format!("latest_version = \"{}\"\n", v));
+    }
+    std::fs::write(state_dir.join("state.toml"), content).unwrap();
+}
+
+fn read_version_state(fake_home: &std::path::Path) -> Option<String> {
+    let path = fake_home
+        .join(".local")
+        .join("state")
+        .join("git-forest")
+        .join("state.toml");
+    std::fs::read_to_string(path).ok()
+}
+
+#[test]
+fn version_check_fresh_cache_no_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Cache is fresh with same version as current — no notice expected
+    write_version_state(
+        &fake_home,
+        "2099-01-01T00:00:00Z",
+        Some(env!("CARGO_PKG_VERSION")),
+    );
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("Update available"),
+        "unexpected update notice: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("checks for updates daily"),
+        "unexpected first-run notice: {}",
+        stderr
+    );
+}
+
+#[test]
+fn version_check_cached_newer_version_shows_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Cache has a newer version — should print notice from cache (no network)
+    write_version_state(&fake_home, "2099-01-01T00:00:00Z", Some("99.99.99"));
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Update available"),
+        "expected update notice: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("99.99.99"),
+        "expected version in notice: {}",
+        stderr
+    );
+}
+
+#[test]
+fn version_check_stale_cache_updates_timestamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Cache is stale — should update last_checked and spawn background check
+    write_version_state(
+        &fake_home,
+        "2020-01-01T00:00:00Z",
+        Some(env!("CARGO_PKG_VERSION")),
+    );
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    // last_checked should have been updated (no longer 2020)
+    let state = read_version_state(&fake_home).unwrap();
+    assert!(
+        !state.contains("2020-01-01"),
+        "last_checked should have been updated: {}",
+        state
+    );
+
+    // No update notice (same version cached)
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("Update available"),
+        "no update notice expected: {}",
+        stderr
+    );
+}
+
+#[test]
+fn version_check_stale_cache_with_newer_version_shows_notice_and_updates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Cache is stale AND has newer version — should show notice AND update timestamp
+    write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("99.99.99"));
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Update available"),
+        "expected update notice: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("99.99.99"),
+        "expected version in notice: {}",
+        stderr
+    );
+
+    // Timestamp should have been updated
+    let state = read_version_state(&fake_home).unwrap();
+    assert!(
+        !state.contains("2020-01-01"),
+        "last_checked should have been updated: {}",
+        state
+    );
+}
+
+#[test]
+fn version_check_first_run_shows_privacy_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // No state file — should show privacy notice and create state
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("checks for updates daily"),
+        "expected privacy notice: {}",
+        stderr
+    );
+
+    // State file should have been created (even if network failed)
+    let state = read_version_state(&fake_home);
+    assert!(state.is_some(), "state file should have been created");
+}
+
+#[test]
+fn version_check_missing_latest_version_does_sync_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // State exists but latest_version is missing — treated as needing sync check
+    write_version_state(&fake_home, "2099-01-01T00:00:00Z", None);
+
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["init", "--show-path"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    // Should NOT show privacy notice (state file existed)
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("checks for updates daily"),
+        "should not show privacy notice when state file exists: {}",
+        stderr
+    );
+
+    // State file should still exist with last_checked updated
+    let state = read_version_state(&fake_home);
+    assert!(state.is_some(), "state file should still exist");
+}
+
+#[test]
+fn internal_version_check_flag_exits_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("0.0.1"));
+
+    let output = cargo_bin_cmd!("git-forest")
+        .arg("--internal-version-check")
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "subprocess should produce no stdout"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "subprocess should produce no stderr"
+    );
+}
+
+#[test]
+fn version_check_no_ambiguous_message() {
+    // Ensure the old confusing "or the update server is unreachable" message is gone
+    let output = cargo_bin_cmd!("git-forest")
+        .args(["version", "--check"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("or the update server is unreachable"),
+        "old ambiguous message should be gone: {}",
+        stderr
+    );
+}
+
 // --- version / update command integration tests ---
 
 #[test]

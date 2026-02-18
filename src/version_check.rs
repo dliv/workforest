@@ -12,6 +12,12 @@ pub struct UpdateNotice {
     pub latest: String,
 }
 
+pub enum ForceCheckResult {
+    UpdateAvailable(UpdateNotice),
+    UpToDate,
+    FetchFailed,
+}
+
 // --- State file ---
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,10 +25,11 @@ struct StateFile {
     version_check: Option<VersionCheckState>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VersionCheckState {
     last_checked: DateTime<Utc>,
-    latest_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_version: Option<String>,
 }
 
 fn state_file_path() -> Option<PathBuf> {
@@ -43,10 +50,26 @@ fn write_state(state: &VersionCheckState) -> Option<()> {
         std::fs::create_dir_all(parent).ok()?;
     }
     let file = StateFile {
-        version_check: Some(VersionCheckState {
-            last_checked: state.last_checked,
-            latest_version: state.latest_version.clone(),
-        }),
+        version_check: Some(state.clone()),
+    };
+    let content = toml::to_string_pretty(&file).ok()?;
+    std::fs::write(path, content).ok()
+}
+
+/// Read-modify-write the state file, applying `f` to the existing state.
+/// Creates a default state if none exists.
+fn update_state(f: impl FnOnce(&mut VersionCheckState)) -> Option<()> {
+    let path = state_file_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let mut state = read_state().unwrap_or(VersionCheckState {
+        last_checked: Utc::now(),
+        latest_version: None,
+    });
+    f(&mut state);
+    let file = StateFile {
+        version_check: Some(state),
     };
     let content = toml::to_string_pretty(&file).ok()?;
     std::fs::write(path, content).ok()
@@ -66,7 +89,7 @@ struct VersionResponse {
     version: String,
 }
 
-fn fetch_latest_version(current: &str, debug: bool) -> Option<String> {
+fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option<String> {
     let url = format!("{}?v={}", VERSION_CHECK_URL, current);
 
     if debug {
@@ -74,7 +97,7 @@ fn fetch_latest_version(current: &str, debug: bool) -> Option<String> {
     }
 
     let config = Agent::config_builder()
-        .timeout_global(Some(Duration::from_millis(500)))
+        .timeout_global(Some(timeout))
         .build();
     let agent: Agent = config.into();
 
@@ -101,6 +124,31 @@ fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+// --- Background subprocess ---
+
+fn spawn_background_check() {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let _ = std::process::Command::new(exe)
+        .arg("--internal-version-check")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    // Child handle is dropped — parent does not wait
+}
+
+/// Entry point for the detached subprocess spawned by `spawn_background_check`.
+/// Fetches the latest version with a generous timeout and writes it to the state file.
+pub fn run_background_version_check() {
+    let current = env!("CARGO_PKG_VERSION");
+    if let Some(latest) = fetch_latest_version(current, false, Duration::from_secs(5)) {
+        update_state(|s| s.latest_version = Some(latest));
+    }
+}
+
 // --- Config integration ---
 
 /// Returns true if version checking is enabled in config.
@@ -124,22 +172,30 @@ pub fn is_enabled() -> bool {
 
 // --- Public API ---
 
-/// Called after successful commands. Returns Some if an update is available.
-/// All errors are swallowed — returns None on any failure.
-pub fn check_for_update(debug: bool) -> Option<UpdateNotice> {
+/// Called after successful commands. Non-blocking: reads from cache and prints
+/// an update notice if one is available, then spawns a background subprocess
+/// to refresh the cache if stale. Never blocks on network I/O (except on the
+/// very first run, when no state file exists).
+pub fn check_cache_and_notify(debug: bool) {
     if !is_enabled() {
         if debug {
             eprintln!("[debug] version check: disabled in config");
         }
-        return None;
+        return;
     }
 
     let current = env!("CARGO_PKG_VERSION");
     let state = read_state();
 
-    match state {
-        None => {
-            // First run — show notice
+    // First run (no state file) or state exists but latest_version is missing:
+    // do a synchronous check so we have something to cache.
+    let needs_sync = match &state {
+        None => true,
+        Some(s) => s.latest_version.is_none(),
+    };
+
+    if needs_sync {
+        if state.is_none() {
             if debug {
                 eprintln!("[debug] version check: state file not found, first run");
             }
@@ -147,77 +203,80 @@ pub fn check_for_update(debug: bool) -> Option<UpdateNotice> {
                 "Note: git-forest checks for updates daily (current version sent to forest.dliv.gg)."
             );
             eprintln!("Disable: set version_check.enabled = false in config.");
+        } else if debug {
+            eprintln!("[debug] version check: state file exists but no cached version");
+        }
 
-            let latest = fetch_latest_version(current, debug)?;
+        match fetch_latest_version(current, debug, Duration::from_millis(500)) {
+            Some(latest) => {
+                write_state(&VersionCheckState {
+                    last_checked: Utc::now(),
+                    latest_version: Some(latest.clone()),
+                });
+                if version_newer(&latest, current) {
+                    eprintln!(
+                        "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
+                        latest, current
+                    );
+                }
+            }
+            None => {
+                // Network failed — write last_checked so we don't retry every command
+                write_state(&VersionCheckState {
+                    last_checked: Utc::now(),
+                    latest_version: None,
+                });
+            }
+        }
+        return;
+    }
+
+    let cached = state.unwrap();
+
+    // Print update notice from cache (no network)
+    if let Some(ref latest) = cached.latest_version {
+        if version_newer(latest, current) {
+            eprintln!(
+                "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
+                latest, current
+            );
+        }
+    }
+
+    // Spawn background refresh if stale
+    if is_stale(&cached.last_checked) {
+        if debug {
+            eprintln!("[debug] version check: cache stale, spawning background check");
+        }
+        update_state(|s| s.last_checked = Utc::now());
+        spawn_background_check();
+    } else if debug {
+        eprintln!(
+            "[debug] version check: cache fresh, latest={:?}",
+            cached.latest_version
+        );
+    }
+}
+
+/// Called by `git forest version --check`. Forces a synchronous network check.
+pub fn force_check(debug: bool) -> ForceCheckResult {
+    let current = env!("CARGO_PKG_VERSION");
+    match fetch_latest_version(current, debug, Duration::from_secs(5)) {
+        Some(latest) => {
             write_state(&VersionCheckState {
                 last_checked: Utc::now(),
-                latest_version: latest.clone(),
+                latest_version: Some(latest.clone()),
             });
             if version_newer(&latest, current) {
-                Some(UpdateNotice {
+                ForceCheckResult::UpdateAvailable(UpdateNotice {
                     current: current.to_string(),
                     latest,
                 })
             } else {
-                None
+                ForceCheckResult::UpToDate
             }
         }
-        Some(cached) => {
-            if is_stale(&cached.last_checked) {
-                if debug {
-                    eprintln!("[debug] version check: cache stale, fetching");
-                }
-                let latest = fetch_latest_version(current, debug)?;
-                write_state(&VersionCheckState {
-                    last_checked: Utc::now(),
-                    latest_version: latest.clone(),
-                });
-                if version_newer(&latest, current) {
-                    Some(UpdateNotice {
-                        current: current.to_string(),
-                        latest,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                if debug {
-                    eprintln!(
-                        "[debug] version check: cache fresh, latest={}",
-                        cached.latest_version
-                    );
-                }
-                if version_newer(&cached.latest_version, current) {
-                    Some(UpdateNotice {
-                        current: current.to_string(),
-                        latest: cached.latest_version,
-                    })
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-/// Called by `git forest version --check`. Forces a network check (ignores cache).
-/// Returns None on network failure.
-pub fn force_check(debug: bool) -> Option<UpdateNotice> {
-    let current = env!("CARGO_PKG_VERSION");
-    let latest = fetch_latest_version(current, debug)?;
-
-    write_state(&VersionCheckState {
-        last_checked: Utc::now(),
-        latest_version: latest.clone(),
-    });
-
-    if version_newer(&latest, current) {
-        Some(UpdateNotice {
-            current: current.to_string(),
-            latest,
-        })
-    } else {
-        None
+        None => ForceCheckResult::FetchFailed,
     }
 }
 
@@ -257,14 +316,11 @@ mod tests {
 
         let state = VersionCheckState {
             last_checked: Utc::now(),
-            latest_version: "0.2.0".to_string(),
+            latest_version: Some("0.2.0".to_string()),
         };
 
         let file = StateFile {
-            version_check: Some(VersionCheckState {
-                last_checked: state.last_checked,
-                latest_version: state.latest_version.clone(),
-            }),
+            version_check: Some(state),
         };
         let content = toml::to_string_pretty(&file).unwrap();
         std::fs::write(&state_path, &content).unwrap();
@@ -272,7 +328,18 @@ mod tests {
         let read_back: StateFile =
             toml::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
         let vc = read_back.version_check.unwrap();
-        assert_eq!(vc.latest_version, "0.2.0");
+        assert_eq!(vc.latest_version, Some("0.2.0".to_string()));
+    }
+
+    #[test]
+    fn state_file_without_latest_version() {
+        let toml_str = r#"
+[version_check]
+last_checked = "2026-01-01T00:00:00Z"
+"#;
+        let state: StateFile = toml::from_str(toml_str).unwrap();
+        let vc = state.version_check.unwrap();
+        assert_eq!(vc.latest_version, None);
     }
 
     #[test]
