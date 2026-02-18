@@ -32,30 +32,20 @@ fn init_show_path() {
 }
 
 /// Returns the env vars needed to isolate config to a fake home directory.
-/// On macOS, `directories` uses `$HOME/Library/Application Support/`.
-/// On Linux, `directories` uses `$XDG_CONFIG_HOME` (or `$HOME/.config`).
-/// We set both HOME and XDG_CONFIG_HOME to ensure isolation on all platforms.
+/// XDG paths resolve via $HOME (~/.config/git-forest/) on Unix/macOS.
+/// We clear XDG_CONFIG_HOME/XDG_STATE_HOME so the $HOME default is used.
 fn config_env(fake_home: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
-    vec![
-        ("HOME", fake_home.to_path_buf()),
-        ("XDG_CONFIG_HOME", fake_home.join(".config")),
-    ]
+    vec![("HOME", fake_home.to_path_buf())]
 }
 
-/// Returns the expected config path under a fake home directory (platform-aware).
+const CLEARED_XDG_VARS: [&str; 2] = ["XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+
+/// Returns the expected config path under a fake home directory.
 fn expected_config_path(fake_home: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "macos") {
-        fake_home
-            .join("Library")
-            .join("Application Support")
-            .join("git-forest")
-            .join("config.toml")
-    } else {
-        fake_home
-            .join(".config")
-            .join("git-forest")
-            .join("config.toml")
-    }
+    fake_home
+        .join(".config")
+        .join("git-forest")
+        .join("config.toml")
 }
 
 fn create_test_git_repo(dir: &std::path::Path) {
@@ -98,6 +88,9 @@ fn init_creates_config() {
     for (k, v) in config_env(&fake_home) {
         cmd.env(k, v);
     }
+    for k in CLEARED_XDG_VARS {
+        cmd.env_remove(k);
+    }
     cmd.assert()
         .success()
         .stdout(predicates::str::contains("Config written to"));
@@ -128,6 +121,9 @@ fn init_force_overwrites() {
         }
         for (k, v) in config_env(&fake_home) {
             cmd.env(k, v);
+        }
+        for k in CLEARED_XDG_VARS {
+            cmd.env_remove(k);
         }
         cmd
     };
@@ -205,6 +201,9 @@ fn with_no_config() -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!("git-forest");
     for (k, v) in config_env(&fake_home) {
         cmd.env(k, v);
+    }
+    for k in CLEARED_XDG_VARS {
+        cmd.env_remove(k);
     }
     // Keep tmpdir alive by leaking it (tests are short-lived)
     std::mem::forget(tmp);

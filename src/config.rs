@@ -97,12 +97,68 @@ impl ResolvedConfig {
     }
 }
 
+// --- XDG path helpers ---
+
+const APP_NAME: &str = "git-forest";
+
+/// Returns the XDG config directory for git-forest.
+///
+/// Resolution order:
+/// 1. `$XDG_CONFIG_HOME/git-forest/` (if env var set)
+/// 2. `~/.config/git-forest/` (Unix/macOS default)
+/// 3. `directories` crate fallback (Windows)
+pub(crate) fn xdg_config_dir() -> Result<PathBuf> {
+    xdg_dir("XDG_CONFIG_HOME", ".config", |proj| {
+        proj.config_dir().to_path_buf()
+    })
+}
+
+/// Returns the XDG state directory for git-forest.
+///
+/// Resolution order:
+/// 1. `$XDG_STATE_HOME/git-forest/` (if env var set)
+/// 2. `~/.local/state/git-forest/` (Unix/macOS default)
+/// 3. `directories` crate fallback (Windows)
+pub(crate) fn xdg_state_dir() -> Result<PathBuf> {
+    xdg_dir("XDG_STATE_HOME", ".local/state", |proj| {
+        proj.state_dir()
+            .unwrap_or_else(|| proj.data_local_dir())
+            .to_path_buf()
+    })
+}
+
+fn xdg_dir(
+    env_var: &str,
+    default_suffix: &str,
+    fallback: fn(&directories::ProjectDirs) -> PathBuf,
+) -> Result<PathBuf> {
+    // 1. Explicit env var
+    if let Ok(val) = std::env::var(env_var) {
+        if !val.is_empty() {
+            return Ok(PathBuf::from(val).join(APP_NAME));
+        }
+    }
+
+    // 2. Unix/macOS default: ~/.<suffix>/git-forest/
+    #[cfg(unix)]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return Ok(PathBuf::from(home).join(default_suffix).join(APP_NAME));
+        }
+    }
+
+    // 3. directories crate fallback (Windows, or if HOME is unset)
+    #[cfg(not(unix))]
+    let _ = default_suffix;
+    let proj = directories::ProjectDirs::from("", "", APP_NAME)
+        .context("could not determine config directory")?;
+    Ok(fallback(&proj))
+}
+
 // --- Config loading ---
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let proj = directories::ProjectDirs::from("", "", "git-forest")
-        .context("could not determine config directory")?;
-    Ok(proj.config_dir().join("config.toml"))
+    Ok(xdg_config_dir()?.join("config.toml"))
 }
 
 pub fn load_default_config() -> Result<ResolvedConfig> {
@@ -810,5 +866,69 @@ path = "/tmp/src/foo-api"
         let config = parse_config(toml).unwrap();
         let vc = config.version_check.unwrap();
         assert!(vc.enabled);
+    }
+
+    // --- XDG path tests ---
+
+    #[test]
+    fn xdg_config_dir_respects_env_var() {
+        let saved = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/test-xdg-config");
+        let result = super::xdg_config_dir().unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/test-xdg-config/git-forest"));
+        match saved {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    #[test]
+    fn xdg_state_dir_respects_env_var() {
+        let saved = std::env::var("XDG_STATE_HOME").ok();
+        std::env::set_var("XDG_STATE_HOME", "/tmp/test-xdg-state");
+        let result = super::xdg_state_dir().unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/test-xdg-state/git-forest"));
+        match saved {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xdg_config_dir_defaults_to_dot_config() {
+        let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let home = std::env::var("HOME").unwrap();
+        let result = super::xdg_config_dir().unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from(&home).join(".config").join("git-forest")
+        );
+        if let Some(v) = saved_xdg {
+            std::env::set_var("XDG_CONFIG_HOME", v);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xdg_state_dir_defaults_to_dot_local_state() {
+        let saved_xdg = std::env::var("XDG_STATE_HOME").ok();
+        std::env::remove_var("XDG_STATE_HOME");
+        let home = std::env::var("HOME").unwrap();
+        let result = super::xdg_state_dir().unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from(&home).join(".local/state").join("git-forest")
+        );
+        if let Some(v) = saved_xdg {
+            std::env::set_var("XDG_STATE_HOME", v);
+        }
+    }
+
+    #[test]
+    fn default_config_path_ends_with_config_toml() {
+        let path = super::default_config_path().unwrap();
+        assert!(path.ends_with("git-forest/config.toml"));
     }
 }

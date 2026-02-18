@@ -26,8 +26,7 @@ struct VersionCheckState {
 }
 
 fn state_file_path() -> Option<PathBuf> {
-    let proj = directories::ProjectDirs::from("", "", "git-forest")?;
-    let dir = proj.state_dir().unwrap_or_else(|| proj.data_local_dir());
+    let dir = crate::config::xdg_state_dir().ok()?;
     Some(dir.join("state.toml"))
 }
 
