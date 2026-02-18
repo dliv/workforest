@@ -60,6 +60,8 @@ fn is_stale(last_checked: &DateTime<Utc>) -> bool {
 
 // --- Network ---
 
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "worker/src/generated/"))]
 #[derive(Deserialize)]
 struct VersionResponse {
     version: String,
@@ -284,5 +286,12 @@ mod tests {
     fn staleness_check_recent() {
         let recent = Utc::now() - chrono::Duration::hours(1);
         assert!(!is_stale(&recent));
+    }
+
+    #[test]
+    #[ignore]
+    fn export_bindings() {
+        use ts_rs::TS;
+        VersionResponse::export_all().unwrap();
     }
 }

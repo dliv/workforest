@@ -2,3 +2,8 @@
 .claude
 .idea
 /target
+/bindings
+node_modules/
+worker/.env
+worker/wrangler.toml
+worker/.wrangler/

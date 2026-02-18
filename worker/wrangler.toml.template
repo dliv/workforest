@@ -1,0 +1,17 @@
+name = "git-forest-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-16"
+workers_dev = false
+
+[[routes]]
+pattern = "forest.dliv.gg"
+custom_domain = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "git-forest-version-check"
+database_id = ""
+
+[[kv_namespaces]]
+binding = "KV"
+id = ""
