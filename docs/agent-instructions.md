@@ -19,15 +19,23 @@ git forest init --show-path
 ```
 
 If not configured, initialize a template. The first template becomes the default:
+
+**Important — detect the base branch first.** Don't assume `main`. Before running `init`, determine each repo's default branch:
+```sh
+# Check default branch from remote
+git -C ~/code/repo-a symbolic-ref refs/remotes/origin/HEAD
+# Or ask the user which branch to use
+```
+
 ```sh
 git forest init \
   --template myproject \
   --worktree-base ~/worktrees \
-  --base-branch main \
-  --feature-branch-template "username/{name}" \
+  --base-branch <detected-default-branch> \
+  --feature-branch-template "<username>/{name}" \
   --repo ~/code/repo-a \
   --repo ~/code/repo-b \
-  --repo-base-branch repo-b=develop
+  --repo-base-branch repo-b=<branch-if-different>  # optional per-repo override
 ```
 
 Add more templates with another `init --template other-name`. Use `--force` to overwrite an existing template.
@@ -73,12 +81,14 @@ git forest ls                         # list all forests
 git forest rm my-feature              # remove forest
 git forest rm                         # auto-detect from cwd
 git forest rm my-feature --force      # force-remove dirty worktrees
+git forest reset --confirm            # wipe all config, state, and forests
+git forest reset --config-only --confirm  # wipe config/state only, keep worktrees
 ```
 
 ## Agent Best Practices
 
 - **Always use `--json`** for structured, parseable output on any command.
-- **Dry-run before mutating:** `new` and `rm` support `--dry-run --json` to preview changes. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
+- **Dry-run before mutating:** `new`, `rm`, and `reset` support `--dry-run --json` to preview changes. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
 - **Error messages include hints:** All errors have `hint:` lines with recovery suggestions.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
 - **Exit codes:** 0 = success, 1 = error. `exec` returns 1 if any repo's command fails. `rm` returns 1 if any cleanup step fails.

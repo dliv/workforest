@@ -24,16 +24,24 @@ Check if configured:
 git forest init --show-path
 ```
 
-If not configured, initialize a template (first template becomes the default):
+If not configured, initialize a template (first template becomes the default).
+
+**Important — detect the base branch first.** Don't assume `main`. Before running `init`, determine each repo's default branch:
+```sh
+# Check default branch from remote
+git -C ~/code/repo-a symbolic-ref refs/remotes/origin/HEAD
+# Or ask the user which branch to use
+```
+
 ```sh
 git forest init \
   --template myproject \
   --worktree-base ~/worktrees \
-  --base-branch main \
-  --feature-branch-template "username/{name}" \
+  --base-branch <detected-default-branch> \
+  --feature-branch-template "<username>/{name}" \
   --repo ~/code/repo-a \
   --repo ~/code/repo-b \
-  --repo-base-branch repo-b=develop
+  --repo-base-branch repo-b=<branch-if-different>  # optional per-repo override
 ```
 
 Add more templates with another `init --template other-name`. Use `--force` to overwrite.
@@ -48,6 +56,8 @@ git forest status [name]                        # git status per repo
 git forest exec <name> -- <cmd> [args...]       # run command across repos
 git forest ls                                   # list all forests
 git forest rm [name]                            # clean up a forest
+git forest reset --confirm                      # wipe all config, state, and forests
+git forest reset --config-only --confirm        # wipe config/state only, keep worktrees
 ```
 
 ## Key Concepts
@@ -56,5 +66,5 @@ git forest rm [name]                            # clean up a forest
 - **Review mode:** Creates `forest/{name}` branches. Use `--repo-branch repo=branch` to point specific repos at a PR's actual branch.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside one.
 - **All commands support `--json`** for structured output.
-- **Always `--dry-run --json` before `new` or `rm`** to preview changes.
+- **Always `--dry-run --json` before `new`, `rm`, or `reset`** to preview changes.
 - **Errors include `hint:` lines** with recovery suggestions.

@@ -105,6 +105,18 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Remove all git-forest configuration, state, and forest directories
+    Reset {
+        /// Confirm deletion (required unless --dry-run)
+        #[arg(long)]
+        confirm: bool,
+        /// Only delete config and state files, leave worktree directories
+        #[arg(long)]
+        config_only: bool,
+        /// Show what would be deleted without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Update git-forest to the latest version
     Update,
 }

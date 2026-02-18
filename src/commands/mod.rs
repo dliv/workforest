@@ -5,6 +5,7 @@ mod exec;
 mod init;
 mod ls;
 mod new;
+mod reset;
 mod rm;
 mod status;
 
@@ -12,5 +13,6 @@ pub use exec::*;
 pub use init::*;
 pub use ls::*;
 pub use new::*;
+pub use reset::*;
 pub use rm::*;
 pub use status::*;

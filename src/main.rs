@@ -23,6 +23,7 @@ fn main() {
         Command::Init { .. }
             | Command::New { .. }
             | Command::Rm { .. }
+            | Command::Reset { .. }
             | Command::Ls
             | Command::Status { .. }
             | Command::Exec { .. }
@@ -173,6 +174,19 @@ fn run(cli: Cli) -> Result<()> {
             let has_errors = !result.errors.is_empty();
             output(&result, cli.json, commands::format_rm_human)?;
             if has_errors {
+                std::process::exit(1);
+            }
+        }
+        Command::Reset {
+            confirm,
+            config_only,
+            dry_run,
+        } => {
+            let result = commands::cmd_reset(confirm, config_only, dry_run)?;
+            let has_errors = !result.errors.is_empty();
+            let confirm_required = result.confirm_required;
+            output(&result, cli.json, commands::format_reset_human)?;
+            if has_errors || confirm_required {
                 std::process::exit(1);
             }
         }
