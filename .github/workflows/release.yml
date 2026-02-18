@@ -60,23 +60,28 @@ jobs:
             --data "$VERSION"
 
   update-homebrew:
-    needs: build
+    needs: [build, update-version]
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew formula
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          set -euo pipefail
+
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="dliv/workforest"
           TAP_REPO="dliv/homebrew-tools"
 
-          # Download release tarballs and compute SHA256
           AARCH64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-aarch64-apple-darwin.tar.gz"
           X86_64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-x86_64-apple-darwin.tar.gz"
 
-          AARCH64_SHA=$(curl -sL "$AARCH64_URL" | shasum -a 256 | cut -d' ' -f1)
-          X86_64_SHA=$(curl -sL "$X86_64_URL" | shasum -a 256 | cut -d' ' -f1)
+          # Download release tarballs (fail fast on 404)
+          curl -fSL -o aarch64.tar.gz "$AARCH64_URL"
+          curl -fSL -o x86_64.tar.gz "$X86_64_URL"
+
+          AARCH64_SHA=$(sha256sum aarch64.tar.gz | cut -d' ' -f1)
+          X86_64_SHA=$(sha256sum x86_64.tar.gz | cut -d' ' -f1)
 
           echo "aarch64 SHA256: $AARCH64_SHA"
           echo "x86_64 SHA256: $X86_64_SHA"
@@ -92,5 +97,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/git-forest.rb
+          git diff --cached --quiet && echo "No changes to formula" && exit 0
           git commit -m "chore: bump git-forest to $VERSION"
           git push
