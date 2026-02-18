@@ -78,7 +78,7 @@ git forest rm my-feature --force      # force-remove dirty worktrees
 ## Agent Best Practices
 
 - **Always use `--json`** for structured, parseable output on any command.
-- **Dry-run before mutating:** Always run `--dry-run --json` before `new` or `rm` to preview.
+- **Dry-run before mutating:** `new` and `rm` support `--dry-run --json` to preview changes. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
 - **Error messages include hints:** All errors have `hint:` lines with recovery suggestions.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
 - **Exit codes:** 0 = success, 1 = error. `exec` returns 1 if any repo's command fails. `rm` returns 1 if any cleanup step fails.

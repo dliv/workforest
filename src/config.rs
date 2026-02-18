@@ -282,10 +282,74 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
     Ok(resolved)
 }
 
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: getuid() is always safe — no arguments, no failure mode.
+    unsafe { libc::getuid() }
+}
+
+/// Walk ancestors of `target` to find the first existing directory that isn't writable,
+/// and produce an actionable hint string.
+fn diagnose_permission_denied(target: &Path) -> String {
+    // Find the first existing ancestor
+    let blocking = target
+        .ancestors()
+        .skip(1) // skip target itself
+        .find(|p| p.exists());
+
+    let Some(dir) = blocking else {
+        return "check directory permissions".to_string();
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(dir) {
+            let dir_uid = meta.uid();
+            // Root ownership is the common macOS case (e.g. ~/.config created by sudo)
+            if dir_uid == 0 {
+                return format!(
+                    "{} is owned by root. Run: sudo chown $(whoami) {}",
+                    dir.display(),
+                    dir.display()
+                );
+            }
+            if dir_uid != current_uid() {
+                return format!(
+                    "{} is owned by another user (uid {}). Run: sudo chown $(whoami) {}",
+                    dir.display(),
+                    dir_uid,
+                    dir.display()
+                );
+            }
+            // Owned by us but not writable (e.g. chmod 555)
+            return format!(
+                "{} is not writable. Run: chmod u+w {}",
+                dir.display(),
+                dir.display()
+            );
+        }
+    }
+
+    format!("{} is not writable", dir.display())
+}
+
 pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let hint = diagnose_permission_denied(parent);
+                bail!(
+                    "failed to create config directory {}: {}\n  hint: {}",
+                    parent.display(),
+                    e,
+                    hint
+                );
+            }
+            return Err(e).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            });
+        }
     }
 
     let raw = MultiTemplateConfig {
@@ -930,5 +994,75 @@ path = "/tmp/src/foo-api"
     fn default_config_path_ends_with_config_toml() {
         let path = super::default_config_path().unwrap();
         assert!(path.ends_with("git-forest/config.toml"));
+    }
+
+    // --- Permission diagnosis tests ---
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnose_permission_denied_unwritable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let target = blocked.join("child").join("grandchild");
+
+        // Verify create_dir_all actually fails (skips if running as root)
+        if std::fs::create_dir_all(&target).is_ok() {
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping: test running as root (permission check bypassed)");
+            return;
+        }
+
+        let hint = super::diagnose_permission_denied(&target);
+        assert!(
+            hint.contains(&blocked.display().to_string()),
+            "hint should mention blocking dir: {}",
+            hint
+        );
+        assert!(
+            hint.contains("not writable"),
+            "hint should say not writable: {}",
+            hint
+        );
+        assert!(
+            hint.contains("chmod u+w"),
+            "hint should suggest chmod: {}",
+            hint
+        );
+
+        // Restore permissions so tempdir cleanup works
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnose_permission_denied_root_owned() {
+        // Test the formatting branch for root-owned directories.
+        // We can't create root-owned dirs without sudo, so test the function
+        // with a path where the first existing ancestor is "/" (owned by root).
+        let target = Path::new("/nonexistent-abc123/git-forest");
+        let hint = super::diagnose_permission_denied(target);
+        // "/" is owned by root
+        assert!(
+            hint.contains("owned by root"),
+            "hint should detect root ownership: {}",
+            hint
+        );
+        assert!(
+            hint.contains("sudo chown"),
+            "hint should suggest chown: {}",
+            hint
+        );
+    }
+
+    #[test]
+    fn diagnose_permission_denied_no_ancestors() {
+        // Edge case: empty path or root
+        let hint = super::diagnose_permission_denied(Path::new(""));
+        assert!(hint.contains("not writable") || hint.contains("check directory permissions"));
     }
 }
