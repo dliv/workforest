@@ -310,9 +310,19 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
             }
             CheckoutKind::NewBranch => {
                 let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
+                // Canonical arg order (options before <path> <commit-ish>) for
+                // compatibility across git versions.
                 crate::git::git(
                     &repo_plan.source,
-                    &["worktree", "add", &dest_str, "-b", branch_str, &start],
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch_str,
+                        "--no-track",
+                        &dest_str,
+                        &start,
+                    ],
                 )?;
             }
         }
@@ -833,6 +843,77 @@ mod tests {
         assert_eq!(result.repos[0].branch, "testuser/e2e-feature");
         assert!(result.repos[0].branch_created);
         assert!(result.forest_dir.exists());
+    }
+
+    #[test]
+    fn feature_branch_has_no_upstream_tracking() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        let inputs = make_new_inputs("no-track-test", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let worktree = env.worktree_base().join("no-track-test").join("foo-api");
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "@{u}"])
+            .current_dir(worktree.as_ref())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "feature branch should have no upstream, but got: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn review_branch_tracks_remote() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        // Push a branch to the remote so TrackRemote can find it
+        let repo_path = env.repo_path("foo-api");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path.as_ref())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        run(&["checkout", "-b", "sue/fix-dialog"]);
+        run(&["commit", "--allow-empty", "-m", "feature"]);
+        run(&["push", "origin", "sue/fix-dialog"]);
+        run(&["checkout", "main"]);
+        run(&["branch", "-D", "sue/fix-dialog"]);
+        run(&["fetch", "origin"]);
+
+        let mut inputs = make_new_inputs("track-test", ForestMode::Review);
+        inputs.repo_branches = vec![("foo-api".to_string(), "sue/fix-dialog".to_string())];
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let worktree = env.worktree_base().join("track-test").join("foo-api");
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "@{u}"])
+            .current_dir(worktree.as_ref())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "review branch should track remote upstream"
+        );
+        let upstream = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            upstream.trim() == "origin/sue/fix-dialog",
+            "expected origin/sue/fix-dialog, got: {}",
+            upstream.trim()
+        );
     }
 
     #[test]
