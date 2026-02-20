@@ -10,4 +10,6 @@ command -v rustfmt >/dev/null 2>&1 || {
   exit 1
 }
 
-echo "$staged_rs" | xargs rustfmt --check
+# Auto-format and re-stage
+echo "$staged_rs" | xargs rustfmt
+echo "$staged_rs" | xargs git add

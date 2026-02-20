@@ -1039,4 +1039,48 @@ mod tests {
         let plan = plan_forest(&inputs, &tmpl).unwrap();
         assert_eq!(plan.forest_name.as_str(), "my feature");
     }
+
+    // --- Bug reproduction tests ---
+
+    /// When execute_plan fails partway through (e.g., second repo's worktree
+    /// add fails), the forest directory should be cleaned up so a retry with
+    /// the same name doesn't hit "forest directory already exists".
+    #[test]
+    fn execute_plan_cleans_up_forest_dir_on_failure() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("good-repo");
+        env.create_repo_with_remote("bad-repo");
+        let tmpl = make_template_with_repos(&env, &["good-repo", "bad-repo"]);
+
+        let inputs = make_new_inputs("cleanup-test", ForestMode::Feature);
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
+
+        // Sabotage: pre-create a file where the second repo's worktree dir
+        // would go, so git worktree add fails for that repo.
+        let bad_dest = &plan.repo_plans[1].dest;
+        std::fs::create_dir_all(bad_dest.parent().unwrap()).unwrap();
+        std::fs::write(&**bad_dest, "blocker").unwrap();
+
+        // execute_plan should fail on the second repo
+        let result = execute_plan(&plan);
+        assert!(result.is_err(), "execute_plan should fail");
+
+        // The forest directory should have been cleaned up
+        assert!(
+            !plan.forest_dir.exists(),
+            "forest directory should be cleaned up after failed execute_plan, but exists at: {}",
+            plan.forest_dir.display()
+        );
+
+        // The first repo's worktree was successfully created before the failure.
+        // Its git worktree registration should also be cleaned up, otherwise
+        // a retry would hit "missing but already registered worktree".
+        let good_source = env.repo_path("good-repo");
+        let wt_list = crate::git::git(&good_source, &["worktree", "list"]).unwrap();
+        assert!(
+            !wt_list.contains("cleanup-test"),
+            "first repo's worktree registration should be cleaned up after failed execute_plan, but got: {}",
+            wt_list
+        );
+    }
 }

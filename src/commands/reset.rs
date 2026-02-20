@@ -813,4 +813,153 @@ path = "/tmp/nonexistent-repo"
         assert!(result.config_file.deleted);
         assert!(!config_dir.join("config.toml").exists());
     }
+
+    // --- Bug reproduction tests ---
+    // These tests document bugs where reset leaves stale git worktree
+    // registrations, causing `git forest new` to fail on re-creation.
+
+    /// After reset, git worktree registrations should be cleaned up so that
+    /// creating a new forest with the same repo reuses the branch name cleanly.
+    #[test]
+    #[serial]
+    fn reset_cleans_up_git_worktree_registrations() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo_a = env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+
+        // 1. Create a forest (registers worktrees in repo-a's .git/worktrees/)
+        let inputs = NewInputs {
+            name: "wt-cleanup-test".to_string(),
+            mode: ForestMode::Feature,
+            branch_override: None,
+            repo_branches: vec![],
+            no_fetch: true,
+            dry_run: false,
+        };
+        let result = cmd_new(inputs, &tmpl).unwrap();
+        assert!(!result.dry_run);
+
+        // Verify the worktree is registered in git
+        let wt_list = crate::git::git(&repo_a, &["worktree", "list"]).unwrap();
+        assert!(
+            wt_list.contains("wt-cleanup-test"),
+            "worktree should be registered after new: {}",
+            wt_list
+        );
+
+        // 2. Write config so reset can find the forest
+        let base = env.worktree_base();
+        let tmp_root = base.parent().unwrap();
+        let config_dir = tmp_root.join("config").join("git-forest");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "repo-a"
+"#,
+            base.display(),
+            repo_a.display(),
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        // 3. Reset — should delete forest directory AND clean up worktree registrations
+        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        assert_eq!(reset_result.forests.len(), 1);
+        assert!(reset_result.forests[0].removed);
+
+        // 4. Verify git no longer has a stale worktree registration
+        let wt_list_after = crate::git::git(&repo_a, &["worktree", "list"]).unwrap();
+        assert!(
+            !wt_list_after.contains("wt-cleanup-test"),
+            "stale worktree registration should be cleaned up after reset, but got: {}",
+            wt_list_after
+        );
+    }
+
+    /// After reset, re-creating a forest with the same name should succeed.
+    /// This is the end-to-end repro of the bug: reset → re-init → new fails.
+    #[test]
+    #[serial]
+    fn reset_then_recreate_forest_succeeds() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-b");
+        let tmpl = env.default_template(&["repo-b"]);
+
+        // 1. Create a forest
+        let inputs = NewInputs {
+            name: "recreate-test".to_string(),
+            mode: ForestMode::Feature,
+            branch_override: None,
+            repo_branches: vec![],
+            no_fetch: true,
+            dry_run: false,
+        };
+        cmd_new(inputs, &tmpl).unwrap();
+
+        // 2. Write config and reset
+        let base = env.worktree_base();
+        let tmp_root = base.parent().unwrap();
+        let config_dir = tmp_root.join("config").join("git-forest");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "repo-b"
+"#,
+            base.display(),
+            env.repo_path("repo-b").display(),
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        assert!(reset_result.forests[0].removed);
+        assert!(reset_result.errors.is_empty());
+
+        // 3. Re-write config (reset deleted it) and try to create the same forest again
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+
+        let inputs2 = NewInputs {
+            name: "recreate-test".to_string(),
+            mode: ForestMode::Feature,
+            branch_override: None,
+            repo_branches: vec![],
+            no_fetch: true,
+            dry_run: false,
+        };
+        let result2 = cmd_new(inputs2, &tmpl);
+        assert!(
+            result2.is_ok(),
+            "re-creating forest after reset should succeed, but got: {}",
+            result2.unwrap_err()
+        );
+    }
 }
