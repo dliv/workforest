@@ -18,6 +18,7 @@ pub struct RepoRmPlan {
     pub worktree_path: PathBuf,
     pub source: AbsolutePath,
     pub branch: String,
+    pub base_branch: String,
     pub branch_created: bool,
     pub worktree_exists: bool,
     pub source_exists: bool,
@@ -62,6 +63,7 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
                 worktree_path: worktree_path.clone(),
                 source: repo.source.clone(),
                 branch: repo.branch.clone(),
+                base_branch: repo.base_branch.clone(),
                 branch_created: repo.branch_created,
                 worktree_exists: worktree_path.exists(),
                 source_exists: repo.source.is_dir(),
@@ -179,21 +181,87 @@ fn delete_branch(
         };
     }
 
-    let delete_flag = if force { "-D" } else { "-d" };
-    match crate::git::git(
-        &repo_plan.source,
-        &["branch", delete_flag, &repo_plan.branch],
-    ) {
+    if force {
+        return match crate::git::git(&repo_plan.source, &["branch", "-D", &repo_plan.branch]) {
+            Ok(_) => RmOutcome::Success,
+            Err(e) => {
+                let msg = format!("{}: git branch -D failed: {}", repo_plan.name, e);
+                errors.push(msg.clone());
+                RmOutcome::Failed { error: msg }
+            }
+        };
+    }
+
+    // Try safe delete first
+    match crate::git::git(&repo_plan.source, &["branch", "-d", &repo_plan.branch]) {
         Ok(_) => RmOutcome::Success,
-        Err(e) => {
-            let msg = format!(
-                "{}: git branch {} failed: {}",
-                repo_plan.name, delete_flag, e
-            );
-            errors.push(msg.clone());
-            RmOutcome::Failed { error: msg }
+        Err(original_err) => {
+            // -d failed — check if the branch was merged via a different mechanism
+            // (e.g. fully merged but HEAD isn't on base, or fully pushed to upstream)
+            if can_safely_force_delete(&repo_plan.source, &repo_plan.branch, &repo_plan.base_branch)
+            {
+                match crate::git::git(&repo_plan.source, &["branch", "-D", &repo_plan.branch]) {
+                    Ok(_) => RmOutcome::Success,
+                    Err(e) => {
+                        let msg = format!("{}: git branch -D failed: {}", repo_plan.name, e);
+                        errors.push(msg.clone());
+                        RmOutcome::Failed { error: msg }
+                    }
+                }
+            } else {
+                let msg = format!(
+                    "{}: branch {:?} is not fully merged ({})\n  \
+                     hint: if the branch was merged (e.g. squash-merge) and the remote \
+                     branch was deleted, use `git forest rm --force`",
+                    repo_plan.name, repo_plan.branch, original_err,
+                );
+                errors.push(msg.clone());
+                RmOutcome::Failed { error: msg }
+            }
         }
     }
+}
+
+/// Check whether a branch can be safely force-deleted after `git branch -d` fails.
+///
+/// Two checks, tried in order:
+/// 1. `git merge-base --is-ancestor <branch> <base_branch>` — the branch is fully
+///    merged into the base branch (catches cases where `-d` failed due to HEAD position).
+/// 2. The branch has an upstream and all local commits are pushed to it
+///    (`git rev-list --count <upstream>..<branch>` == 0). This proves no local-only
+///    commits exist, making deletion safe even when the remote branch was squash-merged
+///    and then deleted.
+fn can_safely_force_delete(source: &AbsolutePath, branch: &str, base_branch: &str) -> bool {
+    // Fallback 1: branch is ancestor of base_branch (fully merged)
+    if crate::git::git(
+        source,
+        &["merge-base", "--is-ancestor", branch, base_branch],
+    )
+    .is_ok()
+    {
+        return true;
+    }
+
+    // Fallback 2: branch has upstream tracking and no unpushed commits
+    if let Ok(upstream) = crate::git::git(
+        source,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:short)",
+            &format!("refs/heads/{}", branch),
+        ],
+    ) {
+        if !upstream.is_empty() {
+            let range = format!("{}..{}", upstream, branch);
+            if let Ok(count) = crate::git::git(source, &["rev-list", "--count", &range]) {
+                if count.trim() == "0" {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec<String>) -> bool {
@@ -891,5 +959,182 @@ mod tests {
         // ls should show empty
         let ls2 = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls2.forests.len(), 0);
+    }
+
+    // --- Branch deletion fallback tests ---
+
+    /// Helper: commit a file in a git directory.
+    fn commit_file(dir: &std::path::Path, filename: &str, content: &str, message: &str) {
+        std::fs::write(dir.join(filename), content).unwrap();
+        crate::git::git(dir, &["add", filename]).unwrap();
+        crate::git::git(dir, &["commit", "-m", message]).unwrap();
+    }
+
+    #[test]
+    fn rm_fully_pushed_branch_succeeds_via_upstream_check() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-pushed", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-pushed");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add a commit to the feature branch and push it
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "feature.txt", "feature work", "feat: add feature");
+        crate::git::git(&wt_dir, &["push", "-u", "origin", branch]).unwrap();
+
+        // `git branch -d` will fail because the commit isn't merged into HEAD.
+        // But the upstream check should detect no unpushed commits, making deletion safe.
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+        assert!(rm_result.errors.is_empty());
+    }
+
+    #[test]
+    fn rm_merged_into_base_succeeds_via_ancestor_check() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-ancestor", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-ancestor");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add a commit on the feature branch
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "feature.txt", "feature work", "feat: add feature");
+
+        // Merge the feature branch into main in the source repo (real merge, not squash).
+        // After this, branch is ancestor of main, but `-d` will fail because HEAD in
+        // the source repo is on main and the worktree branch check uses a different HEAD.
+        crate::git::git(source, &["merge", branch]).unwrap();
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success via ancestor check, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+        assert!(rm_result.errors.is_empty());
+    }
+
+    #[test]
+    fn rm_unpushed_commits_fails_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-unpushed", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-unpushed");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add a commit but don't push — no upstream, no merge into base
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "local.txt", "local only", "local commit");
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected Failed, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        // Branch should still exist
+        assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+        // Error message should hint about squash-merge and include original git error
+        assert!(rm_result.errors[0].contains("squash-merge"));
+        assert!(rm_result.errors[0].contains("not fully merged"));
+    }
+
+    #[test]
+    fn rm_no_remote_tracking_fails_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-no-remote", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-no-remote");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add a commit but only push without -u (no upstream tracking)
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "feature.txt", "feature work", "feat: add feature");
+        // Push without -u so there's no upstream tracking
+        crate::git::git(&wt_dir, &["push", "origin", branch]).unwrap();
+        // Add another local commit that isn't pushed
+        commit_file(&wt_dir, "local.txt", "local only", "local commit");
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected Failed, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+    }
+
+    #[test]
+    fn rm_force_still_deletes_unmerged_branch_directly() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-force-direct", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-force-direct");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add an unpushed commit — would fail without --force
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "local.txt", "local only", "local commit");
+
+        let rm_result = cmd_rm(&forest_dir, &meta, true, false).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success with --force, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
     }
 }
