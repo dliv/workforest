@@ -101,14 +101,20 @@ fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option
         .build();
     let agent: Agent = config.into();
 
-    let resp: VersionResponse = agent
+    let body = agent
         .get(&url)
         .header("User-Agent", &format!("git-forest/{}", current))
         .call()
         .ok()?
         .body_mut()
-        .read_json::<VersionResponse>()
+        .read_to_string()
         .ok()?;
+
+    if debug {
+        eprintln!("[debug] version check: response {}", body);
+    }
+
+    let resp: VersionResponse = serde_json::from_str(&body).ok()?;
 
     Some(resp.version)
 }
