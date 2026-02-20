@@ -2,11 +2,11 @@ import type { VersionResponse } from "./generated/VersionResponse";
 
 interface Env {
   DB: D1Database;
-  KV: KVNamespace;
+  LATEST_VERSION: string;
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname !== "/api/latest") {
@@ -23,21 +23,17 @@ export default {
     const country = cf.country || null;
     const timestamp = new Date().toISOString();
 
-    // Log to D1 (best-effort, don't fail the response)
-    try {
-      await env.DB.prepare(
+    ctx.waitUntil(
+      env.DB.prepare(
         "INSERT INTO events (city, country, version, timestamp) VALUES (?, ?, ?, ?)",
       )
         .bind(city, country, version, timestamp)
-        .run();
-    } catch (e) {
-      console.error("D1 write failed:", e);
-    }
+        .run()
+        .catch((e) => console.error("D1 write failed:", e))
+    );
 
-    // Return latest version from KV
-    const latest = await env.KV.get("latest_version");
     const response: VersionResponse = {
-      version: latest || "0.2.3",
+      version: env.LATEST_VERSION,
     };
     return Response.json(response);
   },

@@ -17,6 +17,35 @@ test-linux:
 loc:
     tokei src tests
 
+# macOS-only (sed -i '' syntax). Bumps version, commits, tags, pushes, deploys worker.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # 1. Verify clean state and passing checks
+    just check
+    just test
+
+    # 2. Update version in Cargo.toml and wrangler.toml
+    sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sed -i '' 's/^LATEST_VERSION = ".*"/LATEST_VERSION = "{{version}}"/' worker/wrangler.toml
+
+    # 3. Rebuild to update Cargo.lock
+    cargo check
+    just check
+
+    # 4. Commit, tag, push (push tag by name per CLAUDE.md)
+    git add Cargo.toml Cargo.lock
+    git commit -m "chore: bump version to {{version}}"
+    git tag "v{{version}}"
+    git push
+    git push origin "v{{version}}"
+
+    # 5. Deploy worker with new LATEST_VERSION
+    just worker-deploy
+
+    echo "Released v{{version}}"
+
 # --- Worker (Cloudflare) ---
 
 generate-types:
@@ -30,12 +59,6 @@ worker-db-create:
 
 worker-db-migrate:
     cd worker && npx wrangler d1 execute git-forest-version-check --remote --file=schema.sql
-
-worker-kv-create:
-    cd worker && npx wrangler kv namespace create GIT_FOREST_KV
-
-worker-kv-seed:
-    cd worker && npx wrangler kv key put --remote --binding=KV latest_version "0.2.3"
 
 worker-logs:
     cd worker && npx wrangler tail

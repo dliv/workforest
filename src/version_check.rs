@@ -174,8 +174,7 @@ pub fn is_enabled() -> bool {
 
 /// Called after successful commands. Non-blocking: reads from cache and prints
 /// an update notice if one is available, then spawns a background subprocess
-/// to refresh the cache if stale. Never blocks on network I/O (except on the
-/// very first run, when no state file exists).
+/// to refresh the cache if stale. Never blocks on network I/O.
 pub fn check_cache_and_notify(debug: bool) {
     if !is_enabled() {
         if debug {
@@ -187,53 +186,26 @@ pub fn check_cache_and_notify(debug: bool) {
     let current = env!("CARGO_PKG_VERSION");
     let state = read_state();
 
-    // First run (no state file) or state exists but latest_version is missing:
-    // do a synchronous check so we have something to cache.
-    let needs_sync = match &state {
-        None => true,
-        Some(s) => s.latest_version.is_none(),
-    };
-
-    if needs_sync {
-        if state.is_none() {
-            if debug {
-                eprintln!("[debug] version check: state file not found, first run");
-            }
-            eprintln!(
-                "Note: git-forest checks for updates daily (current version sent to forest.dliv.gg)."
-            );
-            eprintln!("Disable: set version_check.enabled = false in config.");
-        } else if debug {
-            eprintln!("[debug] version check: state file exists but no cached version");
+    if state.is_none() {
+        // First run: show privacy notice, seed state, spawn background check
+        if debug {
+            eprintln!("[debug] version check: state file not found, first run");
         }
-
-        match fetch_latest_version(current, debug, Duration::from_millis(500)) {
-            Some(latest) => {
-                write_state(&VersionCheckState {
-                    last_checked: Utc::now(),
-                    latest_version: Some(latest.clone()),
-                });
-                if version_newer(&latest, current) {
-                    eprintln!(
-                        "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
-                        latest, current
-                    );
-                }
-            }
-            None => {
-                // Network failed — write last_checked so we don't retry every command
-                write_state(&VersionCheckState {
-                    last_checked: Utc::now(),
-                    latest_version: None,
-                });
-            }
-        }
+        eprintln!(
+            "Note: git-forest checks for updates daily (current version sent to forest.dliv.gg)."
+        );
+        eprintln!("Disable: set version_check.enabled = false in config.");
+        write_state(&VersionCheckState {
+            last_checked: Utc::now(),
+            latest_version: None,
+        });
+        spawn_background_check();
         return;
     }
 
     let cached = state.unwrap();
 
-    // Print update notice from cache (no network)
+    // Show update notice from cache if available
     if let Some(ref latest) = cached.latest_version {
         if version_newer(latest, current) {
             eprintln!(
@@ -243,10 +215,12 @@ pub fn check_cache_and_notify(debug: bool) {
         }
     }
 
-    // Spawn background refresh if stale
-    if is_stale(&cached.last_checked) {
+    // Refresh if stale (>= 24h) or if latest_version is still None (previous bg check failed)
+    if cached.latest_version.is_none() || is_stale(&cached.last_checked) {
         if debug {
-            eprintln!("[debug] version check: cache stale, spawning background check");
+            eprintln!(
+                "[debug] version check: cache stale or incomplete, spawning background check"
+            );
         }
         update_state(|s| s.last_checked = Utc::now());
         spawn_background_check();

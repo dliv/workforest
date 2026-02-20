@@ -33,6 +33,11 @@ pub struct ForestResetEntry {
     pub removed: bool,
 }
 
+pub enum ResetProgress<'a> {
+    ForestStarting { name: &'a str, path: &'a Path },
+    ForestDone(&'a ForestResetEntry),
+}
+
 // --- Planning (read-only) ---
 
 struct ResetPlan {
@@ -104,21 +109,23 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
 
 // --- Execution (impure) ---
 
-fn execute_reset(plan: &ResetPlan) -> ResetResult {
+fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) -> ResetResult {
     let mut errors = Vec::new();
+    let mut forest_entries = Vec::new();
 
     // Remove forests first (while config still exists for reference)
-    let forest_entries: Vec<ForestResetEntry> = plan
-        .forests
-        .iter()
-        .map(|(name, path)| {
-            if !path.exists() {
-                return ForestResetEntry {
-                    name: name.clone(),
-                    path: path.clone(),
-                    removed: false,
-                };
+    for (name, path) in &plan.forests {
+        if let Some(cb) = &on_progress {
+            cb(ResetProgress::ForestStarting { name, path });
+        }
+
+        let entry = if !path.exists() {
+            ForestResetEntry {
+                name: name.clone(),
+                path: path.clone(),
+                removed: false,
             }
+        } else {
             match std::fs::remove_dir_all(path) {
                 Ok(()) => ForestResetEntry {
                     name: name.clone(),
@@ -134,8 +141,13 @@ fn execute_reset(plan: &ResetPlan) -> ResetResult {
                     }
                 }
             }
-        })
-        .collect();
+        };
+
+        if let Some(cb) = &on_progress {
+            cb(ResetProgress::ForestDone(&entry));
+        }
+        forest_entries.push(entry);
+    }
 
     let config_deleted = if plan.config_exists {
         delete_file(&plan.config_path, &mut errors)
@@ -217,7 +229,12 @@ fn plan_to_confirm_required(plan: &ResetPlan) -> ResetResult {
     result
 }
 
-pub fn cmd_reset(confirm: bool, config_only: bool, dry_run: bool) -> Result<ResetResult> {
+pub fn cmd_reset(
+    confirm: bool,
+    config_only: bool,
+    dry_run: bool,
+    on_progress: Option<&dyn Fn(ResetProgress)>,
+) -> Result<ResetResult> {
     let plan = plan_reset(config_only)?;
 
     if dry_run {
@@ -228,7 +245,7 @@ pub fn cmd_reset(confirm: bool, config_only: bool, dry_run: bool) -> Result<Rese
         return Ok(plan_to_confirm_required(&plan));
     }
 
-    Ok(execute_reset(&plan))
+    Ok(execute_reset(&plan, on_progress))
 }
 
 // --- Human formatting ---
@@ -317,6 +334,50 @@ pub fn format_reset_human(result: &ResetResult) -> String {
     lines.join("\n")
 }
 
+pub fn format_reset_summary(result: &ResetResult) -> String {
+    let mut lines = Vec::new();
+
+    if result.errors.is_empty() {
+        lines.push("Reset complete.".to_string());
+    } else {
+        lines.push("Reset completed with errors.".to_string());
+    }
+
+    let is_preview = false;
+
+    lines.push(String::new());
+    let config_status = format_file_status(&result.config_file, is_preview);
+    lines.push(format!(
+        "Config: {} ({})",
+        config_status,
+        result.config_file.path.display()
+    ));
+    let state_status = format_file_status(&result.state_file, is_preview);
+    lines.push(format!(
+        "State:  {} ({})",
+        state_status,
+        result.state_file.path.display()
+    ));
+
+    if !result.warnings.is_empty() {
+        lines.push(String::new());
+        lines.push("Warnings:".to_string());
+        for warning in &result.warnings {
+            lines.push(format!("  {}", warning));
+        }
+    }
+
+    if !result.errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Errors:".to_string());
+        for error in &result.errors {
+            lines.push(format!("  {}", error));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> &'static str {
     if is_preview {
         if entry.existed {
@@ -336,7 +397,40 @@ fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> &'static str 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::path::PathBuf;
+
+    /// RAII guard that sets XDG env vars for the test and restores them on drop.
+    struct XdgEnvGuard {
+        saved_config: Option<String>,
+        saved_state: Option<String>,
+    }
+
+    impl XdgEnvGuard {
+        fn set(config: impl AsRef<std::path::Path>, state: impl AsRef<std::path::Path>) -> Self {
+            let saved_config = std::env::var("XDG_CONFIG_HOME").ok();
+            let saved_state = std::env::var("XDG_STATE_HOME").ok();
+            std::env::set_var("XDG_CONFIG_HOME", config.as_ref());
+            std::env::set_var("XDG_STATE_HOME", state.as_ref());
+            Self {
+                saved_config,
+                saved_state,
+            }
+        }
+    }
+
+    impl Drop for XdgEnvGuard {
+        fn drop(&mut self) {
+            match &self.saved_config {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match &self.saved_state {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
 
     #[test]
     fn format_reset_human_confirm_required() {
@@ -507,32 +601,21 @@ mod tests {
     }
 
     // --- Integration tests ---
+    // These tests mutate XDG env vars (process-global), so they must run serially.
 
     #[test]
+    #[serial]
     fn reset_nothing_to_do() {
-        // Point config at a nonexistent temp dir so nothing exists
         let tmp = tempfile::tempdir().unwrap();
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false);
+        let result = cmd_reset(true, false, false, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nothing to reset"));
-
-        // Restore
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_deletes_config_and_state() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
@@ -540,7 +623,6 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        // Write a minimal valid config
         let config_content = r#"
 default_template = "default"
 
@@ -555,30 +637,19 @@ path = "/tmp/nonexistent-repo"
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
         std::fs::write(state_dir.join("state.toml"), "").unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, true, false).unwrap();
+        let result = cmd_reset(true, true, false, None).unwrap();
 
         assert!(!result.dry_run);
         assert!(result.config_file.deleted);
         assert!(result.state_file.deleted);
         assert!(!config_dir.join("config.toml").exists());
         assert!(!state_dir.join("state.toml").exists());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_confirm_required_without_flags() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
@@ -597,27 +668,15 @@ path = "/tmp/nonexistent-repo"
 "#;
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(false, false, false).unwrap();
+        let result = cmd_reset(false, false, false, None).unwrap();
         assert!(result.confirm_required);
-        // Config should NOT be deleted (just previewed)
         assert!(config_dir.join("config.toml").exists());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_dry_run_no_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
@@ -636,27 +695,15 @@ path = "/tmp/nonexistent-repo"
 "#;
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(false, false, true).unwrap();
+        let result = cmd_reset(false, false, true, None).unwrap();
         assert!(result.dry_run);
-        // Config should still exist
         assert!(config_dir.join("config.toml").exists());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_removes_forests() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
@@ -664,7 +711,6 @@ path = "/tmp/nonexistent-repo"
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&worktree_base).unwrap();
 
-        // Create a forest directory with meta
         let forest_dir = worktree_base.join("my-feature");
         std::fs::create_dir_all(&forest_dir).unwrap();
         let meta = crate::meta::ForestMeta {
@@ -692,30 +738,19 @@ path = "/tmp/nonexistent-repo"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false).unwrap();
+        let result = cmd_reset(true, false, false, None).unwrap();
 
         assert!(!result.dry_run);
         assert_eq!(result.forests.len(), 1);
         assert!(result.forests[0].removed);
         assert!(!forest_dir.exists());
         assert!(result.errors.is_empty());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_config_only_leaves_forests() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
@@ -723,7 +758,6 @@ path = "/tmp/nonexistent-repo"
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&worktree_base).unwrap();
 
-        // Create a forest directory with meta
         let forest_dir = worktree_base.join("my-feature");
         std::fs::create_dir_all(&forest_dir).unwrap();
         let meta = crate::meta::ForestMeta {
@@ -751,58 +785,32 @@ path = "/tmp/nonexistent-repo"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, true, false).unwrap();
+        let result = cmd_reset(true, true, false, None).unwrap();
 
         assert!(result.config_only);
         assert!(result.forests.is_empty());
         assert!(result.config_file.deleted);
-        // Forest should still exist
         assert!(forest_dir.exists());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
+    #[serial]
     fn reset_unparseable_config_warns() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join("git-forest");
         std::fs::create_dir_all(&config_dir).unwrap();
 
-        // Write garbage config
         std::fs::write(config_dir.join("config.toml"), "this is not valid toml [[[").unwrap();
 
-        let saved_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_xdg_state = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-        std::env::set_var("XDG_STATE_HOME", tmp.path().join("state"));
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false).unwrap();
+        let result = cmd_reset(true, false, false, None).unwrap();
 
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("could not be parsed"));
-        // Config should still be deleted
         assert!(result.config_file.deleted);
         assert!(!config_dir.join("config.toml").exists());
-
-        match saved_xdg_config {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match saved_xdg_state {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 }

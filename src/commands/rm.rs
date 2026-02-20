@@ -50,6 +50,11 @@ pub enum RmOutcome {
     Failed { error: String },
 }
 
+pub enum RmProgress<'a> {
+    RepoStarting { name: &'a RepoName },
+    RepoDone(&'a RepoRmResult),
+}
+
 // --- Planning (read-only) ---
 
 pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
@@ -80,20 +85,35 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
 
 // --- Execution (impure) ---
 
-pub fn execute_rm(plan: &RmPlan, force: bool) -> RmResult {
+pub fn execute_rm(
+    plan: &RmPlan,
+    force: bool,
+    on_progress: Option<&dyn Fn(RmProgress)>,
+) -> RmResult {
     let mut repos = Vec::new();
     let mut errors = Vec::new();
 
     for repo_plan in &plan.repo_plans {
+        if let Some(cb) = &on_progress {
+            cb(RmProgress::RepoStarting {
+                name: &repo_plan.name,
+            });
+        }
+
         let (worktree_removed, wt_succeeded) = remove_worktree(repo_plan, force, &mut errors);
 
         let branch_deleted = delete_branch(repo_plan, force, wt_succeeded, &mut errors);
 
-        repos.push(RepoRmResult {
+        let result = RepoRmResult {
             name: repo_plan.name.clone(),
             worktree_removed,
             branch_deleted,
-        });
+        };
+
+        if let Some(cb) = &on_progress {
+            cb(RmProgress::RepoDone(&result));
+        }
+        repos.push(result);
     }
 
     let forest_dir_removed = remove_forest_dir(&plan.forest_dir, force, &mut errors);
@@ -350,6 +370,7 @@ pub fn cmd_rm(
     meta: &ForestMeta,
     force: bool,
     dry_run: bool,
+    on_progress: Option<&dyn Fn(RmProgress)>,
 ) -> Result<RmResult> {
     let plan = plan_rm(forest_dir, meta);
 
@@ -357,7 +378,7 @@ pub fn cmd_rm(
         return Ok(plan_to_dry_run_result(&plan));
     }
 
-    Ok(execute_rm(&plan, force))
+    Ok(execute_rm(&plan, force, on_progress))
 }
 
 pub fn format_rm_human(result: &RmResult) -> String {
@@ -422,6 +443,48 @@ pub fn format_rm_human(result: &RmResult) -> String {
     }
 
     if !result.errors.is_empty() && !result.dry_run {
+        lines.push(String::new());
+        lines.push("Errors:".to_string());
+        for error in &result.errors {
+            lines.push(format!("  {}", error));
+        }
+    }
+
+    lines.join("\n")
+}
+
+pub fn format_repo_done(repo: &RepoRmResult) -> String {
+    let wt = match &repo.worktree_removed {
+        RmOutcome::Success => "worktree removed".to_string(),
+        RmOutcome::Skipped { reason } => format!("worktree skipped ({})", reason),
+        RmOutcome::Failed { .. } => "worktree FAILED".to_string(),
+    };
+
+    let br = match &repo.branch_deleted {
+        RmOutcome::Success => ", branch deleted".to_string(),
+        RmOutcome::Skipped { reason } => {
+            if reason == "branch not created by forest" {
+                " (branch not ours)".to_string()
+            } else {
+                format!(", branch skipped ({})", reason)
+            }
+        }
+        RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
+    };
+
+    format!("{}{}", wt, br)
+}
+
+pub fn format_rm_summary(result: &RmResult) -> String {
+    let mut lines = Vec::new();
+
+    if result.forest_dir_removed {
+        lines.push("Forest directory removed.".to_string());
+    } else {
+        lines.push("Forest directory not removed (not empty).".to_string());
+    }
+
+    if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in &result.errors {
@@ -551,7 +614,7 @@ mod tests {
         assert!(forest_dir.join("foo-web").exists());
 
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!forest_dir.join("foo-api").exists());
         assert!(!forest_dir.join("foo-web").exists());
@@ -575,7 +638,7 @@ mod tests {
         let branch = &meta.repos[0].branch;
         assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         // Branch should be gone
         assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
@@ -603,7 +666,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-skip-branch");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         // foo-api branch_created=true → Success
         assert!(matches!(
@@ -632,7 +695,7 @@ mod tests {
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
         assert!(forest_dir.exists());
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!forest_dir.exists());
         assert!(rm_result.forest_dir_removed);
@@ -652,7 +715,7 @@ mod tests {
         assert!(meta_path.exists());
 
         let meta = ForestMeta::read(&meta_path).unwrap();
-        cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!meta_path.exists());
     }
@@ -675,7 +738,7 @@ mod tests {
         std::fs::write(&dirty_file, "dirty").unwrap();
         crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         // foo-api should fail (dirty), foo-web should succeed
         assert!(matches!(
@@ -706,7 +769,7 @@ mod tests {
         std::fs::write(&dirty_file, "dirty").unwrap();
         crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, true, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
 
         assert!(matches!(
             rm_result.repos[0].worktree_removed,
@@ -735,7 +798,7 @@ mod tests {
         crate::git::git(&wt_dir, &["add", "new-file.txt"]).unwrap();
         crate::git::git(&wt_dir, &["commit", "-m", "unmerged commit"]).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, true, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
 
         // With --force, branch should be deleted even if unmerged
         assert!(matches!(
@@ -764,7 +827,7 @@ mod tests {
         std::fs::remove_dir_all(forest_dir.join("foo-api")).unwrap();
         crate::git::git(source, &["worktree", "prune"]).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(matches!(
             rm_result.repos[0].worktree_removed,
@@ -793,7 +856,7 @@ mod tests {
         // Point source to a nonexistent path
         meta.repos[0].source = AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         // Worktree should still be removed (via direct fs removal since source is missing)
         assert!(matches!(
@@ -821,7 +884,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-dry");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, true).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
         assert!(rm_result.dry_run);
         // Everything should still exist
@@ -842,7 +905,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-result");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert_eq!(rm_result.forest_name.as_str(), "rm-result");
         assert!(!rm_result.dry_run);
@@ -953,7 +1016,7 @@ mod tests {
         // Remove
         let forest_dir = tmpl.worktree_base.join("roundtrip");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
         assert!(rm_result.errors.is_empty());
 
         // ls should show empty
@@ -993,7 +1056,7 @@ mod tests {
 
         // `git branch -d` will fail because the commit isn't merged into HEAD.
         // But the upstream check should detect no unpushed commits, making deletion safe.
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(
             matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
@@ -1029,7 +1092,7 @@ mod tests {
         // the source repo is on main and the worktree branch check uses a different HEAD.
         crate::git::git(source, &["merge", branch]).unwrap();
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(
             matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
@@ -1060,7 +1123,7 @@ mod tests {
         crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
         commit_file(&wt_dir, "local.txt", "local only", "local commit");
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(
             matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
@@ -1098,7 +1161,7 @@ mod tests {
         // Add another local commit that isn't pushed
         commit_file(&wt_dir, "local.txt", "local only", "local commit");
 
-        let rm_result = cmd_rm(&forest_dir, &meta, false, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(
             matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
@@ -1128,7 +1191,7 @@ mod tests {
         crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
         commit_file(&wt_dir, "local.txt", "local only", "local commit");
 
-        let rm_result = cmd_rm(&forest_dir, &meta, true, false).unwrap();
+        let rm_result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
 
         assert!(
             matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),

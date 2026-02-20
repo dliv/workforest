@@ -511,7 +511,7 @@ fn rm_removes_forest() {
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
-        .stdout(predicates::str::contains("Removed forest"));
+        .stdout(predicates::str::contains("Removing forest"));
 
     // Verify everything is gone
     assert!(!forest_dir.exists());
@@ -666,7 +666,7 @@ fn rm_force_flag() {
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
-        .stdout(predicates::str::contains("Removed forest"));
+        .stdout(predicates::str::contains("Removing forest"));
 
     assert!(!forest_dir.exists());
 
@@ -1114,7 +1114,7 @@ fn version_check_missing_latest_version_does_sync_check() {
     let fake_home = tmp.path().join("home");
     std::fs::create_dir_all(&fake_home).unwrap();
 
-    // State exists but latest_version is missing — treated as needing sync check
+    // State exists but latest_version is missing — triggers background check
     write_version_state(&fake_home, "2099-01-01T00:00:00Z", None);
 
     let output = cargo_bin_cmd!("git-forest")
@@ -1138,6 +1138,14 @@ fn version_check_missing_latest_version_does_sync_check() {
     // State file should still exist with last_checked updated
     let state = read_version_state(&fake_home);
     assert!(state.is_some(), "state file should still exist");
+
+    // last_checked should have been updated (no longer far-future)
+    let state_content = state.unwrap();
+    assert!(
+        !state_content.contains("2099-01-01"),
+        "last_checked should have been updated: {}",
+        state_content
+    );
 }
 
 #[test]
@@ -1180,6 +1188,47 @@ fn version_check_no_ambiguous_message() {
         !stderr.contains("or the update server is unreachable"),
         "old ambiguous message should be gone: {}",
         stderr
+    );
+}
+
+#[test]
+fn reset_confirm_does_not_trigger_version_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Write a config so reset has something to delete
+    let config_dir = fake_home.join(".config").join("git-forest");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+default_template = "default"
+[template.default]
+worktree_base = "/tmp/nonexistent"
+base_branch = "main"
+feature_branch_template = "test/{name}"
+[[template.default.repos]]
+path = "/tmp/nonexistent-repo"
+"#,
+    )
+    .unwrap();
+
+    // Write a version state file
+    write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("0.0.1"));
+
+    cargo_bin_cmd!("git-forest")
+        .args(["reset", "--confirm"])
+        .env("HOME", &fake_home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .assert()
+        .success();
+
+    // State file should be gone (deleted by reset) and NOT recreated by version check
+    assert!(
+        read_version_state(&fake_home).is_none(),
+        "version check should not run after reset"
     );
 }
 

@@ -30,7 +30,6 @@ fn main() {
         Command::Init { .. }
             | Command::New { .. }
             | Command::Rm { .. }
-            | Command::Reset { .. }
             | Command::Ls
             | Command::Status { .. }
             | Command::Exec { .. }
@@ -172,10 +171,32 @@ fn run(cli: Cli) -> Result<()> {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
-            let result = commands::cmd_rm(&dir, &meta, force, dry_run)?;
-            let has_errors = !result.errors.is_empty();
-            output(&result, cli.json, commands::format_rm_human)?;
-            if has_errors {
+            let result = if cli.json || dry_run {
+                let r = commands::cmd_rm(&dir, &meta, force, dry_run, None)?;
+                output(&r, cli.json, commands::format_rm_human)?;
+                r
+            } else {
+                use std::io::Write;
+                println!("Removing forest {:?}", meta.name.as_str());
+                let r = commands::cmd_rm(
+                    &dir,
+                    &meta,
+                    force,
+                    dry_run,
+                    Some(&|progress| match progress {
+                        commands::RmProgress::RepoStarting { name } => {
+                            print!("  {}: removing...", name);
+                            std::io::stdout().flush().ok();
+                        }
+                        commands::RmProgress::RepoDone(repo) => {
+                            println!(" {}", commands::format_repo_done(repo));
+                        }
+                    }),
+                )?;
+                println!("{}", commands::format_rm_summary(&r));
+                r
+            };
+            if !result.errors.is_empty() {
                 std::process::exit(1);
             }
         }
@@ -184,11 +205,44 @@ fn run(cli: Cli) -> Result<()> {
             config_only,
             dry_run,
         } => {
-            let result = commands::cmd_reset(confirm, config_only, dry_run)?;
-            let has_errors = !result.errors.is_empty();
-            let confirm_required = result.confirm_required;
-            output(&result, cli.json, commands::format_reset_human)?;
-            if has_errors || confirm_required {
+            let result = if cli.json {
+                let r = commands::cmd_reset(confirm, config_only, dry_run, None)?;
+                output(&r, true, commands::format_reset_human)?;
+                r
+            } else if dry_run || !confirm {
+                let r = commands::cmd_reset(confirm, config_only, dry_run, None)?;
+                let text = commands::format_reset_human(&r);
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
+                r
+            } else {
+                use std::io::Write;
+                if !config_only {
+                    println!("Forests:");
+                }
+                let r = commands::cmd_reset(
+                    confirm,
+                    config_only,
+                    dry_run,
+                    Some(&|progress| match progress {
+                        commands::ResetProgress::ForestStarting { name, path } => {
+                            print!("  Removing {} ({})...", name, path.display());
+                            std::io::stdout().flush().ok();
+                        }
+                        commands::ResetProgress::ForestDone(entry) => {
+                            if entry.removed {
+                                println!(" done");
+                            } else {
+                                println!(" FAILED");
+                            }
+                        }
+                    }),
+                )?;
+                println!("{}", commands::format_reset_summary(&r));
+                r
+            };
+            if !result.errors.is_empty() || result.confirm_required {
                 std::process::exit(1);
             }
         }
