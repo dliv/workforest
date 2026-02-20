@@ -276,7 +276,9 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
 
 pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     // Create forest directory
-    std::fs::create_dir_all(&plan.forest_dir)?;
+    // (not create_dir_all: worktree_base already exists,
+    // and create_dir fails if the path appeared since planning — avoiding TOCTOU)
+    std::fs::create_dir(&plan.forest_dir)?;
 
     // Write initial meta with empty repos
     let mut meta = ForestMeta {
@@ -1070,11 +1072,10 @@ mod tests {
         let inputs = make_new_inputs("cleanup-test", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
 
-        // Sabotage: pre-create a file where the second repo's worktree dir
-        // would go, so git worktree add fails for that repo.
-        let bad_dest = &plan.repo_plans[1].dest;
-        std::fs::create_dir_all(bad_dest.parent().unwrap()).unwrap();
-        std::fs::write(&**bad_dest, "blocker").unwrap();
+        // Sabotage: remove the second repo's source so git worktree add fails.
+        // (Don't pre-create the forest dir — execute_plan needs to create it.)
+        let bad_source = &plan.repo_plans[1].source;
+        std::fs::remove_dir_all(&**bad_source).unwrap();
 
         // execute_plan should fail on the second repo
         let result = execute_plan(&plan);
