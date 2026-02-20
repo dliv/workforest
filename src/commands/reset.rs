@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::forest::discover_forests;
-use crate::paths::sanitize_forest_name;
+use crate::paths::{sanitize_forest_name, AbsolutePath};
 
 // --- Types ---
 
@@ -40,13 +40,24 @@ pub enum ResetProgress<'a> {
 
 // --- Planning (read-only) ---
 
+struct ForestRepoInfo {
+    source: AbsolutePath,
+    worktree_dir: PathBuf,
+}
+
+struct ForestInfo {
+    name: String,
+    path: PathBuf,
+    repos: Vec<ForestRepoInfo>,
+}
+
 struct ResetPlan {
     config_path: PathBuf,
     config_exists: bool,
     state_path: PathBuf,
     state_exists: bool,
     config_only: bool,
-    forests: Vec<(String, PathBuf)>,
+    forests: Vec<ForestInfo>,
     warnings: Vec<String>,
 }
 
@@ -70,7 +81,19 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                             for meta in metas {
                                 let dir_name = sanitize_forest_name(meta.name.as_str());
                                 let forest_path = base.join(&dir_name);
-                                forests.push((meta.name.to_string(), forest_path));
+                                let repos = meta
+                                    .repos
+                                    .iter()
+                                    .map(|r| ForestRepoInfo {
+                                        source: r.source.clone(),
+                                        worktree_dir: forest_path.join(r.name.as_str()),
+                                    })
+                                    .collect();
+                                forests.push(ForestInfo {
+                                    name: meta.name.to_string(),
+                                    path: forest_path,
+                                    repos,
+                                });
                             }
                         }
                         Err(e) => {
@@ -114,9 +137,24 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
     let mut forest_entries = Vec::new();
 
     // Remove forests first (while config still exists for reference)
-    for (name, path) in &plan.forests {
+    for forest in &plan.forests {
+        let (name, path) = (&forest.name, &forest.path);
         if let Some(cb) = &on_progress {
             cb(ResetProgress::ForestStarting { name, path });
+        }
+
+        // Unregister git worktrees before deleting the directory.
+        // Best-effort: log failures as warnings but don't block deletion.
+        for repo in &forest.repos {
+            let wt_str = repo.worktree_dir.to_string_lossy();
+            if let Err(e) =
+                crate::git::git(&repo.source, &["worktree", "remove", "--force", &wt_str])
+            {
+                errors.push(format!(
+                    "warning: git worktree remove failed for {}: {}",
+                    wt_str, e
+                ));
+            }
         }
 
         let entry = if !path.exists() {
@@ -211,10 +249,10 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
         forests: plan
             .forests
             .iter()
-            .map(|(name, path)| ForestResetEntry {
-                name: name.clone(),
-                path: path.clone(),
-                removed: path.exists(),
+            .map(|f| ForestResetEntry {
+                name: f.name.clone(),
+                path: f.path.clone(),
+                removed: f.path.exists(),
             })
             .collect(),
         warnings: plan.warnings.clone(),

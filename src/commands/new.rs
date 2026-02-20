@@ -289,24 +289,24 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     let meta_path = plan.forest_dir.join(META_FILENAME);
     meta.write(&meta_path)?;
 
-    // Create worktrees incrementally
+    // Create worktrees incrementally, tracking successes for rollback
+    let mut created_worktrees: Vec<(&AbsolutePath, &AbsolutePath)> = Vec::new();
+
     for repo_plan in &plan.repo_plans {
         let dest_str = repo_plan.dest.to_string_lossy();
 
         let branch_str = repo_plan.branch.as_str();
-        match &repo_plan.checkout {
-            CheckoutKind::ExistingLocal => {
-                crate::git::git(
-                    &repo_plan.source,
-                    &["worktree", "add", &dest_str, branch_str],
-                )?;
-            }
+        let result = match &repo_plan.checkout {
+            CheckoutKind::ExistingLocal => crate::git::git(
+                &repo_plan.source,
+                &["worktree", "add", &dest_str, branch_str],
+            ),
             CheckoutKind::TrackRemote => {
                 let start = format!("{}/{}", repo_plan.remote, branch_str);
                 crate::git::git(
                     &repo_plan.source,
                     &["worktree", "add", &dest_str, "-b", branch_str, &start],
-                )?;
+                )
             }
             CheckoutKind::NewBranch => {
                 let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
@@ -323,19 +323,34 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
                         &dest_str,
                         &start,
                     ],
-                )?;
+                )
+            }
+        };
+
+        match result {
+            Ok(_) => {
+                created_worktrees.push((&repo_plan.source, &repo_plan.dest));
+
+                // Update meta incrementally
+                meta.repos.push(RepoMeta {
+                    name: repo_plan.name.clone(),
+                    source: repo_plan.source.clone(),
+                    branch: repo_plan.branch.to_string(),
+                    base_branch: repo_plan.base_branch.clone(),
+                    branch_created: branch_created(&repo_plan.checkout),
+                });
+                meta.write(&meta_path)?;
+            }
+            Err(e) => {
+                // Rollback: remove successfully-created worktrees
+                for (source, dest) in &created_worktrees {
+                    let d = dest.to_string_lossy();
+                    let _ = crate::git::git(source, &["worktree", "remove", "--force", &d]);
+                }
+                let _ = std::fs::remove_dir_all(&plan.forest_dir);
+                return Err(e);
             }
         }
-
-        // Update meta incrementally
-        meta.repos.push(RepoMeta {
-            name: repo_plan.name.clone(),
-            source: repo_plan.source.clone(),
-            branch: repo_plan.branch.to_string(),
-            base_branch: repo_plan.base_branch.clone(),
-            branch_created: branch_created(&repo_plan.checkout),
-        });
-        meta.write(&meta_path)?;
     }
 
     Ok(plan_to_result(plan, false))
