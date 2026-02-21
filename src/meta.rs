@@ -15,10 +15,10 @@ pub enum ForestMode {
 
 impl fmt::Display for ForestMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ForestMode::Feature => write!(f, "feature"),
-            ForestMode::Review => write!(f, "review"),
-        }
+        f.pad(match self {
+            ForestMode::Feature => "feature",
+            ForestMode::Review => "review",
+        })
     }
 }
 

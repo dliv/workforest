@@ -22,6 +22,7 @@ pub struct RepoRmPlan {
     pub branch_created: bool,
     pub worktree_exists: bool,
     pub source_exists: bool,
+    pub has_dirty_files: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +64,11 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
         .iter()
         .map(|repo| {
             let worktree_path = forest_dir.join(repo.name.as_str());
+            let worktree_exists = worktree_path.exists();
+            let has_dirty_files = worktree_exists
+                && crate::git::git(&worktree_path, &["status", "--porcelain"])
+                    .map(|output| !output.is_empty())
+                    .unwrap_or(false);
             RepoRmPlan {
                 name: repo.name.clone(),
                 worktree_path: worktree_path.clone(),
@@ -70,8 +76,9 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
                 branch: repo.branch.clone(),
                 base_branch: repo.base_branch.clone(),
                 branch_created: repo.branch_created,
-                worktree_exists: worktree_path.exists(),
+                worktree_exists,
                 source_exists: repo.source.is_dir(),
+                has_dirty_files,
             }
         })
         .collect();
@@ -90,6 +97,62 @@ pub fn execute_rm(
     force: bool,
     on_progress: Option<&dyn Fn(RmProgress)>,
 ) -> RmResult {
+    // Preflight: if not forcing, reject if any repo has dirty files
+    if !force {
+        let dirty_repos: Vec<&RepoRmPlan> = plan
+            .repo_plans
+            .iter()
+            .filter(|rp| rp.has_dirty_files)
+            .collect();
+
+        if !dirty_repos.is_empty() {
+            let mut repos = Vec::new();
+            let mut errors = Vec::new();
+
+            for rp in &plan.repo_plans {
+                let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
+                    let msg = format!("{}: worktree has uncommitted changes", rp.name);
+                    errors.push(msg.clone());
+                    (
+                        RmOutcome::Failed { error: msg },
+                        RmOutcome::Skipped {
+                            reason: "worktree not removed".to_string(),
+                        },
+                    )
+                } else {
+                    (
+                        RmOutcome::Skipped {
+                            reason: "blocked by dirty repos".to_string(),
+                        },
+                        RmOutcome::Skipped {
+                            reason: "blocked by dirty repos".to_string(),
+                        },
+                    )
+                };
+                repos.push(RepoRmResult {
+                    name: rp.name.clone(),
+                    worktree_removed,
+                    branch_deleted,
+                });
+            }
+
+            errors.push(
+                "hint: commit or stash changes, then retry — or use `git forest rm --force`"
+                    .to_string(),
+            );
+
+            return RmResult {
+                forest_name: plan.forest_name.clone(),
+                forest_dir: plan.forest_dir.clone(),
+                dry_run: false,
+                force,
+                repos,
+                forest_dir_removed: false,
+                errors,
+            };
+        }
+    }
+
     let mut repos = Vec::new();
     let mut errors = Vec::new();
 
@@ -116,7 +179,13 @@ pub fn execute_rm(
         repos.push(result);
     }
 
-    let forest_dir_removed = remove_forest_dir(&plan.forest_dir, force, &mut errors);
+    // Defense-in-depth: only remove forest dir if no errors accumulated
+    let forest_dir_removed = if errors.is_empty() {
+        remove_forest_dir(&plan.forest_dir, force, &mut errors)
+    } else {
+        // Partial failure (unexpected runtime error) — keep meta for discoverability
+        false
+    };
 
     RmResult {
         forest_name: plan.forest_name.clone(),
@@ -322,11 +391,42 @@ fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec
 
 // --- Orchestrator ---
 
-fn plan_to_dry_run_result(plan: &RmPlan) -> RmResult {
+fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
+    let has_dirty = !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
+
+    let mut errors = Vec::new();
     let repos = plan
         .repo_plans
         .iter()
         .map(|rp| {
+            if has_dirty {
+                // Dirty preflight would block all removal
+                let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
+                    let msg = format!("{}: worktree has uncommitted changes", rp.name);
+                    errors.push(msg.clone());
+                    (
+                        RmOutcome::Failed { error: msg },
+                        RmOutcome::Skipped {
+                            reason: "worktree not removed".to_string(),
+                        },
+                    )
+                } else {
+                    (
+                        RmOutcome::Skipped {
+                            reason: "blocked by dirty repos".to_string(),
+                        },
+                        RmOutcome::Skipped {
+                            reason: "blocked by dirty repos".to_string(),
+                        },
+                    )
+                };
+                return RepoRmResult {
+                    name: rp.name.clone(),
+                    worktree_removed,
+                    branch_deleted,
+                };
+            }
+
             let worktree_removed = if !rp.worktree_exists {
                 RmOutcome::Skipped {
                     reason: "worktree already missing".to_string(),
@@ -354,14 +454,21 @@ fn plan_to_dry_run_result(plan: &RmPlan) -> RmResult {
         })
         .collect();
 
+    if has_dirty {
+        errors.push(
+            "hint: commit or stash changes, then retry — or use `git forest rm --force`"
+                .to_string(),
+        );
+    }
+
     RmResult {
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
         dry_run: true,
-        force: false,
+        force,
         repos,
-        forest_dir_removed: true,
-        errors: vec![],
+        forest_dir_removed: !has_dirty,
+        errors,
     }
 }
 
@@ -375,7 +482,7 @@ pub fn cmd_rm(
     let plan = plan_rm(forest_dir, meta);
 
     if dry_run {
-        return Ok(plan_to_dry_run_result(&plan));
+        return Ok(plan_to_dry_run_result(&plan, force));
     }
 
     Ok(execute_rm(&plan, force, on_progress))
@@ -721,35 +828,44 @@ mod tests {
     }
 
     #[test]
-    fn rm_best_effort_continues_on_failure() {
+    fn rm_dirty_repo_blocks_all_removal() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
         let tmpl = env.default_template(&["foo-api", "foo-web"]);
 
-        let inputs = make_new_inputs("rm-best-effort", ForestMode::Feature);
+        let inputs = make_new_inputs("rm-dirty-block", ForestMode::Feature);
         cmd_new(inputs, &tmpl).unwrap();
 
-        let forest_dir = tmpl.worktree_base.join("rm-best-effort");
+        let forest_dir = tmpl.worktree_base.join("rm-dirty-block");
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
 
-        // Make foo-api dirty so worktree remove fails without --force
+        // Make foo-api dirty so preflight blocks removal
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
         std::fs::write(&dirty_file, "dirty").unwrap();
         crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
-        // foo-api should fail (dirty), foo-web should succeed
+        // foo-api should fail (dirty)
         assert!(matches!(
             rm_result.repos[0].worktree_removed,
             RmOutcome::Failed { .. }
         ));
+        // foo-web should be skipped (blocked by dirty repos), not attempted
         assert!(matches!(
             rm_result.repos[1].worktree_removed,
-            RmOutcome::Success
+            RmOutcome::Skipped { .. }
         ));
         assert!(!rm_result.errors.is_empty());
+        // Meta file should still exist — forest remains discoverable
+        assert!(forest_dir.join(META_FILENAME).exists());
+        // Forest directory should still exist
+        assert!(forest_dir.exists());
+        // Both worktrees should still exist (nothing was touched)
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join("foo-web").exists());
+        assert!(!rm_result.forest_dir_removed);
     }
 
     #[test]
@@ -1199,5 +1315,133 @@ mod tests {
             rm_result.repos[0].branch_deleted
         );
         assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+    }
+
+    #[test]
+    fn rm_force_bypasses_dirty_check() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        let inputs = make_new_inputs("rm-force-dirty2", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-force-dirty2");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        // Make foo-api dirty
+        let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
+        std::fs::write(&dirty_file, "dirty").unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+
+        let rm_result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        // --force bypasses dirty check, everything removed
+        assert!(matches!(
+            rm_result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            rm_result.repos[1].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(rm_result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn rm_retry_after_cleaning_dirty_repo() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-retry", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-retry");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        // Make dirty
+        let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
+        std::fs::write(&dirty_file, "dirty").unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+
+        // First attempt fails
+        let rm1 = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(!rm1.errors.is_empty());
+        assert!(forest_dir.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+
+        // Clean the dirty state: unstage and remove the file
+        crate::git::git(&forest_dir.join("foo-api"), &["reset", "HEAD", "dirty.txt"]).unwrap();
+        std::fs::remove_file(&dirty_file).unwrap();
+
+        // Re-read meta (still there) and retry — re-plan to pick up clean state
+        let meta2 = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let rm2 = cmd_rm(&forest_dir, &meta2, false, false, None).unwrap();
+        assert!(rm2.errors.is_empty());
+        assert!(rm2.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn plan_rm_detects_dirty_files() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        let inputs = make_new_inputs("plan-dirty", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("plan-dirty");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        // Make foo-api dirty
+        std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+
+        let plan = plan_rm(&forest_dir, &meta);
+        assert!(plan.repo_plans[0].has_dirty_files);
+        assert!(!plan.repo_plans[1].has_dirty_files);
+    }
+
+    #[test]
+    fn dry_run_shows_dirty_rejection() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        let inputs = make_new_inputs("dry-dirty", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("dry-dirty");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        // Make foo-api dirty
+        std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(rm_result.dry_run);
+        // Dirty repo should show as failed
+        assert!(matches!(
+            rm_result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        // Clean repo should show as skipped (blocked)
+        assert!(matches!(
+            rm_result.repos[1].worktree_removed,
+            RmOutcome::Skipped { .. }
+        ));
+        assert!(!rm_result.forest_dir_removed);
+        assert!(!rm_result.errors.is_empty());
+        // Nothing should have been touched
+        assert!(forest_dir.exists());
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join("foo-web").exists());
     }
 }

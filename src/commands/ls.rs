@@ -351,6 +351,51 @@ mod tests {
     }
 
     #[test]
+    fn format_ls_human_alignment_snapshot() {
+        let result = LsResult {
+            forests: vec![
+                ForestSummary {
+                    name: ForestName::new("a".to_string()).unwrap(),
+                    age_seconds: 300,
+                    age_display: "5m ago".to_string(),
+                    mode: ForestMode::Feature,
+                    branch_summary: vec![BranchCount {
+                        branch: "dliv/a".to_string(),
+                        count: 2,
+                    }],
+                },
+                ForestSummary {
+                    name: ForestName::new("review-bar-very-long-name".to_string()).unwrap(),
+                    age_seconds: 86400,
+                    age_display: "1d ago".to_string(),
+                    mode: ForestMode::Review,
+                    branch_summary: vec![
+                        BranchCount {
+                            branch: "forest/review-bar".to_string(),
+                            count: 2,
+                        },
+                        BranchCount {
+                            branch: "sue/fix-dialog".to_string(),
+                            count: 1,
+                        },
+                    ],
+                },
+                ForestSummary {
+                    name: ForestName::new("mid-length".to_string()).unwrap(),
+                    age_seconds: 7200,
+                    age_display: "2h ago".to_string(),
+                    mode: ForestMode::Feature,
+                    branch_summary: vec![BranchCount {
+                        branch: "dliv/mid".to_string(),
+                        count: 3,
+                    }],
+                },
+            ],
+        };
+        insta::assert_snapshot!(format_ls_human(&result));
+    }
+
+    #[test]
     fn format_ls_human_with_data() {
         let result = LsResult {
             forests: vec![ForestSummary {

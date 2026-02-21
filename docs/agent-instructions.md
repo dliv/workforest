@@ -109,6 +109,8 @@ git forest new review-pr-456 --mode review \
   --repo-branch api=feature/new-endpoint \
   --repo-branch web=feature/new-ui
 # work in ~/worktrees/review-pr-456/api/ and .../web/
+# diff against origin/<base>, not local <base> — local may be stale
+# git diff origin/main...feature/new-endpoint
 git forest rm review-pr-456
 ```
 
