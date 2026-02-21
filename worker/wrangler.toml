@@ -14,4 +14,4 @@ database_name = "git-forest-version-check"
 database_id = "28dbcad0-a42c-4a7d-bb9a-aebf335adff5"
 
 [vars]
-LATEST_VERSION = "0.2.16"
+LATEST_VERSION = "0.2.17"
