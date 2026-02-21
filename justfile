@@ -35,16 +35,13 @@ release version:
     just check
 
     # 4. Commit, tag, push (push tag by name per CLAUDE.md)
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock worker/wrangler.toml
     git commit -m "chore: bump version to {{version}}"
     git tag "v{{version}}"
     git push
     git push origin "v{{version}}"
 
-    # 5. Deploy worker with new LATEST_VERSION
-    just worker-deploy
-
-    echo "Released v{{version}}"
+    echo "Released v{{version}} — worker deploys via CI"
 
 # --- Worker (Cloudflare) ---
 

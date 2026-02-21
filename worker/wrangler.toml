@@ -1,3 +1,4 @@
+# wranger.toml
 name = "git-forest-api"
 main = "src/index.ts"
 compatibility_date = "2026-02-16"
@@ -10,8 +11,7 @@ custom_domain = true
 [[d1_databases]]
 binding = "DB"
 database_name = "git-forest-version-check"
-database_id = ""
+database_id = "28dbcad0-a42c-4a7d-bb9a-aebf335adff5"
 
-[[kv_namespaces]]
-binding = "KV"
-id = ""
+[vars]
+LATEST_VERSION = "0.2.16"
