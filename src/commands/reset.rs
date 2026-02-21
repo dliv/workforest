@@ -441,6 +441,7 @@ fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> &'static str 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel;
     use serial_test::serial;
     use std::path::PathBuf;
 
@@ -662,8 +663,8 @@ mod tests {
     #[serial]
     fn reset_deletes_config_and_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
-        let state_dir = tmp.path().join("state").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let state_dir = tmp.path().join("state").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
@@ -696,7 +697,7 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_confirm_required_without_flags() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
 
         let config_content = r#"
@@ -723,7 +724,7 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_dry_run_no_changes() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
 
         let config_content = r#"
@@ -750,7 +751,7 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_removes_forests() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
         let worktree_base = tmp.path().join("worktrees");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&worktree_base).unwrap();
@@ -797,7 +798,7 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_config_only_leaves_forests() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
         let worktree_base = tmp.path().join("worktrees");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::create_dir_all(&worktree_base).unwrap();
@@ -843,7 +844,7 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_unparseable_config_warns() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config").join("git-forest");
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
 
         std::fs::write(config_dir.join("config.toml"), "this is not valid toml [[[").unwrap();
@@ -898,7 +899,7 @@ path = "/tmp/nonexistent-repo"
         // 2. Write config so reset can find the forest
         let base = env.worktree_base();
         let tmp_root = base.parent().unwrap();
-        let config_dir = tmp_root.join("config").join("git-forest");
+        let config_dir = tmp_root.join("config").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_content = format!(
             r#"
@@ -961,7 +962,7 @@ name = "repo-a"
         // 2. Write config and reset
         let base = env.worktree_base();
         let tmp_root = base.parent().unwrap();
-        let config_dir = tmp_root.join("config").join("git-forest");
+        let config_dir = tmp_root.join("config").join(channel::APP_NAME);
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_content = format!(
             r#"

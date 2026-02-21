@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use ureq::Agent;
 
-const VERSION_CHECK_URL: &str = "https://forest.dliv.gg/api/latest";
+use crate::channel;
 const CHECK_INTERVAL_HOURS: i64 = 24;
 
 pub struct UpdateNotice {
@@ -90,7 +90,12 @@ struct VersionResponse {
 }
 
 fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option<String> {
-    let url = format!("{}?v={}", VERSION_CHECK_URL, current);
+    let url = format!(
+        "{}?v={}&channel={}",
+        channel::VERSION_CHECK_BASE_URL,
+        current,
+        channel::VERSION_CHANNEL
+    );
 
     if debug {
         eprintln!("[debug] version check: fetching {}", url);
@@ -103,7 +108,7 @@ fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option
 
     let body = agent
         .get(&url)
-        .header("User-Agent", &format!("git-forest/{}", current))
+        .header("User-Agent", &format!("{}/{}", channel::APP_NAME, current))
         .call()
         .ok()?
         .body_mut()
@@ -138,7 +143,7 @@ fn spawn_background_check() {
         Err(_) => return,
     };
     let _ = std::process::Command::new(exe)
-        .arg("--internal-version-check")
+        .arg(channel::INTERNAL_VERSION_CHECK_ARG)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -198,7 +203,8 @@ pub fn check_cache_and_notify(debug: bool) {
             eprintln!("[debug] version check: state file not found, first run");
         }
         eprintln!(
-            "Note: git-forest checks for updates daily (current version sent to forest.dliv.gg)."
+            "Note: {} checks for updates daily (current version sent to forest.dliv.gg).",
+            channel::APP_NAME
         );
         eprintln!("Disable: set version_check.enabled = false in config.");
         write_state(&VersionCheckState {
@@ -215,8 +221,10 @@ pub fn check_cache_and_notify(debug: bool) {
     if let Some(ref latest) = cached.latest_version {
         if version_newer(latest, current) {
             eprintln!(
-                "Update available: git-forest v{} (current: v{}). Run `git forest update` to upgrade.",
-                latest, current
+                "Update available: {} v{} (current: v{}). Run `git forest update` to upgrade.",
+                channel::APP_NAME,
+                latest,
+                current
             );
         }
     }

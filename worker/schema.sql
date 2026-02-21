@@ -3,7 +3,8 @@ CREATE TABLE events (
   city TEXT,
   country TEXT,
   version TEXT NOT NULL,
-  timestamp TEXT NOT NULL
+  timestamp TEXT NOT NULL,
+  channel TEXT
 );
 
 CREATE INDEX idx_events_timestamp ON events(timestamp);

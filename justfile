@@ -28,7 +28,7 @@ release version:
 
     # 2. Update version in Cargo.toml and wrangler.toml
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-    sed -i '' 's/^LATEST_VERSION = ".*"/LATEST_VERSION = "{{version}}"/' worker/wrangler.toml
+    sed -i '' 's/^LATEST_VERSION_STABLE = ".*"/LATEST_VERSION_STABLE = "{{version}}"/' worker/wrangler.toml
 
     # 3. Rebuild to update Cargo.lock
     cargo check
@@ -42,6 +42,32 @@ release version:
     git push origin "v{{version}}"
 
     echo "Released v{{version}} — worker deploys via CI"
+
+# macOS-only. Bumps beta version, commits, tags, pushes.
+release-beta version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # 1. Verify clean state and passing checks
+    just check
+    just test
+
+    # 2. Update version in Cargo.toml and wrangler.toml
+    sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sed -i '' 's/^LATEST_VERSION_BETA = ".*"/LATEST_VERSION_BETA = "{{version}}"/' worker/wrangler.toml
+
+    # 3. Rebuild to update Cargo.lock
+    cargo check
+    just check
+
+    # 4. Commit, tag, push (push tag by name per CLAUDE.md)
+    git add Cargo.toml Cargo.lock worker/wrangler.toml
+    git commit -m "chore: bump beta version to {{version}}"
+    git tag "v{{version}}"
+    git push
+    git push origin "v{{version}}"
+
+    echo "Released v{{version}} (beta) — worker deploys via CI"
 
 # --- Worker (Cloudflare) ---
 

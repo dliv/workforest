@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::channel;
 use crate::paths::{expand_tilde, AbsolutePath, RepoName};
 
 // --- Raw deserialization structs (TOML shape) ---
@@ -99,8 +100,6 @@ impl ResolvedConfig {
 
 // --- XDG path helpers ---
 
-const APP_NAME: &str = "git-forest";
-
 /// Returns the XDG config directory for git-forest.
 ///
 /// Resolution order:
@@ -146,7 +145,7 @@ fn xdg_dir_with_env(
     // 1. Explicit env var
     if let Some(val) = env_lookup(env_var) {
         if !val.is_empty() {
-            return Ok(PathBuf::from(val).join(APP_NAME));
+            return Ok(PathBuf::from(val).join(channel::APP_NAME));
         }
     }
 
@@ -154,14 +153,16 @@ fn xdg_dir_with_env(
     #[cfg(unix)]
     {
         if let Some(home) = env_lookup("HOME") {
-            return Ok(PathBuf::from(home).join(default_suffix).join(APP_NAME));
+            return Ok(PathBuf::from(home)
+                .join(default_suffix)
+                .join(channel::APP_NAME));
         }
     }
 
     // 3. directories crate fallback (Windows, or if HOME is unset)
     #[cfg(not(unix))]
     let _ = default_suffix;
-    let proj = directories::ProjectDirs::from("", "", APP_NAME)
+    let proj = directories::ProjectDirs::from("", "", channel::APP_NAME)
         .context("could not determine config directory")?;
     Ok(fallback(&proj))
 }
@@ -957,7 +958,10 @@ path = "/tmp/src/foo-api"
             },
         )
         .unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/test-xdg-config/git-forest"));
+        assert_eq!(
+            result,
+            PathBuf::from("/tmp/test-xdg-config").join(channel::APP_NAME)
+        );
     }
 
     #[test]
@@ -976,7 +980,10 @@ path = "/tmp/src/foo-api"
             },
         )
         .unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/test-xdg-state/git-forest"));
+        assert_eq!(
+            result,
+            PathBuf::from("/tmp/test-xdg-state").join(channel::APP_NAME)
+        );
     }
 
     #[cfg(unix)]
@@ -992,7 +999,10 @@ path = "/tmp/src/foo-api"
             },
         )
         .unwrap();
-        assert_eq!(result, PathBuf::from("/home/testuser/.config/git-forest"));
+        assert_eq!(
+            result,
+            PathBuf::from("/home/testuser/.config").join(channel::APP_NAME)
+        );
     }
 
     #[cfg(unix)]
@@ -1014,14 +1024,14 @@ path = "/tmp/src/foo-api"
         .unwrap();
         assert_eq!(
             result,
-            PathBuf::from("/home/testuser/.local/state/git-forest")
+            PathBuf::from("/home/testuser/.local/state").join(channel::APP_NAME)
         );
     }
 
     #[test]
     fn default_config_path_ends_with_config_toml() {
         let path = super::default_config_path().unwrap();
-        assert!(path.ends_with("git-forest/config.toml"));
+        assert!(path.ends_with(format!("{}/config.toml", channel::APP_NAME)));
     }
 
     // --- Permission diagnosis tests ---

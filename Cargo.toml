@@ -17,6 +17,21 @@ ureq = { version = "3", features = ["json"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+default = ["stable"]
+stable = []
+beta = []
+
+[[bin]]
+name = "git-forest"
+path = "src/main.rs"
+required-features = ["stable"]
+
+[[bin]]
+name = "git-forest-beta"
+path = "src/main.rs"
+required-features = ["beta"]
+
 [dev-dependencies]
 assert_cmd = "2"
 insta = "1"

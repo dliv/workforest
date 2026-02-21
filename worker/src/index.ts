@@ -2,7 +2,8 @@ import type { VersionResponse } from "./generated/VersionResponse";
 
 interface Env {
   DB: D1Database;
-  LATEST_VERSION: string;
+  LATEST_VERSION_STABLE: string;
+  LATEST_VERSION_BETA: string;
 }
 
 export default {
@@ -18,6 +19,7 @@ export default {
     }
 
     const version = url.searchParams.get("v") || "unknown";
+    const channel = url.searchParams.get("channel") || "stable";
     const cf = (request as any).cf || {};
     const city = cf.city || null;
     const country = cf.country || null;
@@ -25,15 +27,19 @@ export default {
 
     ctx.waitUntil(
       env.DB.prepare(
-        "INSERT INTO events (city, country, version, timestamp) VALUES (?, ?, ?, ?)",
+        "INSERT INTO events (city, country, version, timestamp, channel) VALUES (?, ?, ?, ?, ?)",
       )
-        .bind(city, country, version, timestamp)
+        .bind(city, country, version, timestamp, channel)
         .run()
         .catch((e) => console.error("D1 write failed:", e))
     );
 
+    const latest = channel === "beta"
+      ? env.LATEST_VERSION_BETA
+      : env.LATEST_VERSION_STABLE;
+
     const response: VersionResponse = {
-      version: env.LATEST_VERSION,
+      version: latest,
     };
     return Response.json(response);
   },

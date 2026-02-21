@@ -2,11 +2,23 @@ use crate::meta::ForestMode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(
-    name = "git-forest",
-    version = env!("CARGO_PKG_VERSION"),
-    about = "Multi-repo worktree orchestrator",
-    after_help = "For AI agent usage instructions: git forest agent-instructions"
+#[cfg_attr(
+    feature = "stable",
+    command(
+        name = "git-forest",
+        version = env!("CARGO_PKG_VERSION"),
+        about = "Multi-repo worktree orchestrator",
+        after_help = "For AI agent usage instructions: git forest agent-instructions"
+    )
+)]
+#[cfg_attr(
+    feature = "beta",
+    command(
+        name = "git-forest-beta",
+        version = env!("CARGO_PKG_VERSION"),
+        about = "Multi-repo worktree orchestrator (beta)",
+        after_help = "For AI agent usage instructions: git forest-beta agent-instructions"
+    )
 )]
 pub struct Cli {
     #[arg(long, global = true)]

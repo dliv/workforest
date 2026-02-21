@@ -1,12 +1,21 @@
-use assert_cmd::cargo_bin_cmd;
 use predicates::prelude::PredicateBooleanExt;
+
+fn bin_name() -> &'static str {
+    if cfg!(feature = "beta") {
+        "git-forest-beta"
+    } else {
+        "git-forest"
+    }
+}
+
+#[allow(deprecated)] // cargo_bin takes a runtime name; cargo_bin_cmd! requires a literal
+fn bin_cmd() -> assert_cmd::Command {
+    assert_cmd::Command::cargo_bin(bin_name()).unwrap()
+}
 
 #[test]
 fn help_exits_zero() {
-    cargo_bin_cmd!("git-forest")
-        .arg("--help")
-        .assert()
-        .success();
+    bin_cmd().arg("--help").assert().success();
 }
 
 #[test]
@@ -15,7 +24,7 @@ fn init_without_feature_branch_template_shows_hint() {
     let repo_dir = tmp.path().join("my-repo");
     create_test_git_repo(&repo_dir);
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["init", "--repo", repo_dir.to_str().unwrap()])
         .assert()
         .failure()
@@ -24,7 +33,7 @@ fn init_without_feature_branch_template_shows_hint() {
 
 #[test]
 fn init_show_path() {
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["init", "--show-path"])
         .assert()
         .success()
@@ -44,7 +53,7 @@ const CLEARED_XDG_VARS: [&str; 2] = ["XDG_CONFIG_HOME", "XDG_STATE_HOME"];
 fn expected_config_path(fake_home: &std::path::Path) -> std::path::PathBuf {
     fake_home
         .join(".config")
-        .join("git-forest")
+        .join(bin_name())
         .join("config.toml")
 }
 
@@ -76,7 +85,7 @@ fn init_creates_config() {
 
     let expected_config = expected_config_path(&fake_home);
 
-    let mut cmd = cargo_bin_cmd!("git-forest");
+    let mut cmd = bin_cmd();
     cmd.args([
         "init",
         "--feature-branch-template",
@@ -108,7 +117,7 @@ fn init_force_overwrites() {
     std::fs::create_dir_all(&fake_home).unwrap();
 
     let run_init = |force: bool| {
-        let mut cmd = cargo_bin_cmd!("git-forest");
+        let mut cmd = bin_cmd();
         cmd.args([
             "init",
             "--feature-branch-template",
@@ -148,7 +157,7 @@ fn init_json_output() {
     let fake_home = tmp.path().join("home");
     std::fs::create_dir_all(&fake_home).unwrap();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "--json",
             "init",
@@ -168,7 +177,7 @@ fn init_json_output() {
 
 #[test]
 fn subcommand_new_requires_mode() {
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "test-feature"])
         .assert()
         .failure()
@@ -198,7 +207,7 @@ fn with_no_config() -> assert_cmd::Command {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("empty-home");
     std::fs::create_dir_all(&fake_home).unwrap();
-    let mut cmd = cargo_bin_cmd!("git-forest");
+    let mut cmd = bin_cmd();
     for (k, v) in config_env(&fake_home) {
         cmd.env(k, v);
     }
@@ -239,7 +248,7 @@ fn exec_without_config_shows_init_hint() {
 
 #[test]
 fn no_args_shows_help() {
-    cargo_bin_cmd!("git-forest").assert().failure();
+    bin_cmd().assert().failure();
 }
 
 // --- new command integration tests ---
@@ -296,7 +305,7 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
     let worktree_base = tmp.path().join("worktrees");
 
     // Init config
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--feature-branch-template",
@@ -323,7 +332,7 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
 fn new_feature_mode_creates_forest() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "my-feature", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -346,7 +355,7 @@ fn new_feature_mode_creates_forest() {
 fn new_review_mode_with_repo_branch() {
     let (tmp, fake_home, _worktree_base) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "new",
             "review-pr",
@@ -370,7 +379,7 @@ fn new_review_mode_with_repo_branch() {
 fn new_dry_run_does_not_create() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "new",
             "dry-test",
@@ -397,7 +406,7 @@ fn new_dry_run_does_not_create() {
 fn new_json_output() {
     let (tmp, fake_home, _) = setup_new_env();
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args([
             "--json",
             "new",
@@ -429,7 +438,7 @@ fn new_duplicate_forest_name_errors() {
     let (tmp, fake_home, _) = setup_new_env();
 
     // First create succeeds
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -437,7 +446,7 @@ fn new_duplicate_forest_name_errors() {
         .success();
 
     // Second create fails
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "dup-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -453,7 +462,7 @@ fn new_no_fetch_skips_fetch() {
     let (tmp, fake_home, _) = setup_new_env();
 
     // --no-fetch should work even if we can't reach the remote
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "no-fetch-test", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -467,14 +476,14 @@ fn new_no_fetch_skips_fetch() {
 fn ls_shows_new_forest() {
     let (tmp, fake_home, _) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "visible-forest", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -492,7 +501,7 @@ fn rm_removes_forest() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 
     // Create forest
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "rm-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -505,7 +514,7 @@ fn rm_removes_forest() {
     assert!(forest_dir.join("foo-web").exists());
 
     // Remove forest
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "rm-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -525,7 +534,7 @@ fn rm_removes_forest() {
 fn rm_dry_run_preserves_forest() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "rm-dry-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -536,7 +545,7 @@ fn rm_dry_run_preserves_forest() {
     assert!(forest_dir.exists());
 
     // Dry run
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "rm-dry-e2e", "--dry-run"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -557,14 +566,14 @@ fn rm_dry_run_preserves_forest() {
 fn rm_json_output() {
     let (tmp, fake_home, _) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "rm-json-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["--json", "rm", "rm-json-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -588,7 +597,7 @@ fn rm_json_output() {
 fn rm_nonexistent_forest_errors() {
     let (_tmp, fake_home, _) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "does-not-exist"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -601,7 +610,7 @@ fn rm_nonexistent_forest_errors() {
 fn rm_force_flag() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -627,7 +636,7 @@ fn rm_force_flag() {
     run(&forest_dir.join("foo-api"), &["add", "dirty.txt"]);
 
     // Without --force: should exit 1 (partial failure)
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "rm-force-e2e"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -647,7 +656,7 @@ fn rm_force_flag() {
         &["worktree", "prune"],
     );
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["new", "rm-force-e2e", "--mode", "feature", "--no-fetch"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -660,7 +669,7 @@ fn rm_force_flag() {
     run(&forest_dir.join("foo-api"), &["add", "dirty2.txt"]);
 
     // With --force: should succeed
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "rm-force-e2e", "--force"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -684,7 +693,7 @@ fn init_with_template_name() {
     let fake_home = tmp.path().join("home");
     std::fs::create_dir_all(&fake_home).unwrap();
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--template",
@@ -714,7 +723,7 @@ fn new_with_template_flag() {
     let wt_base = tmp.path().join("worktrees");
 
     // Create template "alpha" with alpha-api
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--template",
@@ -734,7 +743,7 @@ fn new_with_template_flag() {
         .success();
 
     // Add template "beta" with beta-api
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--template",
@@ -754,7 +763,7 @@ fn new_with_template_flag() {
         .success();
 
     // Create forest using --template beta → should only have beta-api
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "new",
             "beta-feature",
@@ -791,7 +800,7 @@ fn multi_template_round_trip() {
     let wt_beta = tmp.path().join("worktrees").join("beta");
 
     // init --template alpha with repo foo-api
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--template",
@@ -811,7 +820,7 @@ fn multi_template_round_trip() {
         .success();
 
     // init --template beta with repo foo-web
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "init",
             "--template",
@@ -831,7 +840,7 @@ fn multi_template_round_trip() {
         .success();
 
     // new alpha-feature --mode feature --template alpha --no-fetch
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "new",
             "alpha-feature",
@@ -847,7 +856,7 @@ fn multi_template_round_trip() {
         .success();
 
     // new beta-feature --mode feature --template beta --no-fetch
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args([
             "new",
             "beta-feature",
@@ -863,7 +872,7 @@ fn multi_template_round_trip() {
         .success();
 
     // ls → both forests visible
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -873,7 +882,7 @@ fn multi_template_round_trip() {
         .stdout(predicates::str::contains("beta-feature"));
 
     // rm alpha-feature
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "alpha-feature"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -881,7 +890,7 @@ fn multi_template_round_trip() {
         .success();
 
     // ls → only beta-feature remains
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -891,7 +900,7 @@ fn multi_template_round_trip() {
         .stdout(predicates::str::contains("alpha-feature").not());
 
     // rm beta-feature
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["rm", "beta-feature"])
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -899,7 +908,7 @@ fn multi_template_round_trip() {
         .success();
 
     // ls → empty
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("ls")
         .env("HOME", fake_home.to_str().unwrap())
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
@@ -917,7 +926,7 @@ fn write_version_state(
     last_checked: &str,
     latest_version: Option<&str>,
 ) {
-    let state_dir = fake_home.join(".local").join("state").join("git-forest");
+    let state_dir = fake_home.join(".local").join("state").join(bin_name());
     std::fs::create_dir_all(&state_dir).unwrap();
     let mut content = format!("[version_check]\nlast_checked = \"{}\"\n", last_checked);
     if let Some(v) = latest_version {
@@ -930,7 +939,7 @@ fn read_version_state(fake_home: &std::path::Path) -> Option<String> {
     let path = fake_home
         .join(".local")
         .join("state")
-        .join("git-forest")
+        .join(bin_name())
         .join("state.toml");
     std::fs::read_to_string(path).ok()
 }
@@ -948,7 +957,7 @@ fn version_check_fresh_cache_no_notice() {
         Some(env!("CARGO_PKG_VERSION")),
     );
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -979,7 +988,7 @@ fn version_check_cached_newer_version_shows_notice() {
     // Cache has a newer version — should print notice from cache (no network)
     write_version_state(&fake_home, "2099-01-01T00:00:00Z", Some("99.99.99"));
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1014,7 +1023,7 @@ fn version_check_stale_cache_updates_timestamp() {
         Some(env!("CARGO_PKG_VERSION")),
     );
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1050,7 +1059,7 @@ fn version_check_stale_cache_with_newer_version_shows_notice_and_updates() {
     // Cache is stale AND has newer version — should show notice AND update timestamp
     write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("99.99.99"));
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1087,7 +1096,7 @@ fn version_check_first_run_shows_privacy_notice() {
     std::fs::create_dir_all(&fake_home).unwrap();
 
     // No state file — should show privacy notice and create state
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1117,7 +1126,7 @@ fn version_check_missing_latest_version_does_sync_check() {
     // State exists but latest_version is missing — triggers background check
     write_version_state(&fake_home, "2099-01-01T00:00:00Z", None);
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1156,7 +1165,7 @@ fn internal_version_check_flag_exits_cleanly() {
 
     write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("0.0.1"));
 
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .arg("--internal-version-check")
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1178,10 +1187,7 @@ fn internal_version_check_flag_exits_cleanly() {
 #[test]
 fn version_check_no_ambiguous_message() {
     // Ensure the old confusing "or the update server is unreachable" message is gone
-    let output = cargo_bin_cmd!("git-forest")
-        .args(["version", "--check"])
-        .output()
-        .unwrap();
+    let output = bin_cmd().args(["version", "--check"]).output().unwrap();
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -1198,7 +1204,7 @@ fn reset_confirm_does_not_trigger_version_check() {
     std::fs::create_dir_all(&fake_home).unwrap();
 
     // Write a config so reset has something to delete
-    let config_dir = fake_home.join(".config").join("git-forest");
+    let config_dir = fake_home.join(".config").join(bin_name());
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("config.toml"),
@@ -1217,7 +1223,7 @@ path = "/tmp/nonexistent-repo"
     // Write a version state file
     write_version_state(&fake_home, "2020-01-01T00:00:00Z", Some("0.0.1"));
 
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["reset", "--confirm"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
@@ -1236,35 +1242,35 @@ path = "/tmp/nonexistent-repo"
 
 #[test]
 fn version_flag_outputs_version() {
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0."));
+        .stdout(predicates::str::contains(format!("{} 0.", bin_name())));
 }
 
 #[test]
 fn version_subcommand_outputs_version() {
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .arg("version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0."));
+        .stdout(predicates::str::contains(format!("{} 0.", bin_name())));
 }
 
 #[test]
 fn version_check_graceful_failure() {
     // --check should succeed even when the endpoint is unreachable
-    cargo_bin_cmd!("git-forest")
+    bin_cmd()
         .args(["version", "--check"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("git-forest 0."));
+        .stdout(predicates::str::contains(format!("{} 0.", bin_name())));
 }
 
 #[test]
 fn debug_version_check_shows_debug_output() {
-    let output = cargo_bin_cmd!("git-forest")
+    let output = bin_cmd()
         .args(["--debug", "version", "--check"])
         .output()
         .unwrap();
@@ -1281,8 +1287,5 @@ fn debug_version_check_shows_debug_output() {
 #[test]
 fn update_command_does_not_crash() {
     // Should print either brew output or download link
-    cargo_bin_cmd!("git-forest")
-        .arg("update")
-        .assert()
-        .success();
+    bin_cmd().arg("update").assert().success();
 }

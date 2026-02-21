@@ -1,5 +1,6 @@
 #![warn(clippy::all)]
 
+mod channel;
 mod cli;
 mod commands;
 mod config;
@@ -17,7 +18,7 @@ use cli::{Cli, Command};
 fn main() {
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
-    if std::env::args().any(|a| a == "--internal-version-check") {
+    if std::env::args().any(|a| a == channel::INTERNAL_VERSION_CHECK_ARG) {
         version_check::run_background_version_check();
         return;
     }
@@ -274,7 +275,7 @@ fn run(cli: Cli) -> Result<()> {
             print!("{}", include_str!("../docs/agent-instructions.md"));
         }
         Command::Version { check } => {
-            println!("git-forest {}", env!("CARGO_PKG_VERSION"));
+            println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
             if check {
                 if !version_check::is_enabled() {
                     eprintln!("Version check is disabled in config.");
@@ -282,8 +283,10 @@ fn run(cli: Cli) -> Result<()> {
                     match version_check::force_check(cli.debug) {
                         version_check::ForceCheckResult::UpdateAvailable(notice) => {
                             eprintln!(
-                                "Update available: git-forest v{} (current: v{}).",
-                                notice.latest, notice.current
+                                "Update available: {} v{} (current: v{}).",
+                                channel::APP_NAME,
+                                notice.latest,
+                                notice.current
                             );
                         }
                         version_check::ForceCheckResult::UpToDate => {
@@ -298,7 +301,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Update => {
             let brew_check = std::process::Command::new("brew")
-                .args(["--prefix", "git-forest"])
+                .args(["--prefix", channel::APP_NAME])
                 .output();
 
             if brew_check.map(|o| o.status.success()).unwrap_or(false) {
@@ -308,7 +311,7 @@ fn run(cli: Cli) -> Result<()> {
                     .args(["update", "--quiet"])
                     .status();
                 let status = std::process::Command::new("brew")
-                    .args(["upgrade", "git-forest"])
+                    .args(["upgrade", channel::APP_NAME])
                     .status()?;
                 if !status.success() {
                     std::process::exit(status.code().unwrap_or(1));

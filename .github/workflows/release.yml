@@ -14,10 +14,8 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: git-forest-aarch64-apple-darwin
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: git-forest-x86_64-apple-darwin
 
     runs-on: ${{ matrix.os }}
 
@@ -28,19 +26,37 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Determine channel
+        id: channel
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-beta* ]]; then
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+            echo "bin=git-forest-beta" >> "$GITHUB_OUTPUT"
+            echo "features=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "bin=git-forest" >> "$GITHUB_OUTPUT"
+            echo "features=stable" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --no-default-features --features ${{ steps.channel.outputs.features }} \
+            --bin ${{ steps.channel.outputs.bin }}
 
       - name: Package
         run: |
+          BIN=${{ steps.channel.outputs.bin }}
+          NAME="${BIN}-${{ matrix.target }}"
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/git-forest dist/${{ matrix.name }}
-          cd dist && tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/$BIN dist/$NAME
+          cd dist && tar czf $NAME.tar.gz $NAME
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.name }}.tar.gz
+          files: dist/${{ steps.channel.outputs.bin }}-${{ matrix.target }}.tar.gz
 
   deploy-worker:
     needs: build
@@ -65,6 +81,17 @@ jobs:
     needs: [build, deploy-worker]
     runs-on: ubuntu-latest
     steps:
+      - name: Determine channel
+        id: channel
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-beta* ]]; then
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+            echo "formula=git-forest-beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "formula=git-forest" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Update Homebrew formula
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -74,9 +101,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="dliv/workforest"
           TAP_REPO="dliv/homebrew-tools"
+          BIN=${{ steps.channel.outputs.formula }}
 
-          AARCH64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-aarch64-apple-darwin.tar.gz"
-          X86_64_URL="https://github.com/$REPO/releases/download/v$VERSION/git-forest-x86_64-apple-darwin.tar.gz"
+          AARCH64_URL="https://github.com/$REPO/releases/download/v$VERSION/${BIN}-aarch64-apple-darwin.tar.gz"
+          X86_64_URL="https://github.com/$REPO/releases/download/v$VERSION/${BIN}-x86_64-apple-darwin.tar.gz"
 
           # Download release tarballs (fail fast on 404)
           curl -fSL -o aarch64.tar.gz "$AARCH64_URL"
@@ -88,17 +116,19 @@ jobs:
           echo "aarch64 SHA256: $AARCH64_SHA"
           echo "x86_64 SHA256: $X86_64_SHA"
 
+          FORMULA="Formula/${BIN}.rb"
+
           # Clone the tap repo, update formula, push
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/$TAP_REPO.git" tap
           cd tap
 
-          sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/git-forest.rb
-          sed -i "/CPU.arm?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$AARCH64_SHA\"/}" Formula/git-forest.rb
-          sed -i "/CPU.intel?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$X86_64_SHA\"/}" Formula/git-forest.rb
+          sed -i "s/version \".*\"/version \"$VERSION\"/" "$FORMULA"
+          sed -i "/CPU.arm?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$AARCH64_SHA\"/}" "$FORMULA"
+          sed -i "/CPU.intel?/{n;n;s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"$X86_64_SHA\"/}" "$FORMULA"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/git-forest.rb
+          git add "$FORMULA"
           git diff --cached --quiet && echo "No changes to formula" && exit 0
-          git commit -m "chore: bump git-forest to $VERSION"
+          git commit -m "chore: bump $BIN to $VERSION"
           git push
