@@ -10,29 +10,18 @@ Ideas from oracle review of rollback safety in `execute_plan` and `execute_reset
 
 ## Potential future hardening
 
-### 1. Created-by-this-run marker file
+### 1. ~~Created-by-this-run marker file~~ — Declined
 
-After creating the forest dir, write a marker file with `OpenOptions::new().create_new(true)`:
+**Decision:** Not needed. `create_dir` (not `create_dir_all`) already fails atomically if the directory exists, which closes the TOCTOU race the marker file was meant to guard against. A marker file doesn't add real security either — anyone who can write to `worktree_base` can write a fake marker. The `create_dir` comment in `execute_plan` documents this invariant.
 
-```rust
-let marker = plan.forest_dir.join(".git-forest.in_progress");
-let mut f = OpenOptions::new()
-    .write(true)
-    .create_new(true)
-    .open(&marker)?;
-writeln!(f, "name={}", plan.forest_name.as_str())?;
-writeln!(f, "started_at={}", chrono::Utc::now().to_rfc3339())?;
-```
+### 2. ~~Constrain worktree removal targets~~ — Done
 
-Before `remove_dir_all` in rollback, verify the marker exists and matches. Refuse to delete if it doesn't. This proves "we created this directory" rather than trusting path derivation alone.
+**Implemented:** Release-mode `assert!` calls added at all deletion sites:
+- `rm.rs` `execute_rm`: asserts `worktree_path.starts_with(forest_dir)` before each repo removal
+- `new.rs` `execute_plan` rollback: asserts `dest.starts_with(forest_dir)` before `git worktree remove --force`
+- `reset.rs` `execute_reset`: asserts `worktree_dir.starts_with(forest.path)` before `git worktree remove --force`
 
-### 2. Constrain worktree removal targets
-
-Before calling `git worktree remove --force` during rollback, assert:
-- `repo_plan.dest.starts_with(&plan.forest_dir)` — ensures the path is inside the forest directory
-- Optionally verify the worktree is registered: `git worktree list --porcelain` contains the dest path
-
-Prevents a bug/misconfig from pointing `--force` at an arbitrary directory.
+These are release-mode (not `debug_assert!`) because a violation indicates an application bug that would cause data loss — better to panic than silently delete the wrong directory.
 
 ### 3. Restrictive permissions on forest dir (Unix)
 
@@ -42,9 +31,13 @@ If `worktree_base` could be in a shared writable location (`/tmp`, shared NFS):
 
 Standard defense against symlink/race attacks in shared directories.
 
-### 4. Staging + rename pattern
+### 4. ~~Staging + rename pattern~~ — Declined
 
-Create `forest_dir.tmp.<nonce>` under worktree_base, build everything there, then `rename` to the final forest dir only on success. On failure, delete only the tmp dir. Avoids any risk of deleting a "real" directory. Bigger behavioral change since paths change late.
+**Decision:** The deletion safety benefit is illusory. The claimed advantage is that rollback deletes `.staging.<nonce>/` (which "must" be ours) instead of the real forest dir. But `create_dir` already guarantees ownership — if it succeeded, we created the dir, so deleting it in rollback is equally safe. The nonce adds no real information.
+
+Meanwhile, staging has significant downsides: `git worktree add` records the exact destination path in the source repo's `.git/worktrees/<id>/gitdir`, so renaming the parent dir after creation leaves stale path registrations that break `git worktree list/remove`. And it undermines ADR-0011's crash recovery guarantee — a crash during staging leaves worktrees in a tmp dir that `discover_forests` can't find, so `rm` can't clean them up.
+
+Staging does provide *creation* atomicity (the forest either fully appears or doesn't), but that's a different property than deletion safety, and not worth the complexity.
 
 ### 5. Filesystem-level locking
 

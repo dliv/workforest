@@ -157,6 +157,13 @@ pub fn execute_rm(
     let mut errors = Vec::new();
 
     for repo_plan in &plan.repo_plans {
+        assert!(
+            repo_plan.worktree_path.starts_with(&plan.forest_dir),
+            "worktree path {:?} is not inside forest dir {:?}",
+            repo_plan.worktree_path,
+            plan.forest_dir
+        );
+
         if let Some(cb) = &on_progress {
             cb(RmProgress::RepoStarting {
                 name: &repo_plan.name,
@@ -1443,5 +1450,26 @@ mod tests {
         assert!(forest_dir.exists());
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join("foo-web").exists());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not inside forest dir")]
+    fn execute_rm_panics_on_path_escape() {
+        let plan = RmPlan {
+            forest_name: ForestName::new("test".to_string()).unwrap(),
+            forest_dir: PathBuf::from("/tmp/forests/test"),
+            repo_plans: vec![RepoRmPlan {
+                name: RepoName::new("evil".to_string()).unwrap(),
+                worktree_path: PathBuf::from("/home/user/real-work"),
+                source: AbsolutePath::new(PathBuf::from("/tmp/src")).unwrap(),
+                branch: "main".to_string(),
+                base_branch: "main".to_string(),
+                branch_created: false,
+                worktree_exists: false,
+                source_exists: false,
+                has_dirty_files: false,
+            }],
+        };
+        execute_rm(&plan, false, None);
     }
 }

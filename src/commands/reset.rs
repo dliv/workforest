@@ -146,6 +146,12 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         // Unregister git worktrees before deleting the directory.
         // Best-effort: log failures as warnings but don't block deletion.
         for repo in &forest.repos {
+            assert!(
+                repo.worktree_dir.starts_with(&forest.path),
+                "worktree dir {:?} is not inside forest dir {:?}",
+                repo.worktree_dir,
+                forest.path
+            );
             let wt_str = repo.worktree_dir.to_string_lossy();
             if let Err(e) =
                 crate::git::git(&repo.source, &["worktree", "remove", "--force", &wt_str])

@@ -275,9 +275,9 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
 }
 
 pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
-    // Create forest directory
-    // (not create_dir_all: worktree_base already exists,
-    // and create_dir fails if the path appeared since planning — avoiding TOCTOU)
+    // SAFETY: create_dir (not create_dir_all) is intentional. It fails atomically
+    // if the directory already exists, preventing a TOCTOU race between plan_forest
+    // (which checks for collisions) and execution. Do not change to create_dir_all.
     std::fs::create_dir(&plan.forest_dir)?;
 
     // Write initial meta with empty repos
@@ -346,6 +346,12 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
             Err(e) => {
                 // Rollback: remove successfully-created worktrees
                 for (source, dest) in &created_worktrees {
+                    assert!(
+                        dest.starts_with(&plan.forest_dir),
+                        "rollback target {:?} is not inside forest dir {:?}",
+                        dest,
+                        plan.forest_dir
+                    );
                     let d = dest.to_string_lossy();
                     let _ = crate::git::git(source, &["worktree", "remove", "--force", &d]);
                 }
