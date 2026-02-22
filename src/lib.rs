@@ -272,9 +272,12 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::AgentInstructions => {
+            let instructions = include_str!("../docs/agent-instructions.md");
             #[cfg(feature = "beta")]
-            println!("NOTE: This is the beta channel. Replace `git forest` with `git forest-beta` in the commands below.\n");
-            print!("{}", include_str!("../docs/agent-instructions.md"));
+            let instructions = instructions
+                .replace("git-forest", "git-forest-beta")
+                .replace("git forest", "git forest-beta");
+            print!("{}", instructions);
         }
         Command::Version { check } => {
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
@@ -320,7 +323,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             } else {
                 println!("Download the latest release:");
+                #[cfg(feature = "stable")]
                 println!("  https://github.com/dliv/workforest/releases/latest");
+                #[cfg(feature = "beta")]
+                println!("  https://github.com/dliv/workforest/releases");
             }
         }
     }

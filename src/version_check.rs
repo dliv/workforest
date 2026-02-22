@@ -221,10 +221,11 @@ pub fn check_cache_and_notify(debug: bool) {
     if let Some(ref latest) = cached.latest_version {
         if version_newer(latest, current) {
             eprintln!(
-                "Update available: {} v{} (current: v{}). Run `git forest update` to upgrade.",
+                "Update available: {} v{} (current: v{}). Run `{} update` to upgrade.",
                 channel::APP_NAME,
                 latest,
-                current
+                current,
+                channel::CMD
             );
         }
     }

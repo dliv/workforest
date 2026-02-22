@@ -194,6 +194,7 @@ fn subcommand_new_requires_mode() {
         .stderr(predicates::str::contains("--mode"));
 }
 
+#[cfg(feature = "stable")]
 #[test]
 fn new_without_config_shows_init_hint() {
     with_no_config()
@@ -203,6 +204,7 @@ fn new_without_config_shows_init_hint() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
+#[cfg(feature = "stable")]
 #[test]
 fn subcommand_rm_recognized() {
     // rm without config should fail with init hint (same as other commands)
@@ -213,6 +215,7 @@ fn subcommand_rm_recognized() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
+#[cfg(feature = "stable")]
 fn with_no_config() -> assert_cmd::Command {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("empty-home");
@@ -229,6 +232,7 @@ fn with_no_config() -> assert_cmd::Command {
     cmd
 }
 
+#[cfg(feature = "stable")]
 #[test]
 fn ls_without_config_shows_init_hint() {
     with_no_config()
@@ -238,6 +242,7 @@ fn ls_without_config_shows_init_hint() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
+#[cfg(feature = "stable")]
 #[test]
 fn status_without_config_shows_init_hint() {
     with_no_config()
@@ -247,6 +252,7 @@ fn status_without_config_shows_init_hint() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
+#[cfg(feature = "stable")]
 #[test]
 fn exec_without_config_shows_init_hint() {
     with_no_config()
