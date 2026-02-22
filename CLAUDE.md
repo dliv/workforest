@@ -27,7 +27,9 @@ cargo check          # typecheck only
 
 ## Releases
 
-Version bump workflow: update `Cargo.toml`, commit, tag, push. Always push the tag by name — `git push origin v0.x.y` — not `--tags`. Pushing all tags at once doesn't trigger the GitHub Actions release workflow.
+Use `just release <version>` (stable) or `just release-beta <version>` (beta). These handle Cargo.toml, wrangler.toml, Cargo.lock, checks, commit, tag, and push.
+
+When pushing tags manually, push by name — `git push origin v0.x.y` — not `--tags`. Pushing all tags at once doesn't trigger the GitHub Actions release workflow.
 
 ## Design philosophy
 
@@ -39,4 +41,4 @@ Version bump workflow: update `Cargo.toml`, commit, tag, push. Always push the t
 
 ## Using git-forest
 
-For AI agent usage instructions for the git-forest CLI itself, run `git forest agent-instructions` or see the [Amp skill](.agents/skills/using-git-forest/SKILL.md).
+For AI agent usage instructions for the git-forest CLI itself, run `git forest agent-instructions`.
