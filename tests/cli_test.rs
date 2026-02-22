@@ -1,16 +1,26 @@
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::PredicateBooleanExt;
 
 fn bin_name() -> &'static str {
-    if cfg!(feature = "beta") {
+    #[cfg(feature = "beta")]
+    {
         "git-forest-beta"
-    } else {
+    }
+    #[cfg(not(feature = "beta"))]
+    {
         "git-forest"
     }
 }
 
-#[allow(deprecated)] // cargo_bin takes a runtime name; cargo_bin_cmd! requires a literal
 fn bin_cmd() -> assert_cmd::Command {
-    assert_cmd::Command::cargo_bin(bin_name()).unwrap()
+    #[cfg(feature = "beta")]
+    {
+        cargo_bin_cmd!("git-forest-beta")
+    }
+    #[cfg(not(feature = "beta"))]
+    {
+        cargo_bin_cmd!("git-forest")
+    }
 }
 
 #[test]

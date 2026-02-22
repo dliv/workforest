@@ -1,8 +1,0 @@
----
-source: src/commands/ls.rs
-expression: format_ls_human(&result)
----
-NAME                       AGE         MODE      BRANCHES
-a                          5m ago      feature   dliv/a (2)
-review-bar-very-long-name  1d ago      review    forest/review-bar (2), sue/fix-dialog
-mid-length                 2h ago      feature   dliv/mid (3)

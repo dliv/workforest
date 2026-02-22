@@ -1,21 +1,21 @@
 #![warn(clippy::all)]
 
-mod channel;
+pub mod channel;
 mod cli;
 mod commands;
-mod config;
+pub(crate) mod config;
 mod forest;
 mod git;
 mod meta;
-mod paths;
+pub(crate) mod paths;
 mod testutil;
-mod version_check;
+pub(crate) mod version_check;
 
 use anyhow::{bail, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 
-fn main() {
+pub fn main_entry() {
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
     if std::env::args().any(|a| a == channel::INTERNAL_VERSION_CHECK_ARG) {

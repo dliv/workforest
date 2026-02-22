@@ -24,12 +24,12 @@ beta = []
 
 [[bin]]
 name = "git-forest"
-path = "src/main.rs"
+path = "src/bin/git-forest.rs"
 required-features = ["stable"]
 
 [[bin]]
 name = "git-forest-beta"
-path = "src/main.rs"
+path = "src/bin/git-forest-beta.rs"
 required-features = ["beta"]
 
 [dev-dependencies]
