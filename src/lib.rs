@@ -272,6 +272,8 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::AgentInstructions => {
+            #[cfg(feature = "beta")]
+            println!("NOTE: This is the beta channel. Replace `git forest` with `git forest-beta` in the commands below.\n");
             print!("{}", include_str!("../docs/agent-instructions.md"));
         }
         Command::Version { check } => {
