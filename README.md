@@ -19,11 +19,7 @@ Or download a binary from [GitHub Releases](https://github.com/dliv/workforest/r
 
 git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
 
-**For AI agents:** Run `git forest agent-instructions` for usage guidance, or install the [Amp skill](.agents/skills/using-git-forest/SKILL.md):
-
-```sh
-amp skill add dliv/workforest/using-git-forest
-```
+**For AI agents:** Run `git forest agent-instructions` for usage guidance.
 
 **For your project's agents:** Add the following to your project's `AGENTS.md` or `CLAUDE.md` so agents know git-forest is available:
 
