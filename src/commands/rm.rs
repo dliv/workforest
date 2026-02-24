@@ -277,10 +277,24 @@ fn delete_branch(
         };
     }
 
+    // Branch already gone — nothing to do (idempotent rm)
+    let refname = format!("refs/heads/{}", repo_plan.branch);
+    if let Ok(false) = crate::git::ref_exists(&repo_plan.source, &refname) {
+        return RmOutcome::Skipped {
+            reason: "branch already deleted".to_string(),
+        };
+    }
+
     if force {
         return match crate::git::git(&repo_plan.source, &["branch", "-D", &repo_plan.branch]) {
             Ok(_) => RmOutcome::Success,
             Err(e) => {
+                // TOCTOU guard: branch may have been deleted between ref_exists and now
+                if let Ok(false) = crate::git::ref_exists(&repo_plan.source, &refname) {
+                    return RmOutcome::Skipped {
+                        reason: "branch already deleted".to_string(),
+                    };
+                }
                 let msg = format!("{}: git branch -D failed: {}", repo_plan.name, e);
                 errors.push(msg.clone());
                 RmOutcome::Failed { error: msg }
@@ -292,6 +306,12 @@ fn delete_branch(
     match crate::git::git(&repo_plan.source, &["branch", "-d", &repo_plan.branch]) {
         Ok(_) => RmOutcome::Success,
         Err(original_err) => {
+            // TOCTOU guard: branch may have been deleted between ref_exists and now
+            if let Ok(false) = crate::git::ref_exists(&repo_plan.source, &refname) {
+                return RmOutcome::Skipped {
+                    reason: "branch already deleted".to_string(),
+                };
+            }
             // -d failed — check if the branch was merged via a different mechanism
             // (e.g. fully merged but HEAD isn't on base, or fully pushed to upstream)
             if can_safely_force_delete(&repo_plan.source, &repo_plan.branch, &repo_plan.base_branch)
@@ -1450,6 +1470,70 @@ mod tests {
         assert!(forest_dir.exists());
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join("foo-web").exists());
+    }
+
+    #[test]
+    fn rm_idempotent_after_partial_failure() {
+        // Reproduces the bug: first rm partially fails (unmerged branch in one repo),
+        // second rm with --force should skip already-deleted branches and clean up fully.
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        let inputs = make_new_inputs("rm-idempotent", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-idempotent");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let api_source = &meta.repos[0].source;
+        let api_branch = &meta.repos[0].branch;
+        let web_source = &meta.repos[1].source;
+        let web_branch = &meta.repos[1].branch;
+
+        // Add an unpushed commit to foo-web so `git branch -d` fails ("not fully merged")
+        let web_wt = forest_dir.join("foo-web");
+        crate::git::git(&web_wt, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&web_wt, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&web_wt, "local.txt", "local only", "local commit");
+
+        // First rm (no --force): foo-api branch deletes, foo-web branch fails
+        let rm1 = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(matches!(rm1.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(matches!(
+            rm1.repos[1].branch_deleted,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(!rm1.errors.is_empty());
+        // foo-api branch gone, foo-web branch still exists
+        assert!(
+            !crate::git::ref_exists(api_source, &format!("refs/heads/{}", api_branch)).unwrap()
+        );
+        assert!(crate::git::ref_exists(web_source, &format!("refs/heads/{}", web_branch)).unwrap());
+        // Forest dir still present (errors blocked cleanup)
+        assert!(forest_dir.join(META_FILENAME).exists());
+
+        // Second rm (--force): should skip foo-api (already deleted), force-delete foo-web
+        let meta2 = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let rm2 = cmd_rm(&forest_dir, &meta2, true, false, None).unwrap();
+
+        // foo-api branch should be skipped (already deleted), not failed
+        assert!(
+            matches!(rm2.repos[0].branch_deleted, RmOutcome::Skipped { .. }),
+            "expected Skipped for already-deleted branch, got: {:?}",
+            rm2.repos[0].branch_deleted
+        );
+        // foo-web branch should be force-deleted
+        assert!(
+            matches!(rm2.repos[1].branch_deleted, RmOutcome::Success),
+            "expected Success for force-deleted branch, got: {:?}",
+            rm2.repos[1].branch_deleted
+        );
+        // No errors — forest dir should be cleaned up
+        assert!(rm2.errors.is_empty(), "unexpected errors: {:?}", rm2.errors);
+        assert!(rm2.forest_dir_removed);
+        assert!(!forest_dir.exists());
     }
 
     #[test]
