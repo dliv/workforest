@@ -25,6 +25,7 @@ release version:
     # 1. Verify clean state and passing checks
     just check
     just test
+    (cd worker && npm ci --silent && npm audit)
 
     # 2. Update version in Cargo.toml and wrangler.toml
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
@@ -51,6 +52,7 @@ release-beta version:
     # 1. Verify clean state and passing checks
     just check
     just test
+    (cd worker && npm ci --silent && npm audit)
 
     # 2. Update version in Cargo.toml and wrangler.toml
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
