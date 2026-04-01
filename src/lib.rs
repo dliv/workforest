@@ -166,39 +166,75 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Rm {
             name,
+            all,
             force,
             dry_run,
         } => {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
-            let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
-            let result = if cli.json || dry_run {
-                let r = commands::cmd_rm(&dir, &meta, force, dry_run, None)?;
-                output(&r, cli.json, commands::format_rm_human)?;
-                r
+
+            if all {
+                let result = if cli.json || dry_run {
+                    let r = commands::cmd_rm_all(&bases, force, dry_run, None)?;
+                    output(&r, cli.json, commands::format_rm_all_human)?;
+                    r
+                } else {
+                    let r = commands::cmd_rm_all(
+                        &bases,
+                        force,
+                        dry_run,
+                        Some(&|progress| match progress {
+                            commands::RmAllProgress::ForestStarting { name } => {
+                                println!("Removing forest {:?}", name.as_str());
+                            }
+                            commands::RmAllProgress::ForestDone(_name, result) => {
+                                for repo in &result.repos {
+                                    println!(
+                                        "  {}: {}",
+                                        repo.name,
+                                        commands::format_repo_done(repo)
+                                    );
+                                }
+                                println!("{}", commands::format_rm_summary(result));
+                            }
+                        }),
+                    )?;
+                    println!("{}", commands::format_rm_all_summary(&r));
+                    r
+                };
+                if result.failed > 0 {
+                    std::process::exit(1);
+                }
             } else {
-                use std::io::Write;
-                println!("Removing forest {:?}", meta.name.as_str());
-                let r = commands::cmd_rm(
-                    &dir,
-                    &meta,
-                    force,
-                    dry_run,
-                    Some(&|progress| match progress {
-                        commands::RmProgress::RepoStarting { name } => {
-                            print!("  {}: removing...", name);
-                            std::io::stdout().flush().ok();
-                        }
-                        commands::RmProgress::RepoDone(repo) => {
-                            println!(" {}", commands::format_repo_done(repo));
-                        }
-                    }),
-                )?;
-                println!("{}", commands::format_rm_summary(&r));
-                r
-            };
-            if !result.errors.is_empty() {
-                std::process::exit(1);
+                let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
+                let result = if cli.json || dry_run {
+                    let r = commands::cmd_rm(&dir, &meta, force, dry_run, None)?;
+                    output(&r, cli.json, commands::format_rm_human)?;
+                    r
+                } else {
+                    use std::io::Write;
+                    println!("Removing forest {:?}", meta.name.as_str());
+                    let r = commands::cmd_rm(
+                        &dir,
+                        &meta,
+                        force,
+                        dry_run,
+                        Some(&|progress| match progress {
+                            commands::RmProgress::RepoStarting { name } => {
+                                print!("  {}: removing...", name);
+                                std::io::stdout().flush().ok();
+                            }
+                            commands::RmProgress::RepoDone(repo) => {
+                                println!(" {}", commands::format_repo_done(repo));
+                            }
+                        }),
+                    )?;
+                    println!("{}", commands::format_rm_summary(&r));
+                    r
+                };
+                if !result.errors.is_empty() {
+                    std::process::exit(1);
+                }
             }
         }
         Command::Reset {

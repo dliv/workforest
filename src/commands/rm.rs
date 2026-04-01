@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::forest::discover_forests;
 use crate::meta::{ForestMeta, META_FILENAME};
-use crate::paths::{AbsolutePath, ForestName, RepoName};
+use crate::paths::{sanitize_forest_name, AbsolutePath, ForestName, RepoName};
 
 // --- Types ---
 
@@ -54,6 +55,21 @@ pub enum RmOutcome {
 pub enum RmProgress<'a> {
     RepoStarting { name: &'a RepoName },
     RepoDone(&'a RepoRmResult),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RmAllResult {
+    pub dry_run: bool,
+    pub force: bool,
+    pub results: Vec<RmResult>,
+    pub total_forests: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+pub enum RmAllProgress<'a> {
+    ForestStarting { name: &'a ForestName },
+    ForestDone(&'a ForestName, &'a RmResult),
 }
 
 // --- Planning (read-only) ---
@@ -622,6 +638,143 @@ pub fn format_rm_summary(result: &RmResult) -> String {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in &result.errors {
+            lines.push(format!("  {}", error));
+        }
+    }
+
+    lines.join("\n")
+}
+
+// --- rm --all ---
+
+struct RmAllPlan {
+    forest_plans: Vec<(PathBuf, RmPlan)>,
+}
+
+fn plan_rm_all(worktree_bases: &[&Path]) -> Result<RmAllPlan> {
+    let mut forest_plans = Vec::new();
+
+    for base in worktree_bases {
+        let metas = discover_forests(base)?;
+        for meta in metas {
+            let dir_name = sanitize_forest_name(meta.name.as_str());
+            let forest_dir = base.join(dir_name);
+            let plan = plan_rm(&forest_dir, &meta);
+            forest_plans.push((forest_dir, plan));
+        }
+    }
+
+    Ok(RmAllPlan { forest_plans })
+}
+
+fn execute_rm_all(
+    all_plan: &RmAllPlan,
+    force: bool,
+    on_progress: Option<&dyn Fn(RmAllProgress)>,
+) -> RmAllResult {
+    let mut results = Vec::new();
+    let total = all_plan.forest_plans.len();
+
+    for (_forest_dir, plan) in &all_plan.forest_plans {
+        if let Some(cb) = &on_progress {
+            cb(RmAllProgress::ForestStarting {
+                name: &plan.forest_name,
+            });
+        }
+
+        let result = execute_rm(plan, force, None);
+
+        if let Some(cb) = &on_progress {
+            cb(RmAllProgress::ForestDone(&plan.forest_name, &result));
+        }
+
+        results.push(result);
+    }
+
+    let succeeded = results.iter().filter(|r| r.errors.is_empty()).count();
+    let failed = total - succeeded;
+
+    RmAllResult {
+        dry_run: false,
+        force,
+        results,
+        total_forests: total,
+        succeeded,
+        failed,
+    }
+}
+
+pub fn cmd_rm_all(
+    worktree_bases: &[&Path],
+    force: bool,
+    dry_run: bool,
+    on_progress: Option<&dyn Fn(RmAllProgress)>,
+) -> Result<RmAllResult> {
+    let all_plan = plan_rm_all(worktree_bases)?;
+
+    if all_plan.forest_plans.is_empty() {
+        bail!("no forests found\n  hint: run `git forest ls` to verify");
+    }
+
+    if dry_run {
+        let results: Vec<RmResult> = all_plan
+            .forest_plans
+            .iter()
+            .map(|(_, plan)| plan_to_dry_run_result(plan, force))
+            .collect();
+        let total = results.len();
+        let succeeded = results.iter().filter(|r| r.errors.is_empty()).count();
+        return Ok(RmAllResult {
+            dry_run: true,
+            force,
+            total_forests: total,
+            succeeded,
+            failed: total - succeeded,
+            results,
+        });
+    }
+
+    Ok(execute_rm_all(&all_plan, force, on_progress))
+}
+
+pub fn format_rm_all_human(result: &RmAllResult) -> String {
+    let mut lines = Vec::new();
+
+    if result.dry_run {
+        lines.push("Dry run — no changes will be made.".to_string());
+        lines.push(String::new());
+    }
+
+    for r in &result.results {
+        lines.push(format_rm_human(r));
+        lines.push(String::new());
+    }
+
+    if result.dry_run {
+        lines.push(format!("Would remove {} forest(s).", result.total_forests));
+    } else {
+        lines.push(format!(
+            "Removed {}/{} forest(s).",
+            result.succeeded, result.total_forests
+        ));
+    }
+
+    lines.join("\n")
+}
+
+pub fn format_rm_all_summary(result: &RmAllResult) -> String {
+    let mut lines = Vec::new();
+
+    lines.push(format!(
+        "Removed {}/{} forest(s).",
+        result.succeeded, result.total_forests
+    ));
+
+    let all_errors: Vec<&String> = result.results.iter().flat_map(|r| &r.errors).collect();
+    if !all_errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Errors:".to_string());
+        for error in all_errors {
             lines.push(format!("  {}", error));
         }
     }
@@ -1555,5 +1708,87 @@ mod tests {
             }],
         };
         execute_rm(&plan, false, None);
+    }
+
+    // --- rm --all tests ---
+
+    #[test]
+    fn rm_all_removes_multiple_forests() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        // Create two forests
+        let inputs_a = make_new_inputs("forest-a", ForestMode::Feature);
+        cmd_new(inputs_a, &tmpl).unwrap();
+        let inputs_b = make_new_inputs("forest-b", ForestMode::Feature);
+        cmd_new(inputs_b, &tmpl).unwrap();
+
+        // Verify both exist
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(ls.forests.len(), 2);
+
+        // rm --all
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], false, false, None).unwrap();
+        assert_eq!(result.total_forests, 2);
+        assert_eq!(result.succeeded, 2);
+        assert_eq!(result.failed, 0);
+        assert!(!result.dry_run);
+
+        // Verify all gone
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(ls.forests.len(), 0);
+    }
+
+    #[test]
+    fn rm_all_dry_run_preserves_forests() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("dry-test", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], false, true, None).unwrap();
+        assert!(result.dry_run);
+        assert_eq!(result.total_forests, 1);
+
+        // Forest should still exist
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(ls.forests.len(), 1);
+    }
+
+    #[test]
+    fn rm_all_no_forests_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = cmd_rm_all(&[tmp.path()], false, false, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no forests found"));
+    }
+
+    #[test]
+    fn rm_all_with_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("force-test", ForestMode::Feature);
+        let new_result = cmd_new(inputs, &tmpl).unwrap();
+
+        // Make the worktree dirty
+        std::fs::write(new_result.forest_dir.join("foo-api/dirty.txt"), "dirty").unwrap();
+
+        // Without force, should fail
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], false, false, None).unwrap();
+        assert_eq!(result.failed, 1);
+
+        // With force, should succeed
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], true, false, None).unwrap();
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 0);
+
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(ls.forests.len(), 0);
     }
 }

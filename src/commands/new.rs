@@ -196,6 +196,17 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
 
         let branch = BranchName::new(branch_str, &repo.remote)?;
 
+        // Guard: computed branch must not collide with the repo's base branch
+        if branch.as_str() == repo.base_branch {
+            bail!(
+                "computed branch {:?} for repo {} matches its base branch\n  \
+                 hint: this would shadow the base branch and block work outside the forest; \
+                 choose a different forest name, or use --branch / --repo-branch to override",
+                branch.as_str(),
+                repo.name,
+            );
+        }
+
         // Branch resolution
         let local_ref = format!("refs/heads/{}", branch);
         let remote_ref = format!("refs/remotes/{}/{}", repo.remote, branch);
@@ -687,6 +698,75 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("origin/dev not found"), "error: {}", err);
+    }
+
+    // --- Base-branch collision guard ---
+
+    #[test]
+    fn plan_branch_matches_base_branch_errors() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        // Template uses "{name}" so forest name "main" → branch "main" = base_branch
+        let mut tmpl = make_template_with_repos(&env, &["foo-api"]);
+        tmpl.feature_branch_template = "{name}".to_string();
+
+        let inputs = make_new_inputs("main", ForestMode::Feature);
+        let result = plan_forest(&inputs, &tmpl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("matches its base branch"), "error: {}", err);
+    }
+
+    #[test]
+    fn plan_branch_with_prefix_does_not_collide() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        // Template uses "dliv/{name}" so forest name "main" → branch "dliv/main" ≠ "main"
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        let inputs = make_new_inputs("main", ForestMode::Feature);
+        let result = plan_forest(&inputs, &tmpl);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+    }
+
+    #[test]
+    fn plan_branch_override_matches_base_branch_errors() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        let mut inputs = make_new_inputs("something", ForestMode::Feature);
+        inputs.branch_override = Some("main".to_string());
+        let result = plan_forest(&inputs, &tmpl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("matches its base branch"), "error: {}", err);
+    }
+
+    #[test]
+    fn plan_repo_branch_override_matches_base_branch_errors() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        let mut inputs = make_new_inputs("something", ForestMode::Feature);
+        inputs.repo_branches = vec![("foo-api".to_string(), "main".to_string())];
+        let result = plan_forest(&inputs, &tmpl);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("matches its base branch"), "error: {}", err);
+    }
+
+    #[test]
+    fn plan_review_mode_does_not_collide_with_typical_base() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+
+        // Review mode → branch "forest/main", base is "main" → no collision
+        let inputs = make_new_inputs("main", ForestMode::Review);
+        let result = plan_forest(&inputs, &tmpl);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     // --- Branch resolution ---

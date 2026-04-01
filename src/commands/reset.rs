@@ -24,6 +24,8 @@ pub struct FileResetEntry {
     pub path: PathBuf,
     pub existed: bool,
     pub deleted: bool,
+    /// If the file was backed up instead of deleted, this is the backup path.
+    pub backed_up_to: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,10 +195,10 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         forest_entries.push(entry);
     }
 
-    let config_deleted = if plan.config_exists {
-        delete_file(&plan.config_path, &mut errors)
+    let (config_deleted, config_backed_up_to) = if plan.config_exists {
+        backup_file(&plan.config_path, &mut errors)
     } else {
-        false
+        (false, None)
     };
 
     let state_deleted = if plan.state_exists {
@@ -213,11 +215,13 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
             path: plan.config_path.clone(),
             existed: plan.config_exists,
             deleted: config_deleted,
+            backed_up_to: config_backed_up_to,
         },
         state_file: FileResetEntry {
             path: plan.state_path.clone(),
             existed: plan.state_exists,
             deleted: state_deleted,
+            backed_up_to: None,
         },
         forests: forest_entries,
         warnings: plan.warnings.clone(),
@@ -235,6 +239,28 @@ fn delete_file(path: &Path, errors: &mut Vec<String>) -> bool {
     }
 }
 
+/// Rename a file to `<name>.<timestamp>.bak` instead of deleting it.
+/// Returns `(removed_from_original_path, backup_path)`.
+fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>) {
+    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
+    let backup_name = format!("{}.{}.bak", file_stem, timestamp);
+    let backup_path = path.with_file_name(&backup_name);
+
+    match std::fs::rename(path, &backup_path) {
+        Ok(()) => (true, Some(backup_path)),
+        Err(e) => {
+            errors.push(format!(
+                "failed to back up {} to {}: {}",
+                path.display(),
+                backup_path.display(),
+                e
+            ));
+            (false, None)
+        }
+    }
+}
+
 // --- Orchestrator ---
 
 fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
@@ -246,11 +272,21 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
             path: plan.config_path.clone(),
             existed: plan.config_exists,
             deleted: plan.config_exists,
+            // Signal to formatter that this would be backed up, not deleted
+            backed_up_to: if plan.config_exists {
+                Some(
+                    plan.config_path
+                        .with_file_name("config.toml.<timestamp>.bak"),
+                )
+            } else {
+                None
+            },
         },
         state_file: FileResetEntry {
             path: plan.state_path.clone(),
             existed: plan.state_exists,
             deleted: plan.state_exists,
+            backed_up_to: None,
         },
         forests: plan
             .forests
@@ -422,19 +458,25 @@ pub fn format_reset_summary(result: &ResetResult) -> String {
     lines.join("\n")
 }
 
-fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> &'static str {
+fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> String {
     if is_preview {
         if entry.existed {
-            "would delete"
+            if entry.backed_up_to.is_some() {
+                "would back up".to_string()
+            } else {
+                "would delete".to_string()
+            }
         } else {
-            "not found"
+            "not found".to_string()
         }
+    } else if let Some(backup_path) = &entry.backed_up_to {
+        format!("backed up to {}", backup_path.display())
     } else if entry.deleted {
-        "deleted"
+        "deleted".to_string()
     } else if entry.existed {
-        "failed"
+        "failed".to_string()
     } else {
-        "not found"
+        "not found".to_string()
     }
 }
 
@@ -487,11 +529,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config/git-forest/config.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: Some(PathBuf::from("/tmp/config/git-forest/config.toml.bak")),
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state/git-forest/state.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: None,
             },
             forests: vec![ForestResetEntry {
                 name: "my-feature".to_string(),
@@ -505,7 +549,8 @@ mod tests {
         let output = format_reset_human(&result);
         assert!(output.contains("would be deleted"));
         assert!(output.contains("would remove"));
-        assert!(output.contains("would delete"));
+        assert!(output.contains("would back up"), "output: {}", output);
+        assert!(output.contains("would delete")); // state file
         assert!(output.contains("Pass --confirm to proceed"));
     }
 
@@ -519,11 +564,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: Some(PathBuf::from("/tmp/config.toml.bak")),
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state.toml"),
                 existed: false,
                 deleted: false,
+                backed_up_to: None,
             },
             forests: vec![],
             warnings: vec![],
@@ -532,8 +579,8 @@ mod tests {
 
         let output = format_reset_human(&result);
         assert!(output.contains("Dry run"));
-        assert!(output.contains("would delete"));
-        assert!(output.contains("not found"));
+        assert!(output.contains("would back up"), "output: {}", output);
+        assert!(output.contains("not found")); // state file
     }
 
     #[test]
@@ -546,11 +593,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: Some(PathBuf::from("/tmp/config.toml.20260101.bak")),
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: None,
             },
             forests: vec![ForestResetEntry {
                 name: "test".to_string(),
@@ -564,7 +613,12 @@ mod tests {
         let output = format_reset_human(&result);
         assert!(output.contains("Reset complete"));
         assert!(output.contains("removed"));
-        assert!(output.contains("deleted"));
+        assert!(
+            output.contains("backed up to"),
+            "config should be backed up: {}",
+            output
+        );
+        assert!(output.contains("deleted")); // state file
     }
 
     #[test]
@@ -577,11 +631,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config.toml"),
                 existed: true,
                 deleted: false,
+                backed_up_to: None,
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: None,
             },
             forests: vec![],
             warnings: vec![],
@@ -603,11 +659,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: Some(PathBuf::from("/tmp/config.toml.20260101.bak")),
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: None,
             },
             forests: vec![],
             warnings: vec![],
@@ -629,11 +687,13 @@ mod tests {
                 path: PathBuf::from("/tmp/config.toml"),
                 existed: true,
                 deleted: true,
+                backed_up_to: None,
             },
             state_file: FileResetEntry {
                 path: PathBuf::from("/tmp/state.toml"),
                 existed: false,
                 deleted: false,
+                backed_up_to: None,
             },
             forests: vec![],
             warnings: vec!["config could not be parsed".to_string()],
@@ -688,6 +748,8 @@ path = "/tmp/nonexistent-repo"
 
         assert!(!result.dry_run);
         assert!(result.config_file.deleted);
+        assert!(result.config_file.backed_up_to.is_some());
+        assert!(result.config_file.backed_up_to.as_ref().unwrap().exists());
         assert!(result.state_file.deleted);
         assert!(!config_dir.join("config.toml").exists());
         assert!(!state_dir.join("state.toml").exists());
@@ -856,6 +918,7 @@ path = "/tmp/nonexistent-repo"
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("could not be parsed"));
         assert!(result.config_file.deleted);
+        assert!(result.config_file.backed_up_to.is_some());
         assert!(!config_dir.join("config.toml").exists());
     }
 

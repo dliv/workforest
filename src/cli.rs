@@ -87,6 +87,9 @@ pub enum Command {
     Rm {
         /// Forest name (or auto-detect from cwd)
         name: Option<String>,
+        /// Remove all forests (preserves config)
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
         /// Force removal of dirty worktrees and unmerged branches
         #[arg(long)]
         force: bool,
