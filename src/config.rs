@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -175,12 +175,11 @@ pub fn default_config_path() -> Result<PathBuf> {
 
 pub fn load_default_config() -> Result<ResolvedConfig> {
     let path = default_config_path()?;
-    if !path.exists() {
-        bail!(
-            "config not found at {}\n  hint: run `git forest init` to create one",
-            path.display()
-        );
-    }
+    ensure!(
+        path.exists(),
+        "config not found at {}\n  hint: run `git forest init` to create one",
+        path.display()
+    );
     load_config(&path)
 }
 

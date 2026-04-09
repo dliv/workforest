@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -59,12 +59,11 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
     for repo_input in &inputs.repos {
         let path = expand_tilde(&repo_input.path)?;
 
-        if !path.exists() {
-            bail!(
-                "repo path does not exist: {}\n  hint: provide an absolute path to a git repository",
-                path.display()
-            );
-        }
+        ensure!(
+            path.exists(),
+            "repo path does not exist: {}\n  hint: provide an absolute path to a git repository",
+            path.display()
+        );
 
         // Verify it's a git repo
         let git_check = std::process::Command::new("git")
@@ -96,12 +95,11 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
         let name = RepoName::new(name_str)
             .with_context(|| format!("repo has empty name (path: {})", path.display()))?;
 
-        if !names.insert(name.to_string()) {
-            bail!(
-                "duplicate repo name: {}\n  hint: use --repo /path:custom-name to disambiguate",
-                name
-            );
-        }
+        ensure!(
+            names.insert(name.to_string()),
+            "duplicate repo name: {}\n  hint: use --repo /path:custom-name to disambiguate",
+            name
+        );
 
         let base_branch = repo_input
             .base_branch

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -104,12 +104,11 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     {
         let mut seen = HashSet::new();
         for (repo_name, _) in &inputs.repo_branches {
-            if !seen.insert(repo_name.as_str()) {
-                bail!(
-                    "duplicate repo-branch for: {}\n  hint: specify each repo at most once",
-                    repo_name
-                );
-            }
+            ensure!(
+                seen.insert(repo_name.as_str()),
+                "duplicate repo-branch for: {}\n  hint: specify each repo at most once",
+                repo_name
+            );
         }
     }
 
@@ -157,12 +156,11 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
 
     // Validate source repos exist and branch names
     for repo in &tmpl.repos {
-        if !repo.path.is_dir() {
-            bail!(
-                "source repo not found: {}\n  hint: check that the path exists, or update config with `git forest init --force`",
-                repo.path.display()
-            );
-        }
+        ensure!(
+            repo.path.is_dir(),
+            "source repo not found: {}\n  hint: check that the path exists, or update config with `git forest init --force`",
+            repo.path.display()
+        );
     }
 
     // Validate all branch names (global override, per-repo overrides)
