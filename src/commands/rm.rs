@@ -347,17 +347,88 @@ fn delete_branch(
                     }
                 }
             } else {
-                let msg = format!(
-                    "{}: branch {:?} is not fully merged ({})\n  \
-                     hint: if the branch was merged (e.g. squash-merge) and the remote \
-                     branch was deleted, use `git forest rm --force`",
-                    repo_plan.name, repo_plan.branch, original_err,
-                );
+                let msg = branch_not_fully_merged_error(repo_plan, Some(&original_err.to_string()));
                 errors.push(msg.clone());
                 RmOutcome::Failed { error: msg }
             }
         }
     }
+}
+
+fn plan_branch_delete_outcome(
+    repo_plan: &RepoRmPlan,
+    force: bool,
+    wt_succeeded: bool,
+    errors: &mut Vec<String>,
+) -> RmOutcome {
+    if !repo_plan.branch_created {
+        return RmOutcome::Skipped {
+            reason: "branch not created by forest".to_string(),
+        };
+    }
+
+    if !wt_succeeded {
+        return RmOutcome::Skipped {
+            reason: "worktree still exists, cannot delete branch".to_string(),
+        };
+    }
+
+    if !repo_plan.source_exists {
+        return RmOutcome::Skipped {
+            reason: "source repo missing".to_string(),
+        };
+    }
+
+    let refname = format!("refs/heads/{}", repo_plan.branch);
+    if let Ok(false) = crate::git::ref_exists(&repo_plan.source, &refname) {
+        return RmOutcome::Skipped {
+            reason: "branch already deleted".to_string(),
+        };
+    }
+
+    if force
+        || branch_delete_would_succeed_without_force(&repo_plan.source, &repo_plan.branch)
+        || can_safely_force_delete(
+            &repo_plan.source,
+            &repo_plan.branch,
+            &repo_plan.base_branch,
+            repo_plan.remote.as_deref(),
+        )
+    {
+        return RmOutcome::Success;
+    }
+
+    let msg = branch_not_fully_merged_error(
+        repo_plan,
+        Some(
+            "dry-run could not prove the branch is merged into HEAD, the base branch, \
+             the base remote-tracking ref, or its upstream",
+        ),
+    );
+    errors.push(msg.clone());
+    RmOutcome::Failed { error: msg }
+}
+
+fn branch_not_fully_merged_error(repo_plan: &RepoRmPlan, detail: Option<&str>) -> String {
+    let detail = detail
+        .map(|detail| format!(" ({})", detail))
+        .unwrap_or_default();
+    format!(
+        "{}: branch {:?} is not fully merged{}\n  \
+         hint: if the branch was merged (e.g. squash-merge) and the remote \
+         branch was deleted, use `git forest rm --force`",
+        repo_plan.name, repo_plan.branch, detail,
+    )
+}
+
+fn branch_delete_would_succeed_without_force(source: &AbsolutePath, branch: &str) -> bool {
+    // `git branch -d` checks the configured upstream when one exists; otherwise
+    // it falls back to HEAD. Mirror that read-only so dry-run does not mutate.
+    if let Some(upstream) = branch_upstream_ref(source, branch) {
+        return is_ancestor_of_ref(source, branch, &upstream);
+    }
+
+    is_ancestor_of_ref(source, branch, "HEAD")
 }
 
 /// Check whether a branch can be safely force-deleted after `git branch -d` fails.
@@ -390,25 +461,33 @@ fn can_safely_force_delete(
     }
 
     // Fallback 3: branch has upstream tracking and no unpushed commits
-    if let Ok(upstream) = crate::git::git(
+    if let Some(upstream) = branch_upstream_ref(source, branch) {
+        let range = format!("{}..{}", upstream, branch);
+        if let Ok(count) = crate::git::git(source, &["rev-list", "--count", &range]) {
+            if count.trim() == "0" {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn branch_upstream_ref(source: &AbsolutePath, branch: &str) -> Option<String> {
+    let upstream = crate::git::git(
         source,
         &[
             "for-each-ref",
             "--format=%(upstream)",
             &format!("refs/heads/{}", branch),
         ],
-    ) {
-        if !upstream.is_empty() {
-            let range = format!("{}..{}", upstream, branch);
-            if let Ok(count) = crate::git::git(source, &["rev-list", "--count", &range]) {
-                if count.trim() == "0" {
-                    return true;
-                }
-            }
-        }
+    )
+    .ok()?;
+    if upstream.is_empty() {
+        None
+    } else {
+        Some(upstream)
     }
-
-    false
 }
 
 fn is_ancestor_of_ref(source: &AbsolutePath, branch: &str, refname: &str) -> bool {
@@ -541,16 +620,8 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
                 RmOutcome::Success
             };
 
-            let branch_deleted = if !rp.branch_created {
-                RmOutcome::Skipped {
-                    reason: "branch not created by forest".to_string(),
-                }
-            } else if !rp.worktree_exists {
-                // worktree missing is treated as success, so branch delete would proceed
-                RmOutcome::Success
-            } else {
-                RmOutcome::Success
-            };
+            let wt_succeeded = !matches!(&worktree_removed, RmOutcome::Failed { .. });
+            let branch_deleted = plan_branch_delete_outcome(rp, force, wt_succeeded, &mut errors);
 
             RepoRmResult {
                 name: rp.name.clone(),
@@ -573,7 +644,7 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         dry_run: true,
         force,
         repos,
-        forest_dir_removed: !has_dirty,
+        forest_dir_removed: errors.is_empty(),
         errors,
     }
 }
@@ -648,14 +719,18 @@ pub fn format_rm_human(result: &RmResult) -> String {
     }
 
     if result.dry_run {
-        lines.push("  Would remove forest directory".to_string());
+        if result.forest_dir_removed {
+            lines.push("  Would remove forest directory".to_string());
+        } else {
+            lines.push("  Would not remove forest directory".to_string());
+        }
     } else if result.forest_dir_removed {
         lines.push("Forest directory removed.".to_string());
     } else {
         lines.push("Forest directory not removed (not empty).".to_string());
     }
 
-    if !result.errors.is_empty() && !result.dry_run {
+    if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in &result.errors {
@@ -1253,6 +1328,59 @@ mod tests {
     }
 
     #[test]
+    fn cmd_rm_dry_run_reports_unmerged_branch_failure_without_mutating() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-dry-unmerged", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-dry-unmerged");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let branch_ref = format!("refs/heads/{}", branch);
+
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(&wt_dir, "local.txt", "local only", "local commit");
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(dry_run.dry_run);
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(
+            matches!(dry_run.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected dry-run branch deletion failure, got: {:?}",
+            dry_run.repos[0].branch_deleted
+        );
+        assert!(!dry_run.errors.is_empty());
+        assert!(dry_run.errors[0].contains("not fully merged"));
+        assert!(dry_run.errors[0].contains("dry-run could not prove"));
+        assert!(!dry_run.forest_dir_removed);
+
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+
+        let actual = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(
+            matches!(actual.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected actual branch deletion failure, got: {:?}",
+            actual.repos[0].branch_deleted
+        );
+        assert!(!actual.errors.is_empty());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
     fn cmd_rm_returns_result() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
@@ -1504,6 +1632,18 @@ mod tests {
             .is_ok(),
             "origin/main should contain the forest branch"
         );
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(
+            matches!(dry_run.repos[0].branch_deleted, RmOutcome::Success),
+            "expected dry-run Success via remote-tracking base check, got: {:?}",
+            dry_run.repos[0].branch_deleted
+        );
+        assert!(dry_run.errors.is_empty());
+        assert!(dry_run.forest_dir_removed);
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
