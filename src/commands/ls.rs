@@ -33,7 +33,7 @@ pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
     for base in worktree_bases {
         forests.extend(discover_forests(base)?);
     }
-    forests.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    forests.sort_by_key(|forest| std::cmp::Reverse(forest.created_at));
 
     let summaries = forests.iter().map(summarize_forest).collect();
     Ok(LsResult { forests: summaries })
