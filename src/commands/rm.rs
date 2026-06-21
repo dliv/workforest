@@ -722,7 +722,7 @@ fn worktree_paths_match(listed: &Path, target: &Path, target_canonical: Option<&
         .unwrap_or(false)
 }
 
-fn delete_branch(
+pub(super) fn delete_branch(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,
@@ -806,7 +806,7 @@ fn delete_branch(
     }
 }
 
-fn plan_branch_delete_outcome(
+pub(super) fn plan_branch_delete_outcome(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,

@@ -2,8 +2,9 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+use super::rm::{self, RepoRmPlan, RmOutcome};
 use crate::forest::discover_forests;
-use crate::paths::{sanitize_forest_name, AbsolutePath};
+use crate::paths::{sanitize_forest_name, RepoName};
 
 // --- Types ---
 
@@ -33,6 +34,17 @@ pub struct ForestResetEntry {
     pub name: String,
     pub path: PathBuf,
     pub removed: bool,
+    #[serde(default)]
+    pub repos: Vec<RepoResetEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoResetEntry {
+    pub name: RepoName,
+    pub branch: String,
+    pub branch_created: bool,
+    pub worktree_removed: RmOutcome,
+    pub branch_deleted: RmOutcome,
 }
 
 pub enum ResetProgress<'a> {
@@ -42,15 +54,10 @@ pub enum ResetProgress<'a> {
 
 // --- Planning (read-only) ---
 
-struct ForestRepoInfo {
-    source: AbsolutePath,
-    worktree_dir: PathBuf,
-}
-
 struct ForestInfo {
     name: String,
     path: PathBuf,
-    repos: Vec<ForestRepoInfo>,
+    repos: Vec<RepoRmPlan>,
 }
 
 struct ResetPlan {
@@ -83,18 +90,12 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                             for meta in metas {
                                 let dir_name = sanitize_forest_name(meta.name.as_str());
                                 let forest_path = base.join(&dir_name);
-                                let repos = meta
-                                    .repos
-                                    .iter()
-                                    .map(|r| ForestRepoInfo {
-                                        source: r.source.clone(),
-                                        worktree_dir: forest_path.join(r.name.as_str()),
-                                    })
-                                    .collect();
+                                let name = meta.name.to_string();
+                                let rm_plan = rm::plan_rm(&forest_path, &meta);
                                 forests.push(ForestInfo {
-                                    name: meta.name.to_string(),
+                                    name,
                                     path: forest_path,
-                                    repos,
+                                    repos: rm_plan.repo_plans,
                                 });
                             }
                         }
@@ -146,23 +147,18 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         }
 
         // Unregister git worktrees before deleting the directory.
-        // Best-effort: log failures as warnings but don't block deletion.
+        // Best-effort: log failures as warnings but don't block directory deletion.
+        let mut repos = Vec::new();
         for repo in &forest.repos {
             assert!(
-                repo.worktree_dir.starts_with(&forest.path),
+                repo.worktree_path.starts_with(&forest.path),
                 "worktree dir {:?} is not inside forest dir {:?}",
-                repo.worktree_dir,
+                repo.worktree_path,
                 forest.path
             );
-            let wt_str = repo.worktree_dir.to_string_lossy();
-            if let Err(e) =
-                crate::git::git(&repo.source, &["worktree", "remove", "--force", &wt_str])
-            {
-                errors.push(format!(
-                    "warning: git worktree remove failed for {}: {}",
-                    wt_str, e
-                ));
-            }
+            let (worktree_removed, wt_succeeded) = remove_reset_worktree(repo, &mut errors);
+            let branch_deleted = rm::delete_branch(repo, false, wt_succeeded, &mut errors);
+            repos.push(repo_reset_entry(repo, worktree_removed, branch_deleted));
         }
 
         let entry = if !path.exists() {
@@ -170,6 +166,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
                 name: name.clone(),
                 path: path.clone(),
                 removed: false,
+                repos,
             }
         } else {
             match std::fs::remove_dir_all(path) {
@@ -177,6 +174,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
                     name: name.clone(),
                     path: path.clone(),
                     removed: true,
+                    repos,
                 },
                 Err(e) => {
                     errors.push(format!("failed to remove forest {}: {}", name, e));
@@ -184,6 +182,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
                         name: name.clone(),
                         path: path.clone(),
                         removed: false,
+                        repos,
                     }
                 }
             }
@@ -229,6 +228,60 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
     }
 }
 
+fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+    let wt_str = repo.worktree_path.to_string_lossy();
+    match crate::git::git(&repo.source, &["worktree", "remove", "--force", &wt_str]) {
+        Ok(_) => (RmOutcome::Success, true),
+        Err(_e) if !repo.worktree_path.exists() => (
+            RmOutcome::Skipped {
+                reason: "worktree already missing".to_string(),
+            },
+            true,
+        ),
+        Err(e) => {
+            let msg = format!("warning: git worktree remove failed for {}: {}", wt_str, e);
+            errors.push(msg.clone());
+            (RmOutcome::Failed { error: msg }, false)
+        }
+    }
+}
+
+fn plan_reset_worktree_outcome(repo: &RepoRmPlan) -> (RmOutcome, bool) {
+    if !repo.source_exists {
+        return (
+            RmOutcome::Failed {
+                error: "source repo missing".to_string(),
+            },
+            false,
+        );
+    }
+
+    if !repo.worktree_exists {
+        return (
+            RmOutcome::Skipped {
+                reason: "worktree already missing".to_string(),
+            },
+            true,
+        );
+    }
+
+    (RmOutcome::Success, true)
+}
+
+fn repo_reset_entry(
+    repo: &RepoRmPlan,
+    worktree_removed: RmOutcome,
+    branch_deleted: RmOutcome,
+) -> RepoResetEntry {
+    RepoResetEntry {
+        name: repo.name.clone(),
+        branch: repo.branch.clone(),
+        branch_created: repo.branch_created,
+        worktree_removed,
+        branch_deleted,
+    }
+}
+
 fn delete_file(path: &Path, errors: &mut Vec<String>) -> bool {
     match std::fs::remove_file(path) {
         Ok(()) => true,
@@ -264,6 +317,7 @@ fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>)
 // --- Orchestrator ---
 
 fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
+    let mut errors = Vec::new();
     ResetResult {
         dry_run: true,
         confirm_required: false,
@@ -291,14 +345,27 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
         forests: plan
             .forests
             .iter()
-            .map(|f| ForestResetEntry {
-                name: f.name.clone(),
-                path: f.path.clone(),
-                removed: f.path.exists(),
+            .map(|f| {
+                let repos = f
+                    .repos
+                    .iter()
+                    .map(|repo| {
+                        let (worktree_removed, wt_succeeded) = plan_reset_worktree_outcome(repo);
+                        let branch_deleted =
+                            rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
+                        repo_reset_entry(repo, worktree_removed, branch_deleted)
+                    })
+                    .collect();
+                ForestResetEntry {
+                    name: f.name.clone(),
+                    path: f.path.clone(),
+                    removed: f.path.exists(),
+                    repos,
+                }
             })
             .collect(),
         warnings: plan.warnings.clone(),
-        errors: vec![],
+        errors,
     }
 }
 
@@ -370,6 +437,12 @@ pub fn format_reset_human(result: &ResetResult) -> String {
                     status,
                     forest.path.display()
                 ));
+                for repo in &forest.repos {
+                    lines.push(format!(
+                        "    {}",
+                        format_repo_reset_status(repo, is_preview)
+                    ));
+                }
             }
         }
     }
@@ -425,6 +498,27 @@ pub fn format_reset_summary(result: &ResetResult) -> String {
 
     let is_preview = false;
 
+    if !result.forests.is_empty() {
+        let repo_count = result
+            .forests
+            .iter()
+            .map(|forest| forest.repos.len())
+            .sum::<usize>();
+        if repo_count > 0 {
+            lines.push(String::new());
+            lines.push("Branch cleanup:".to_string());
+            for forest in &result.forests {
+                for repo in &forest.repos {
+                    lines.push(format!(
+                        "  {}/{}",
+                        forest.name,
+                        format_repo_reset_status(repo, is_preview)
+                    ));
+                }
+            }
+        }
+    }
+
     lines.push(String::new());
     let config_status = format_file_status(&result.config_file, is_preview);
     lines.push(format!(
@@ -456,6 +550,37 @@ pub fn format_reset_summary(result: &ResetResult) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_repo_reset_status(repo: &RepoResetEntry, is_preview: bool) -> String {
+    let wt = match &repo.worktree_removed {
+        RmOutcome::Success => {
+            if is_preview {
+                "would remove worktree".to_string()
+            } else {
+                "worktree removed".to_string()
+            }
+        }
+        RmOutcome::Skipped { reason } => format!("worktree skipped ({})", reason),
+        RmOutcome::Failed { .. } => "worktree FAILED".to_string(),
+    };
+
+    let branch = match &repo.branch_deleted {
+        RmOutcome::Success => {
+            if is_preview {
+                format!(", would delete branch {}", repo.branch)
+            } else {
+                format!(", branch deleted {}", repo.branch)
+            }
+        }
+        RmOutcome::Skipped { reason } if reason == "branch not created by forest" => {
+            ", branch kept (not created by forest)".to_string()
+        }
+        RmOutcome::Skipped { reason } => format!(", branch skipped ({})", reason),
+        RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
+    };
+
+    format!("{}: {}{}", repo.name, wt, branch)
 }
 
 fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> String {
@@ -519,6 +644,34 @@ mod tests {
         }
     }
 
+    fn write_reset_config(
+        tmp_root: &std::path::Path,
+        worktree_base: &std::path::Path,
+        repo_path: &std::path::Path,
+        repo_name: &str,
+    ) {
+        let config_dir = tmp_root.join("config").join(channel::APP_NAME);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "{}"
+"#,
+            worktree_base.display(),
+            repo_path.display(),
+            repo_name,
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+    }
+
     #[test]
     fn format_reset_human_confirm_required() {
         let result = ResetResult {
@@ -541,6 +694,7 @@ mod tests {
                 name: "my-feature".to_string(),
                 path: PathBuf::from("/tmp/worktrees/my-feature"),
                 removed: true,
+                repos: vec![],
             }],
             warnings: vec![],
             errors: vec![],
@@ -605,6 +759,7 @@ mod tests {
                 name: "test".to_string(),
                 path: PathBuf::from("/tmp/worktrees/test"),
                 removed: true,
+                repos: vec![],
             }],
             warnings: vec![],
             errors: vec![],
@@ -703,6 +858,45 @@ mod tests {
         let output = format_reset_human(&result);
         assert!(output.contains("Warnings:"));
         assert!(output.contains("config could not be parsed"));
+    }
+
+    #[test]
+    fn format_reset_human_reports_repo_branch_cleanup() {
+        let result = ResetResult {
+            dry_run: true,
+            confirm_required: false,
+            config_only: false,
+            config_file: FileResetEntry {
+                path: PathBuf::from("/tmp/config.toml"),
+                existed: true,
+                deleted: true,
+                backed_up_to: None,
+            },
+            state_file: FileResetEntry {
+                path: PathBuf::from("/tmp/state.toml"),
+                existed: false,
+                deleted: false,
+                backed_up_to: None,
+            },
+            forests: vec![ForestResetEntry {
+                name: "reset-repro".to_string(),
+                path: PathBuf::from("/tmp/worktrees/reset-repro"),
+                removed: true,
+                repos: vec![RepoResetEntry {
+                    name: RepoName::new("repo-a".to_string()).unwrap(),
+                    branch: "forest/reset-repro".to_string(),
+                    branch_created: true,
+                    worktree_removed: RmOutcome::Success,
+                    branch_deleted: RmOutcome::Success,
+                }],
+            }],
+            warnings: vec![],
+            errors: vec![],
+        };
+
+        let output = format_reset_human(&result);
+        assert!(output
+            .contains("repo-a: would remove worktree, would delete branch forest/reset-repro"));
     }
 
     // --- Integration tests ---
@@ -996,6 +1190,192 @@ name = "repo-a"
             "stale worktree registration should be cleaned up after reset, but got: {}",
             wt_list_after
         );
+    }
+
+    #[test]
+    #[serial]
+    fn reset_deletes_forest_created_branches() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-reset-branch");
+        let tmpl = env.default_template(&["repo-reset-branch"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-repro".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let branch_ref = "refs/heads/forest/reset-repro";
+        assert!(crate::git::ref_exists(&repo, branch_ref).unwrap());
+        let branch_worktree = crate::git::git(
+            &repo,
+            &["for-each-ref", "--format=%(worktreepath)", branch_ref],
+        )
+        .unwrap();
+        assert!(
+            branch_worktree.ends_with("worktrees/reset-repro/repo-reset-branch"),
+            "branch should be checked out in the forest worktree: {}",
+            branch_worktree
+        );
+
+        let base = env.worktree_base();
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-reset-branch");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        assert!(reset_result.errors.is_empty(), "{:?}", reset_result.errors);
+        assert!(reset_result.forests[0].removed);
+        assert!(matches!(
+            reset_result.forests[0].repos[0].branch_deleted,
+            RmOutcome::Success
+        ));
+        assert!(!base.join("reset-repro").exists());
+        assert!(!crate::git::ref_exists(&repo, branch_ref).unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_dry_run_reports_planned_branch_deletion_in_json() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-reset-dry-run");
+        let tmpl = env.default_template(&["repo-reset-dry-run"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-dry-run".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-reset-dry-run");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let result = cmd_reset(false, false, true, None).unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["forests"][0]["repos"][0]["branch"],
+            "forest/reset-dry-run"
+        );
+        assert_eq!(json["forests"][0]["repos"][0]["branch_created"], true);
+        assert_eq!(
+            json["forests"][0]["repos"][0]["branch_deleted"]["status"],
+            "success"
+        );
+        assert!(crate::git::ref_exists(&repo, "refs/heads/forest/reset-dry-run").unwrap());
+        assert!(base.join("reset-dry-run").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_reports_already_missing_branch_without_failing() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-missing-branch");
+        let tmpl = env.default_template(&["repo-missing-branch"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-missing-branch".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let worktree = base
+            .join("reset-missing-branch")
+            .join("repo-missing-branch");
+        let worktree_str = worktree.to_string_lossy();
+        crate::git::git(&repo, &["worktree", "remove", "--force", &worktree_str]).unwrap();
+        crate::git::git(&repo, &["branch", "-d", "forest/reset-missing-branch"]).unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-missing-branch");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.forests[0].removed);
+        assert!(matches!(
+            result.forests[0].repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "branch already deleted"
+        ));
+        assert!(!base.join("reset-missing-branch").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_keeps_branches_not_created_by_forest() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-existing-branch");
+        crate::git::git(&repo, &["branch", "forest/reset-existing", "origin/main"]).unwrap();
+        let tmpl = env.default_template(&["repo-existing-branch"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-existing".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-existing-branch");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(
+            !result.forests[0].repos[0].branch_created,
+            "pre-existing branch should be marked user-owned"
+        );
+        assert!(matches!(
+            result.forests[0].repos[0].branch_deleted,
+            RmOutcome::Skipped { .. }
+        ));
+        assert!(crate::git::ref_exists(&repo, "refs/heads/forest/reset-existing").unwrap());
     }
 
     /// After reset, re-creating a forest with the same name should succeed.
