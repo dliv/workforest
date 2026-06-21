@@ -47,7 +47,20 @@ pub fn ref_exists(repo: &Path, refname: &str) -> Result<bool> {
 
     match output.status.code() {
         Some(0) => Ok(true),
-        Some(_) => Ok(false), // exit 1 or 128 both mean "ref not found"
+        Some(1) => Ok(false),
+        Some(code) => {
+            if git(repo, &["rev-parse", "--git-dir"]).is_ok() {
+                return Ok(false);
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "git show-ref --verify {} failed in {} (exit code: {})\nstderr: {}",
+                refname,
+                repo.display(),
+                code,
+                stderr.trim()
+            )
+        }
         None => bail!(
             "git show-ref --verify {} killed by signal in {}",
             refname,
@@ -110,5 +123,17 @@ mod tests {
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("test-repo");
         assert!(!ref_exists(&repo, "refs/remotes/origin/nonexistent").unwrap());
+    }
+
+    #[test]
+    fn ref_exists_errors_for_non_git_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = ref_exists(tmp.path(), "refs/heads/main");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("git show-ref --verify refs/heads/main failed"));
     }
 }

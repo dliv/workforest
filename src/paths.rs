@@ -96,6 +96,12 @@ impl RepoName {
         if name.is_empty() {
             bail!("repo name must not be empty");
         }
+        if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+            bail!(
+                "invalid repo name: {:?}\n  hint: repo names must be a single directory name, not a path",
+                name
+            );
+        }
         Ok(Self(name))
     }
 
@@ -327,6 +333,17 @@ mod tests {
     }
 
     #[test]
+    fn repo_name_new_path_component_fails() {
+        for name in [".", "..", "../victim", "foo/bar", r"foo\bar"] {
+            assert!(
+                RepoName::new(name.to_string()).is_err(),
+                "repo name should reject path component: {:?}",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn repo_name_serde_round_trip() {
         let name = RepoName::new("foo-api".to_string()).unwrap();
         let json = serde_json::to_string(&name).unwrap();
@@ -338,6 +355,12 @@ mod tests {
     fn repo_name_deserialize_empty_fails() {
         let json = r#""""#;
         let result: std::result::Result<RepoName, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn repo_name_deserialize_path_component_fails() {
+        let result: std::result::Result<RepoName, _> = serde_json::from_str(r#""../victim""#);
         assert!(result.is_err());
     }
 

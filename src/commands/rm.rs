@@ -1,10 +1,11 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use crate::forest::discover_forests;
+use super::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
+use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
 use crate::meta::{ForestMeta, META_FILENAME};
-use crate::paths::{sanitize_forest_name, AbsolutePath, ForestName, RepoName};
+use crate::paths::{AbsolutePath, ForestName, RepoName};
 
 // --- Types ---
 
@@ -22,9 +23,19 @@ pub struct RepoRmPlan {
     pub base_branch: String,
     pub remote: Option<String>,
     pub branch_created: bool,
+    pub branch_state: WorktreeBranchState,
+    pub detached_head_safety: DetachedHeadSafety,
     pub worktree_exists: bool,
     pub source_exists: bool,
     pub has_dirty_files: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedHeadSafety {
+    NotDetached,
+    Preserved,
+    Unpreserved { head: String },
+    Unverified { head: String, error: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +52,7 @@ pub struct RmResult {
 #[derive(Debug, Serialize)]
 pub struct RepoRmResult {
     pub name: RepoName,
+    pub branch_state: WorktreeBranchState,
     pub worktree_removed: RmOutcome,
     pub branch_deleted: RmOutcome,
 }
@@ -81,8 +93,21 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
         .iter()
         .map(|repo| {
             let worktree_path = forest_dir.join(repo.name.as_str());
-            let worktree_exists = worktree_path.exists();
+            assert!(
+                worktree_path_is_inside_forest(&worktree_path, forest_dir),
+                "worktree path {:?} is not inside forest dir {:?}",
+                worktree_path,
+                forest_dir
+            );
+            let worktree_exists = path_exists_or_symlink(&worktree_path);
+            let worktree_is_symlink = path_is_symlink(&worktree_path);
+            let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
+            let source_exists = repo.source.is_dir();
+            let detached_head_safety =
+                detached_head_safety(&branch_state, &repo.source, source_exists);
             let has_dirty_files = worktree_exists
+                && !worktree_is_symlink
+                && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
                 && crate::git::git(&worktree_path, &["status", "--porcelain"])
                     .map(|output| !output.is_empty())
                     .unwrap_or(false);
@@ -94,8 +119,10 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
                 base_branch: repo.base_branch.clone(),
                 remote: repo.remote.clone(),
                 branch_created: repo.branch_created,
+                branch_state,
+                detached_head_safety,
                 worktree_exists,
-                source_exists: repo.source.is_dir(),
+                source_exists,
                 has_dirty_files,
             }
         })
@@ -108,6 +135,106 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
     }
 }
 
+fn detached_head_safety(
+    branch_state: &WorktreeBranchState,
+    source: &AbsolutePath,
+    source_exists: bool,
+) -> DetachedHeadSafety {
+    let ActualBranchState::Detached {
+        actual_detached_head,
+    } = &branch_state.actual
+    else {
+        return DetachedHeadSafety::NotDetached;
+    };
+
+    if !source_exists {
+        return DetachedHeadSafety::Unverified {
+            head: actual_detached_head.clone(),
+            error: "source repo missing".to_string(),
+        };
+    }
+
+    match detached_head_is_preserved(source, actual_detached_head) {
+        Ok(true) => DetachedHeadSafety::Preserved,
+        Ok(false) => DetachedHeadSafety::Unpreserved {
+            head: actual_detached_head.clone(),
+        },
+        Err(e) => DetachedHeadSafety::Unverified {
+            head: actual_detached_head.clone(),
+            error: e.to_string(),
+        },
+    }
+}
+
+fn detached_head_is_preserved(source: &AbsolutePath, head: &str) -> Result<bool> {
+    let commit = format!("{}^{{commit}}", head);
+    let full_head = crate::git::git(source, &["rev-parse", "--verify", &commit])?;
+    let containing_refs = crate::git::git(
+        source,
+        &[
+            "for-each-ref",
+            "--contains",
+            &full_head,
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+
+    Ok(containing_refs.lines().next().is_some())
+}
+
+fn worktree_removal_safety_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
+    if force {
+        return None;
+    }
+
+    match &repo_plan.detached_head_safety {
+        DetachedHeadSafety::Unpreserved { head } => {
+            return Some(format!(
+                "{}: detached HEAD {} has commits not reachable from any branch, remote, or tag ref; use `git forest rm --force` to remove anyway",
+                repo_plan.name, head
+            ));
+        }
+        DetachedHeadSafety::Unverified { head, error } => {
+            return Some(format!(
+                "{}: detached HEAD {} reachability could not be verified: {}; use `git forest rm --force` to remove anyway",
+                repo_plan.name,
+                head,
+                compact_git_error(error)
+            ));
+        }
+        DetachedHeadSafety::NotDetached | DetachedHeadSafety::Preserved => {}
+    }
+
+    if !repo_plan.source_exists {
+        return Some(format!(
+            "{}: source repo missing; refusing to remove unverified worktree without `git forest rm --force`",
+            repo_plan.name
+        ));
+    }
+
+    if matches!(
+        repo_plan.branch_state.actual,
+        ActualBranchState::Unknown { .. }
+    ) {
+        return Some(format!(
+            "{}: branch lookup failed; refusing to remove unverified worktree without `git forest rm --force`",
+            repo_plan.name
+        ));
+    }
+
+    if path_is_symlink(&repo_plan.worktree_path) {
+        return Some(format!(
+            "{}: worktree path is a symlink; refusing to remove unverified worktree without `git forest rm --force`",
+            repo_plan.name
+        ));
+    }
+
+    None
+}
+
 // --- Execution (impure) ---
 
 pub fn execute_rm(
@@ -115,6 +242,8 @@ pub fn execute_rm(
     force: bool,
     on_progress: Option<&dyn Fn(RmProgress)>,
 ) -> RmResult {
+    validate_rm_plan_paths(plan);
+
     // Preflight: if not forcing, reject if any repo has dirty files
     if !force {
         let dirty_repos: Vec<&RepoRmPlan> = plan
@@ -128,6 +257,10 @@ pub fn execute_rm(
             let mut errors = Vec::new();
 
             for rp in &plan.repo_plans {
+                if let Some(cb) = &on_progress {
+                    cb(RmProgress::RepoStarting { name: &rp.name });
+                }
+
                 let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
                     let msg = format!("{}: worktree has uncommitted changes", rp.name);
                     errors.push(msg.clone());
@@ -147,11 +280,17 @@ pub fn execute_rm(
                         },
                     )
                 };
-                repos.push(RepoRmResult {
+                let result = RepoRmResult {
                     name: rp.name.clone(),
+                    branch_state: rp.branch_state.clone(),
                     worktree_removed,
                     branch_deleted,
-                });
+                };
+
+                if let Some(cb) = &on_progress {
+                    cb(RmProgress::RepoDone(&result));
+                }
+                repos.push(result);
             }
 
             errors.push(
@@ -175,13 +314,6 @@ pub fn execute_rm(
     let mut errors = Vec::new();
 
     for repo_plan in &plan.repo_plans {
-        assert!(
-            repo_plan.worktree_path.starts_with(&plan.forest_dir),
-            "worktree path {:?} is not inside forest dir {:?}",
-            repo_plan.worktree_path,
-            plan.forest_dir
-        );
-
         if let Some(cb) = &on_progress {
             cb(RmProgress::RepoStarting {
                 name: &repo_plan.name,
@@ -194,6 +326,7 @@ pub fn execute_rm(
 
         let result = RepoRmResult {
             name: repo_plan.name.clone(),
+            branch_state: repo_plan.branch_state.clone(),
             worktree_removed,
             branch_deleted,
         };
@@ -223,12 +356,27 @@ pub fn execute_rm(
     }
 }
 
+fn validate_rm_plan_paths(plan: &RmPlan) {
+    for repo_plan in &plan.repo_plans {
+        assert!(
+            worktree_path_is_inside_forest(&repo_plan.worktree_path, &plan.forest_dir),
+            "worktree path {:?} is not inside forest dir {:?}",
+            repo_plan.worktree_path,
+            plan.forest_dir
+        );
+    }
+}
+
 fn remove_worktree(
     repo_plan: &RepoRmPlan,
     force: bool,
     errors: &mut Vec<String>,
 ) -> (RmOutcome, bool) {
     if !repo_plan.worktree_exists {
+        if let Some(msg) = stale_missing_worktree_metadata_error(repo_plan, force) {
+            errors.push(msg.clone());
+            return (RmOutcome::Failed { error: msg }, false);
+        }
         return (
             RmOutcome::Skipped {
                 reason: "worktree already missing".to_string(),
@@ -237,9 +385,14 @@ fn remove_worktree(
         );
     }
 
+    if let Some(msg) = worktree_removal_safety_error(repo_plan, force) {
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
+    }
+
     if !repo_plan.source_exists {
         // Source repo is gone — can't use git, remove directory directly
-        match std::fs::remove_dir_all(&repo_plan.worktree_path) {
+        match remove_corrupt_worktree_path(&repo_plan.worktree_path) {
             Ok(()) => {
                 return (RmOutcome::Success, true);
             }
@@ -254,6 +407,14 @@ fn remove_worktree(
         }
     }
 
+    if path_is_symlink(&repo_plan.worktree_path) {
+        return remove_corrupt_worktree_dir(
+            repo_plan,
+            "worktree path is a symlink".to_string(),
+            errors,
+        );
+    }
+
     let wt_path_str = repo_plan.worktree_path.to_string_lossy();
     let mut args = vec!["worktree", "remove"];
     if force {
@@ -264,11 +425,301 @@ fn remove_worktree(
     match crate::git::git(&repo_plan.source, &args) {
         Ok(_) => (RmOutcome::Success, true),
         Err(e) => {
+            if force
+                && repo_plan.source_exists
+                && matches!(
+                    repo_plan.branch_state.actual,
+                    ActualBranchState::Unknown { .. }
+                )
+            {
+                return remove_corrupt_worktree_dir(repo_plan, e.to_string(), errors);
+            }
+
             let msg = format!("{}: git worktree remove failed: {}", repo_plan.name, e);
             errors.push(msg.clone());
             (RmOutcome::Failed { error: msg }, false)
         }
     }
+}
+
+fn stale_missing_worktree_metadata_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
+    if !repo_plan.source_exists {
+        return None;
+    }
+
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+        Ok(Some(_)) if force => prune_stale_worktree_metadata(repo_plan).err(),
+        Ok(Some(_)) => Some(format!(
+            "{}: source repo still lists missing worktree metadata for {}; run `git -C {} worktree prune` or retry with `git forest rm --force`",
+            repo_plan.name,
+            repo_plan.worktree_path.display(),
+            repo_plan.source
+        )),
+        Ok(None) => None,
+        Err(e) if force => Some(format!(
+            "{}: could not inspect git worktree metadata before missing-worktree cleanup: {}",
+            repo_plan.name,
+            compact_git_error(&e)
+        )),
+        Err(_) => None,
+    }
+}
+
+fn prune_stale_worktree_metadata(repo_plan: &RepoRmPlan) -> Result<(), String> {
+    crate::git::git(&repo_plan.source, &["worktree", "prune", "--expire", "now"]).map_err(|e| {
+        format!(
+            "{}: failed to prune stale missing worktree metadata: {}",
+            repo_plan.name,
+            compact_git_error(&e.to_string())
+        )
+    })?;
+
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(format!(
+            "{}: git worktree metadata still lists missing worktree {} after prune",
+            repo_plan.name,
+            repo_plan.worktree_path.display()
+        )),
+        Err(e) => Err(format!(
+            "{}: failed to verify stale missing worktree metadata was pruned: {}",
+            repo_plan.name,
+            compact_git_error(&e)
+        )),
+    }
+}
+
+fn remove_corrupt_worktree_dir(
+    repo_plan: &RepoRmPlan,
+    git_error: String,
+    errors: &mut Vec<String>,
+) -> (RmOutcome, bool) {
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+        Ok(Some(metadata)) if metadata.locked => {
+            let msg = format!(
+                "{}: git worktree remove failed: {}; refusing direct removal because git worktree metadata is locked",
+                repo_plan.name,
+                compact_git_error(&git_error)
+            );
+            errors.push(msg.clone());
+            return (RmOutcome::Failed { error: msg }, false);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let msg = format!(
+                "{}: git worktree remove failed: {}; could not inspect git worktree metadata before direct removal: {}",
+                repo_plan.name,
+                compact_git_error(&git_error),
+                compact_git_error(&e)
+            );
+            errors.push(msg.clone());
+            return (RmOutcome::Failed { error: msg }, false);
+        }
+    }
+
+    if let Err(e) = remove_corrupt_worktree_path(&repo_plan.worktree_path) {
+        let msg = format!(
+            "{}: git worktree remove failed: {}; direct removal also failed: {}",
+            repo_plan.name,
+            compact_git_error(&git_error),
+            e
+        );
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
+    }
+
+    match crate::git::git(&repo_plan.source, &["worktree", "prune", "--expire", "now"]) {
+        Ok(_) => {
+            match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+                Ok(Some(_)) => {
+                    let msg = format!(
+                        "{}: removed corrupt worktree directory but git worktree metadata still lists it",
+                        repo_plan.name
+                    );
+                    errors.push(msg.clone());
+                    return (RmOutcome::Failed { error: msg }, false);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = format!(
+                        "{}: removed corrupt worktree directory but failed to verify git worktree metadata was pruned: {}",
+                        repo_plan.name,
+                        compact_git_error(&e)
+                    );
+                    errors.push(msg.clone());
+                    return (RmOutcome::Failed { error: msg }, false);
+                }
+            }
+            (RmOutcome::Success, true)
+        }
+        Err(e) => {
+            let msg = format!(
+                "{}: removed corrupt worktree directory but failed to prune git worktree metadata: {}",
+                repo_plan.name,
+                compact_git_error(&e.to_string())
+            );
+            errors.push(msg.clone());
+            (RmOutcome::Failed { error: msg }, false)
+        }
+    }
+}
+
+fn remove_corrupt_worktree_path(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+fn canonicalize_existing_or_parent(path: &Path) -> Option<PathBuf> {
+    if path_is_symlink(path) {
+        return canonicalize_parent_join_leaf(path);
+    }
+
+    if let Ok(path) = path.canonicalize() {
+        return Some(path);
+    }
+
+    canonicalize_parent_join_leaf(path)
+}
+
+fn canonicalize_parent_join_leaf(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?.canonicalize().ok()?;
+    let file_name = path.file_name()?;
+    Some(parent.join(file_name))
+}
+
+fn worktree_path_is_inside_forest(worktree_path: &Path, forest_dir: &Path) -> bool {
+    if let (Some(worktree), Ok(forest)) = (
+        canonicalize_existing_or_parent(worktree_path),
+        forest_dir.canonicalize(),
+    ) {
+        return worktree
+            .strip_prefix(&forest)
+            .map(|relative| !path_has_parent_dir(relative))
+            .unwrap_or(false);
+    }
+
+    if forest_dir.canonicalize().is_ok() {
+        if let Ok(relative) = worktree_path.strip_prefix(forest_dir) {
+            return !path_has_parent_dir(relative);
+        }
+    }
+
+    if path_has_parent_dir(worktree_path) || path_has_parent_dir(forest_dir) {
+        return false;
+    }
+
+    worktree_path
+        .strip_prefix(forest_dir)
+        .map(|relative| !path_has_parent_dir(relative))
+        .unwrap_or(false)
+}
+
+fn path_exists_or_symlink(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
+}
+
+fn path_is_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+struct WorktreeMetadata {
+    locked: bool,
+}
+
+struct WorktreeListEntry {
+    path: PathBuf,
+    branch: Option<String>,
+    locked: bool,
+}
+
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String> {
+    let output = crate::git::git(source, &["worktree", "list", "--porcelain", "-z"])
+        .map_err(|e| e.to_string())?;
+    let mut entries = Vec::new();
+    let mut current_path = None;
+    let mut current_branch = None;
+    let mut current_locked = false;
+
+    for token in output.split('\0') {
+        if token.is_empty() {
+            if let Some(path) = current_path.take() {
+                entries.push(WorktreeListEntry {
+                    path,
+                    branch: current_branch.take(),
+                    locked: current_locked,
+                });
+            }
+            current_branch = None;
+            current_locked = false;
+            continue;
+        }
+
+        if let Some(path) = token.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(path));
+        } else if let Some(branch) = token.strip_prefix("branch ") {
+            current_branch = Some(branch.to_string());
+        } else if token == "locked" || token.starts_with("locked ") {
+            current_locked = true;
+        }
+    }
+
+    if let Some(path) = current_path {
+        entries.push(WorktreeListEntry {
+            path,
+            branch: current_branch,
+            locked: current_locked,
+        });
+    }
+
+    Ok(entries)
+}
+
+fn worktree_metadata_for_path(
+    repo_plan: &RepoRmPlan,
+    target_canonical: Option<&Path>,
+) -> Result<Option<WorktreeMetadata>, String> {
+    for entry in worktree_list_entries(&repo_plan.source)? {
+        if worktree_paths_match(&entry.path, &repo_plan.worktree_path, target_canonical) {
+            return Ok(Some(WorktreeMetadata {
+                locked: entry.locked,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn worktree_paths_match(listed: &Path, target: &Path, target_canonical: Option<&Path>) -> bool {
+    if listed == target {
+        return true;
+    }
+
+    let Some(target_canonical) = target_canonical else {
+        return false;
+    };
+
+    if listed == target_canonical {
+        return true;
+    }
+
+    listed
+        .canonicalize()
+        .map(|listed| listed == target_canonical)
+        .unwrap_or(false)
 }
 
 fn delete_branch(
@@ -277,15 +728,15 @@ fn delete_branch(
     wt_succeeded: bool,
     errors: &mut Vec<String>,
 ) -> RmOutcome {
-    if !repo_plan.branch_created {
+    if !wt_succeeded {
         return RmOutcome::Skipped {
-            reason: "branch not created by forest".to_string(),
+            reason: "worktree not removed".to_string(),
         };
     }
 
-    if !wt_succeeded {
+    if !repo_plan.branch_created {
         return RmOutcome::Skipped {
-            reason: "worktree still exists, cannot delete branch".to_string(),
+            reason: "branch not created by forest".to_string(),
         };
     }
 
@@ -361,15 +812,15 @@ fn plan_branch_delete_outcome(
     wt_succeeded: bool,
     errors: &mut Vec<String>,
 ) -> RmOutcome {
-    if !repo_plan.branch_created {
+    if !wt_succeeded {
         return RmOutcome::Skipped {
-            reason: "branch not created by forest".to_string(),
+            reason: "worktree not removed".to_string(),
         };
     }
 
-    if !wt_succeeded {
+    if !repo_plan.branch_created {
         return RmOutcome::Skipped {
-            reason: "worktree still exists, cannot delete branch".to_string(),
+            reason: "branch not created by forest".to_string(),
         };
     }
 
@@ -384,6 +835,11 @@ fn plan_branch_delete_outcome(
         return RmOutcome::Skipped {
             reason: "branch already deleted".to_string(),
         };
+    }
+
+    if let Some(msg) = branch_checkout_conflict_error(repo_plan) {
+        errors.push(msg.clone());
+        return RmOutcome::Failed { error: msg };
     }
 
     if force
@@ -407,6 +863,41 @@ fn plan_branch_delete_outcome(
     );
     errors.push(msg.clone());
     RmOutcome::Failed { error: msg }
+}
+
+fn branch_checkout_conflict_error(repo_plan: &RepoRmPlan) -> Option<String> {
+    match branch_checked_out_elsewhere(repo_plan) {
+        Ok(Some(checkout_path)) => Some(format!(
+            "{}: branch {:?} is checked out at {}; dry-run cannot delete a checked-out branch",
+            repo_plan.name,
+            repo_plan.branch,
+            checkout_path.display()
+        )),
+        Ok(None) => None,
+        Err(e) => Some(format!(
+            "{}: could not inspect worktrees before branch deletion: {}",
+            repo_plan.name,
+            compact_git_error(&e)
+        )),
+    }
+}
+
+fn branch_checked_out_elsewhere(repo_plan: &RepoRmPlan) -> Result<Option<PathBuf>, String> {
+    let expected_branch_ref = format!("refs/heads/{}", repo_plan.branch);
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    for entry in worktree_list_entries(&repo_plan.source)? {
+        if entry.branch.as_deref() == Some(expected_branch_ref.as_str())
+            && !worktree_paths_match(
+                &entry.path,
+                &repo_plan.worktree_path,
+                target_canonical.as_deref(),
+            )
+        {
+            return Ok(Some(entry.path));
+        }
+    }
+
+    Ok(None)
 }
 
 fn branch_not_fully_merged_error(repo_plan: &RepoRmPlan, detail: Option<&str>) -> String {
@@ -543,6 +1034,24 @@ fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec
         return true;
     }
 
+    if path_is_symlink(forest_dir) {
+        if force {
+            return match std::fs::remove_file(forest_dir) {
+                Ok(()) => true,
+                Err(e) => {
+                    errors.push(format!("failed to remove forest directory symlink: {}", e));
+                    false
+                }
+            };
+        }
+
+        errors.push(format!(
+            "forest directory not removed: {} is a symlink\n  hint: inspect the symlink target, then re-run with --force to unlink the forest directory symlink",
+            forest_dir.display()
+        ));
+        return false;
+    }
+
     if force {
         match std::fs::remove_dir_all(forest_dir) {
             Ok(()) => true,
@@ -552,8 +1061,12 @@ fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec
             }
         }
     } else {
-        // Remove meta file first, then try non-recursive remove_dir
         let meta_path = forest_dir.join(META_FILENAME);
+        if let Some(error) = non_force_forest_dir_cleanup_error(forest_dir, &meta_path) {
+            errors.push(error);
+            return false;
+        }
+
         if meta_path.exists() {
             if let Err(e) = std::fs::remove_file(&meta_path) {
                 errors.push(format!("failed to remove meta file: {}", e));
@@ -574,13 +1087,58 @@ fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec
     }
 }
 
+fn non_force_forest_dir_cleanup_error(forest_dir: &Path, meta_path: &Path) -> Option<String> {
+    let entries = match std::fs::read_dir(forest_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Some(format!(
+                "forest directory not removed (not empty): failed to inspect {}: {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
+                forest_dir.display(),
+                e
+            ));
+        }
+    };
+
+    let mut remaining = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                return Some(format!(
+                    "forest directory not removed (not empty): failed to inspect an entry in {}: {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
+                    forest_dir.display(),
+                    e
+                ));
+            }
+        };
+
+        if entry.path() == meta_path {
+            continue;
+        }
+
+        remaining.push(entry.file_name().to_string_lossy().into_owned());
+    }
+
+    if remaining.is_empty() {
+        None
+    } else {
+        remaining.sort();
+        Some(format!(
+            "forest directory not removed (not empty): would still contain {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
+            remaining.join(", ")
+        ))
+    }
+}
+
 // --- Orchestrator ---
 
 fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
+    validate_rm_plan_paths(plan);
+
     let has_dirty = !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
 
     let mut errors = Vec::new();
-    let repos = plan
+    let repos: Vec<RepoRmResult> = plan
         .repo_plans
         .iter()
         .map(|rp| {
@@ -607,15 +1165,36 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
                 };
                 return RepoRmResult {
                     name: rp.name.clone(),
+                    branch_state: rp.branch_state.clone(),
                     worktree_removed,
                     branch_deleted,
                 };
             }
 
-            let worktree_removed = if !rp.worktree_exists {
+            let worktree_removed = if path_is_symlink(&rp.worktree_path) {
+                if force {
+                    if let Some(msg) = symlink_worktree_dry_run_error(rp) {
+                        errors.push(msg.clone());
+                        RmOutcome::Failed { error: msg }
+                    } else {
+                        RmOutcome::Success
+                    }
+                } else {
+                    let msg = worktree_removal_safety_error(rp, force)
+                        .expect("non-force symlink worktree should have a safety error");
+                    errors.push(msg.clone());
+                    RmOutcome::Failed { error: msg }
+                }
+            } else if let Some(msg) = worktree_metadata_dry_run_error(rp, force) {
+                errors.push(msg.clone());
+                RmOutcome::Failed { error: msg }
+            } else if !rp.worktree_exists {
                 RmOutcome::Skipped {
                     reason: "worktree already missing".to_string(),
                 }
+            } else if let Some(msg) = worktree_removal_safety_error(rp, force) {
+                errors.push(msg.clone());
+                RmOutcome::Failed { error: msg }
             } else {
                 RmOutcome::Success
             };
@@ -625,6 +1204,7 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
 
             RepoRmResult {
                 name: rp.name.clone(),
+                branch_state: rp.branch_state.clone(),
                 worktree_removed,
                 branch_deleted,
             }
@@ -638,14 +1218,139 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         );
     }
 
+    if errors.is_empty() {
+        if let Some(msg) = forest_dir_dry_run_cleanup_error(plan, &repos, force) {
+            errors.push(msg);
+        }
+    }
+
+    let forest_dir_removed = errors.is_empty();
+
     RmResult {
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
         dry_run: true,
         force,
         repos,
-        forest_dir_removed: errors.is_empty(),
+        forest_dir_removed,
         errors,
+    }
+}
+
+fn worktree_metadata_dry_run_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
+    if !repo_plan.source_exists {
+        return None;
+    }
+
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+        Ok(Some(metadata)) if metadata.locked => Some(format!(
+            "{}: refusing removal because git worktree metadata is locked",
+            repo_plan.name
+        )),
+        Ok(Some(_)) if !repo_plan.worktree_exists && !force => Some(format!(
+            "{}: source repo still lists missing worktree metadata for {}; dry-run cannot prove branch deletion",
+            repo_plan.name,
+            repo_plan.worktree_path.display()
+        )),
+        Ok(None)
+            if repo_plan.worktree_exists
+                && !matches!(repo_plan.branch_state.actual, ActualBranchState::Unknown { .. }) =>
+        {
+            Some(format!(
+                "{}: source repo does not list worktree metadata for {}; dry-run cannot prove removal",
+                repo_plan.name,
+                repo_plan.worktree_path.display()
+            ))
+        }
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "{}: could not inspect git worktree metadata before removal: {}",
+            repo_plan.name,
+            compact_git_error(&e)
+        )),
+    }
+}
+
+fn symlink_worktree_dry_run_error(repo_plan: &RepoRmPlan) -> Option<String> {
+    if !repo_plan.source_exists {
+        return None;
+    }
+
+    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
+    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
+        Ok(Some(metadata)) if metadata.locked => Some(format!(
+            "{}: refusing removal because git worktree metadata is locked",
+            repo_plan.name
+        )),
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "{}: could not inspect git worktree metadata before removal: {}",
+            repo_plan.name,
+            compact_git_error(&e)
+        )),
+    }
+}
+
+fn forest_dir_dry_run_cleanup_error(
+    plan: &RmPlan,
+    repos: &[RepoRmResult],
+    force: bool,
+) -> Option<String> {
+    if force || !plan.forest_dir.exists() {
+        return None;
+    }
+
+    if path_is_symlink(&plan.forest_dir) {
+        return Some(format!(
+            "forest directory not removed: {} is a symlink",
+            plan.forest_dir.display()
+        ));
+    }
+
+    let removable_repo_names: std::collections::BTreeSet<&str> = repos
+        .iter()
+        .filter_map(|repo| match &repo.worktree_removed {
+            RmOutcome::Success => Some(repo.name.as_str()),
+            RmOutcome::Skipped { .. } | RmOutcome::Failed { .. } => None,
+        })
+        .collect();
+
+    let entries = match std::fs::read_dir(&plan.forest_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Some(format!(
+                "forest directory not removed (not empty): failed to inspect {}: {}",
+                plan.forest_dir.display(),
+                e
+            ));
+        }
+    };
+
+    let mut remaining = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return Some(format!(
+                "forest directory not removed (not empty): failed to inspect an entry in {}",
+                plan.forest_dir.display()
+            ));
+        };
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == META_FILENAME || removable_repo_names.contains(file_name.as_ref()) {
+            continue;
+        }
+        remaining.push(file_name.into_owned());
+    }
+
+    if remaining.is_empty() {
+        None
+    } else {
+        remaining.sort();
+        Some(format!(
+            "forest directory not removed (not empty): would still contain {}",
+            remaining.join(", ")
+        ))
     }
 }
 
@@ -663,6 +1368,14 @@ pub fn cmd_rm(
     }
 
     Ok(execute_rm(&plan, force, on_progress))
+}
+
+fn format_branch_state_warning_suffix(branch_state: &WorktreeBranchState) -> String {
+    branch_state
+        .drift_message()
+        .or_else(|| branch_state.lookup_error_message())
+        .map(|message| format!(" [{}]", message))
+        .unwrap_or_default()
 }
 
 pub fn format_rm_human(result: &RmResult) -> String {
@@ -715,7 +1428,13 @@ pub fn format_rm_human(result: &RmResult) -> String {
             RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
         };
 
-        lines.push(format!("  {}: {}{}", repo.name, wt, br));
+        lines.push(format!(
+            "  {}: {}{}{}",
+            repo.name,
+            wt,
+            br,
+            format_branch_state_warning_suffix(&repo.branch_state)
+        ));
     }
 
     if result.dry_run {
@@ -734,7 +1453,7 @@ pub fn format_rm_human(result: &RmResult) -> String {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in &result.errors {
-            lines.push(format!("  {}", error));
+            lines.push(format!("  {}", format_error_single_line(error)));
         }
     }
 
@@ -760,7 +1479,12 @@ pub fn format_repo_done(repo: &RepoRmResult) -> String {
         RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
     };
 
-    format!("{}{}", wt, br)
+    format!(
+        "{}{}{}",
+        wt,
+        br,
+        format_branch_state_warning_suffix(&repo.branch_state)
+    )
 }
 
 pub fn format_rm_summary(result: &RmResult) -> String {
@@ -776,11 +1500,39 @@ pub fn format_rm_summary(result: &RmResult) -> String {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in &result.errors {
-            lines.push(format!("  {}", error));
+            lines.push(format!("  {}", format_error_single_line(error)));
         }
     }
 
     lines.join("\n")
+}
+
+fn format_error_single_line(error: &str) -> String {
+    if error.contains("stderr:") {
+        let compact = compact_git_error(error);
+        return match compact_hint(error).filter(|hint| !compact.contains(hint)) {
+            Some(hint) => format!("{}; {}", compact, hint),
+            None => compact,
+        };
+    }
+
+    error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn compact_hint(error: &str) -> Option<String> {
+    let hint_lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !line.starts_with("hint:"))
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    (!hint_lines.is_empty()).then(|| hint_lines.join(" "))
 }
 
 // --- rm --all ---
@@ -790,17 +1542,18 @@ struct RmAllPlan {
 }
 
 fn plan_rm_all(worktree_bases: &[&Path]) -> Result<RmAllPlan> {
-    let mut forest_plans = Vec::new();
+    let mut forests = Vec::new();
 
     for base in worktree_bases {
-        let metas = discover_forests(base)?;
-        for meta in metas {
-            let dir_name = sanitize_forest_name(meta.name.as_str());
-            let forest_dir = base.join(dir_name);
-            let plan = plan_rm(&forest_dir, &meta);
-            forest_plans.push((forest_dir, plan));
-        }
+        forests.extend(discover_forests_with_dirs(base)?);
     }
+    let forest_plans = dedupe_discovered_forests(forests)
+        .into_iter()
+        .map(|forest| {
+            let plan = plan_rm(&forest.dir, &forest.meta);
+            (forest.dir, plan)
+        })
+        .collect();
 
     Ok(RmAllPlan { forest_plans })
 }
@@ -889,7 +1642,10 @@ pub fn format_rm_all_human(result: &RmAllResult) -> String {
     }
 
     if result.dry_run {
-        lines.push(format!("Would remove {} forest(s).", result.total_forests));
+        lines.push(format!(
+            "Would remove {}/{} forest(s).",
+            result.succeeded, result.total_forests
+        ));
     } else {
         lines.push(format!(
             "Removed {}/{} forest(s).",
@@ -913,7 +1669,7 @@ pub fn format_rm_all_summary(result: &RmAllResult) -> String {
         lines.push(String::new());
         lines.push("Errors:".to_string());
         for error in all_errors {
-            lines.push(format!("  {}", error));
+            lines.push(format!("  {}", format_error_single_line(error)));
         }
     }
 
@@ -922,13 +1678,15 @@ pub fn format_rm_all_summary(result: &RmAllResult) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::branch_state::ActualBranchState;
     use super::*;
     use crate::commands::cmd_ls;
     use crate::commands::cmd_new;
     use crate::commands::NewInputs;
+    use crate::config::{ResolvedRepo, ResolvedTemplate};
     use crate::meta::ForestMode;
     use crate::paths::{AbsolutePath, ForestName, RepoName};
-    use crate::testutil::TestEnv;
+    use crate::testutil::{make_meta, make_repo, TestEnv};
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
         NewInputs {
@@ -938,6 +1696,31 @@ mod tests {
             repo_branches: vec![],
             no_fetch: true,
             dry_run: false,
+        }
+    }
+
+    fn switch_forest_worktree_to_main(forest_dir: &Path, meta: &ForestMeta) {
+        let source = &meta.repos[0].source;
+        crate::git::git(source, &["checkout", "-b", "source-other"]).unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["checkout", "main"]).unwrap();
+    }
+
+    fn newline_worktree_template(env: &TestEnv, repo_names: &[&str]) -> ResolvedTemplate {
+        let repos = repo_names
+            .iter()
+            .map(|name| ResolvedRepo {
+                path: env.repo_path(name),
+                name: RepoName::new(name.to_string()).unwrap(),
+                base_branch: "main".to_string(),
+                remote: "origin".to_string(),
+            })
+            .collect();
+
+        ResolvedTemplate {
+            worktree_base: env.worktree_base().join("newline\nbase"),
+            base_branch: "main".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            repos,
         }
     }
 
@@ -1267,6 +2050,17 @@ mod tests {
             rm_result.repos[0].worktree_removed,
             RmOutcome::Skipped { .. }
         ));
+        assert_eq!(
+            rm_result.repos[0].branch_state.expected_branch,
+            "testuser/rm-missing-wt"
+        );
+        assert!(!rm_result.repos[0].branch_state.branch_drift);
+        let json = serde_json::to_value(&rm_result).unwrap();
+        assert_eq!(
+            json["repos"][0]["branch_state"]["actual_type"],
+            "missing_worktree"
+        );
+        assert_eq!(json["repos"][0]["branch_state"]["branch_drift"], false);
         // Branch should still be deleted since worktree was "successfully" handled
         assert!(matches!(
             rm_result.repos[0].branch_deleted,
@@ -1276,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn rm_source_repo_missing_handles_gracefully() {
+    fn rm_source_repo_missing_present_worktree_requires_force() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         let tmpl = env.default_template(&["foo-api"]);
@@ -1292,16 +2086,93 @@ mod tests {
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
-        // Worktree should still be removed (via direct fs removal since source is missing)
         assert!(matches!(
             rm_result.repos[0].worktree_removed,
-            RmOutcome::Success
+            RmOutcome::Failed { .. }
         ));
-        // Branch should be skipped since source is missing
         assert!(matches!(
             rm_result.repos[0].branch_deleted,
-            RmOutcome::Skipped { .. }
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
+        assert!(rm_result
+            .errors
+            .iter()
+            .any(|error| error.contains("source repo missing")));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(!rm_result.forest_dir_removed);
+
+        let forced = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            forced.errors.is_empty(),
+            "unexpected errors: {:?}",
+            forced.errors
+        );
+        assert!(matches!(
+            forced.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            forced.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "source repo missing"
+        ));
+        assert!(forced.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn rm_source_repo_missing_unknown_worktree_blocks_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-src-missing-unknown", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-src-missing-unknown");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = meta.repos[0].source.clone();
+        std::fs::remove_dir_all(source.as_ref()).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("source repo missing")));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(!result.forest_dir_removed);
+
+        let retry = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+        assert!(
+            retry.errors.is_empty(),
+            "unexpected errors: {:?}",
+            retry.errors
+        );
+        assert!(matches!(
+            retry.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            retry.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "source repo missing"
+        ));
+        assert!(retry.forest_dir_removed);
+        assert!(!forest_dir.exists());
     }
 
     // --- cmd_rm / format tests ---
@@ -1325,6 +2196,406 @@ mod tests {
         assert!(forest_dir.exists());
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_reports_extra_forest_files_prevent_non_force_directory_removal() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-dry-extra-file", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-dry-extra-file");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        std::fs::write(forest_dir.join("notes.txt"), "keep me").unwrap();
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(rm_result.dry_run);
+        assert!(!rm_result.forest_dir_removed);
+        assert!(rm_result
+            .errors
+            .iter()
+            .any(|error| error.contains("would still contain notes.txt")));
+        assert!(forest_dir.join("notes.txt").exists());
+        let human = format_rm_human(&rm_result);
+        assert!(human.contains("Would not remove forest directory"));
+        assert!(human.contains("notes.txt"));
+    }
+
+    #[test]
+    fn cmd_rm_preserves_meta_when_extra_forest_files_prevent_non_force_directory_removal() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-extra-file", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-extra-file");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        std::fs::write(forest_dir.join("notes.txt"), "keep me").unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(!result.errors.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("would still contain notes.txt")));
+        assert!(!result.forest_dir_removed);
+        assert!(forest_dir.exists());
+        assert!(forest_dir.join("notes.txt").exists());
+        assert!(
+            forest_dir.join(META_FILENAME).exists(),
+            "failed non-force cleanup must leave metadata discoverable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_dry_run_reports_symlink_forest_dir_cleanup_failure() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-linked-forest-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-linked-forest-dry-run");
+        let target_parent = tmpl
+            .worktree_base
+            .as_ref()
+            .parent()
+            .unwrap()
+            .join("linked-targets");
+        let target_dir = target_parent.join("rm-linked-forest-dry-run");
+        std::fs::create_dir_all(&target_parent).unwrap();
+        std::fs::rename(&forest_dir, &target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, &forest_dir).unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(!result.forest_dir_removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("forest directory not removed")
+                && error.contains("is a symlink")));
+        assert!(forest_dir.symlink_metadata().is_ok());
+        assert!(target_dir.join(META_FILENAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_preserves_meta_when_symlink_forest_dir_blocks_non_force_cleanup() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-linked-forest", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-linked-forest");
+        let target_parent = tmpl
+            .worktree_base
+            .as_ref()
+            .parent()
+            .unwrap()
+            .join("linked-targets");
+        let target_dir = target_parent.join("rm-linked-forest");
+        std::fs::create_dir_all(&target_parent).unwrap();
+        std::fs::rename(&forest_dir, &target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, &forest_dir).unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(!result.forest_dir_removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("forest directory not removed")
+                && error.contains("is a symlink")));
+        assert!(forest_dir.symlink_metadata().is_ok());
+        assert!(
+            target_dir.join(META_FILENAME).exists(),
+            "failed non-force cleanup must not delete target metadata through a symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_dry_run_reports_dangling_symlink_prevents_non_force_directory_removal() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-dry-dangling-symlink", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-dry-dangling-symlink");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        crate::git::git(source, &["worktree", "prune", "--expire", "now"]).unwrap();
+        std::os::unix::fs::symlink("/missing/target", &worktree).unwrap();
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(rm_result.dry_run);
+        assert!(!rm_result.forest_dir_removed);
+        assert!(rm_result
+            .errors
+            .iter()
+            .any(|error| error.contains("branch lookup failed")));
+        let human = format_rm_human(&rm_result);
+        assert!(human.contains("Would not remove forest directory"));
+        assert!(human.contains("branch lookup failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_blocks_dangling_symlink_before_branch_or_meta_removal() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-dangling-symlink", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-dangling-symlink");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        crate::git::git(source, &["worktree", "prune", "--expire", "now"]).unwrap();
+        std::os::unix::fs::symlink("/missing/target", &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("branch lookup failed")));
+        assert!(worktree.symlink_metadata().is_ok());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_blocks_repo_symlink_without_following_target() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-symlink-non-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-symlink-non-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+        crate::git::git(source, &["worktree", "remove", "--force", &worktree_arg]).unwrap();
+        std::os::unix::fs::symlink(source.as_ref(), &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("worktree path is a symlink")));
+        assert!(worktree.symlink_metadata().is_ok());
+        assert!(source.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_force_dry_run_reports_repo_symlink_removable() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-symlink-force-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-symlink-force-dry-run");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let worktree = forest_dir.join("foo-api");
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+        crate::git::git(source, &["worktree", "remove", "--force", &worktree_arg]).unwrap();
+        std::os::unix::fs::symlink(source.as_ref(), &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(worktree.symlink_metadata().is_ok());
+        assert!(source.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_force_dry_run_refuses_locked_repo_symlink_metadata() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-locked-symlink-force-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-locked-symlink-force-dry-run");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(source.as_ref(), &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        assert!(worktree.symlink_metadata().is_ok());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_force_refuses_locked_repo_symlink_metadata() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-locked-symlink-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-locked-symlink-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(source.as_ref(), &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        assert!(worktree.symlink_metadata().is_ok());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_force_removes_repo_symlink_without_following_target() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-symlink-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-symlink-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+        crate::git::git(source, &["worktree", "remove", "--force", &worktree_arg]).unwrap();
+        std::os::unix::fs::symlink(source.as_ref(), &worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(source.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
     }
 
     #[test]
@@ -1381,6 +2652,1120 @@ mod tests {
     }
 
     #[test]
+    fn cmd_rm_dry_run_reports_branch_metadata_drift_without_blocking_recovery() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-drift", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-drift");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let branch_ref = format!("refs/heads/{}", branch);
+        switch_forest_worktree_to_main(&forest_dir, &meta);
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(dry_run.dry_run);
+        assert!(dry_run.errors.is_empty());
+        assert_eq!(
+            dry_run.repos[0].branch_state.expected_branch,
+            branch.as_str()
+        );
+        assert!(dry_run.repos[0].branch_state.branch_drift);
+        assert!(matches!(
+            &dry_run.repos[0].branch_state.actual,
+            ActualBranchState::Branch { actual_branch } if actual_branch == "main"
+        ));
+        let json = serde_json::to_value(&dry_run).unwrap();
+        assert_eq!(
+            json["repos"][0]["branch_state"]["expected_branch"],
+            "testuser/rm-drift"
+        );
+        assert_eq!(json["repos"][0]["branch_state"]["actual_type"], "branch");
+        assert_eq!(json["repos"][0]["branch_state"]["actual_branch"], "main");
+        assert_eq!(json["repos"][0]["branch_state"]["branch_drift"], true);
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Success
+        ));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+
+        let human = format_rm_human(&dry_run);
+        assert!(human.contains("branch drift"));
+        assert!(human.contains("expected testuser/rm-drift"));
+        assert!(human.contains("actual main"));
+
+        let actual = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(actual.errors.is_empty());
+        assert!(actual.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_reports_branch_checked_out_in_source_repo() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-branch-checked-out", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-branch-checked-out");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let worktree = forest_dir.join("foo-api");
+        crate::git::git(source, &["checkout", "-b", "source-other"]).unwrap();
+        crate::git::git(&worktree, &["checkout", "main"]).unwrap();
+        crate::git::git(source, &["checkout", branch]).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(dry_run.repos[0].branch_state.branch_drift);
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(dry_run
+            .errors
+            .iter()
+            .any(|error| error.contains("checked out")));
+        assert!(!dry_run.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_reports_reachable_detached_head_drift_without_blocking_rm() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-detached", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-detached");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let worktree = forest_dir.join("foo-api");
+        let head = crate::git::git(&worktree, &["rev-parse", "HEAD"]).unwrap();
+        crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(dry_run.errors.is_empty());
+        assert!(dry_run.repos[0].branch_state.branch_drift);
+        assert!(matches!(
+            &dry_run.repos[0].branch_state.actual,
+            ActualBranchState::Detached {
+                actual_detached_head
+            } if actual_detached_head == &head
+        ));
+        let json = serde_json::to_value(&dry_run).unwrap();
+        assert_eq!(json["repos"][0]["branch_state"]["actual_type"], "detached");
+        assert_eq!(
+            json["repos"][0]["branch_state"]["actual_detached_head"],
+            head
+        );
+        assert_eq!(json["repos"][0]["branch_state"]["branch_drift"], true);
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Success
+        ));
+        assert!(forest_dir.join("foo-api").exists());
+
+        let human = format_rm_human(&dry_run);
+        assert!(human.contains("branch drift"));
+        assert!(human.contains("detached HEAD"));
+
+        let actual = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(actual.errors.is_empty());
+        assert!(actual.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn cmd_rm_blocks_unique_detached_head_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-detached-unique", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-detached-unique");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let branch_ref = format!("refs/heads/{}", branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &worktree,
+            "detached.txt",
+            "unique detached work",
+            "detached commit",
+        );
+        let head = crate::git::git(&worktree, &["rev-parse", "HEAD"]).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(!dry_run.errors.is_empty());
+        assert!(dry_run.errors[0].contains("detached HEAD"));
+        assert!(dry_run.errors[0].contains(&head));
+        assert!(dry_run.errors[0].contains("not reachable"));
+        assert!(!dry_run.forest_dir_removed);
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+
+        let actual = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(matches!(
+            actual.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            actual.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(!actual.errors.is_empty());
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!actual.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_removes_unique_detached_head() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-detached-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-detached-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let branch_ref = format!("refs/heads/{}", branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &worktree,
+            "detached.txt",
+            "unique detached work",
+            "detached commit",
+        );
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
+    }
+
+    #[test]
+    fn cmd_rm_blocks_detached_head_when_source_missing_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-detached-missing-source", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-detached-missing-source");
+        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let real_source = meta.repos[0].source.clone();
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&worktree, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &worktree,
+            "detached.txt",
+            "unique detached work",
+            "detached commit",
+        );
+        meta.repos[0].source = AbsolutePath::new(
+            tmpl.worktree_base
+                .as_ref()
+                .join("missing-source")
+                .join("foo-api"),
+        )
+        .unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("source repo missing")));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(&real_source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+
+        let retry = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+        assert!(
+            retry.errors.is_empty(),
+            "unexpected errors: {:?}",
+            retry.errors
+        );
+        assert!(matches!(
+            retry.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            retry.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "source repo missing"
+        ));
+        assert!(retry.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(crate::git::ref_exists(&real_source, &branch_ref).unwrap());
+    }
+
+    #[test]
+    fn cmd_rm_force_removes_source_missing_file_worktree_entry() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-src-missing-file", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-src-missing-file");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = meta.repos[0].source.clone();
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(source.as_ref()).unwrap();
+        replace_worktree_with_plain_file(&worktree);
+
+        let dry_run = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+        assert!(
+            dry_run.errors.is_empty(),
+            "dry-run errors: {:?}",
+            dry_run.errors
+        );
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "source repo missing"
+        ));
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "source repo missing"
+        ));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_reports_branch_lookup_failure_in_human_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("rm-lookup-error");
+        let repo_dir = forest_dir.join("not-git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let mut repo = make_repo("not-git", "dliv/rm-lookup-error");
+        repo.source = AbsolutePath::new(tmp.path().join("missing-source").join("not-git")).unwrap();
+        let meta = make_meta(
+            "rm-lookup-error",
+            chrono::Utc::now(),
+            ForestMode::Feature,
+            vec![repo],
+        );
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(!dry_run.repos[0].branch_state.branch_drift);
+        assert!(matches!(
+            &dry_run.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        let json = serde_json::to_value(&dry_run).unwrap();
+        assert_eq!(json["repos"][0]["branch_state"]["actual_type"], "unknown");
+        assert!(json["repos"][0]["branch_state"]["branch_lookup_error"]
+            .as_str()
+            .unwrap()
+            .contains("git rev-parse --show-toplevel failed"));
+
+        let human = format_rm_human(&dry_run);
+        assert!(human.contains("branch lookup failed"));
+        assert!(human.contains("not-git"));
+
+        let repo_done = format_repo_done(&dry_run.repos[0]);
+        assert!(repo_done.contains("branch lookup failed"));
+    }
+
+    #[test]
+    fn cmd_rm_non_force_blocks_present_non_git_worktree() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-corrupt-non-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-corrupt-non-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = meta.repos[0].source.clone();
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        replace_worktree_with_plain_dir(&forest_dir.join("foo-api"));
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("branch lookup failed")));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(&source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_recovers_present_non_git_worktree() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-corrupt-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-corrupt-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        replace_worktree_with_plain_dir(&forest_dir.join("foo-api"));
+
+        let first = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(matches!(
+            first.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(forest_dir.join("foo-api").exists());
+
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
+        let worktrees = crate::git::git(source, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(
+            !worktrees.contains("rm-corrupt-force"),
+            "stale worktree metadata should be pruned: {}",
+            worktrees
+        );
+    }
+
+    #[test]
+    fn cmd_rm_force_refuses_locked_corrupt_worktree_metadata() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-corrupt-locked", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-corrupt-locked");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+        replace_worktree_with_plain_dir(&worktree);
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        let human = format_rm_human(&result);
+        assert!(
+            !human
+                .lines()
+                .any(|line| line.trim_start().starts_with("stderr:")),
+            "rm human output should keep git diagnostics indented and single-line: {}",
+            human
+        );
+        assert!(worktree.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_dry_run_reports_locked_corrupt_worktree_metadata_failure() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-corrupt-locked-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-corrupt-locked-dry-run");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+        replace_worktree_with_plain_dir(&worktree);
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        assert!(worktree.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_matches_actual_with_newline_worktree_base() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = newline_worktree_template(&env, &["foo-api"]);
+
+        let inputs = make_new_inputs("rm-newline-base", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-newline-base");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(
+            dry_run.errors.is_empty(),
+            "dry-run should parse newline paths in worktree metadata: {:?}",
+            dry_run.errors
+        );
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(
+            dry_run.repos[0].branch_deleted,
+            RmOutcome::Success
+        ));
+        assert!(dry_run.forest_dir_removed);
+        assert!(forest_dir.exists());
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "actual rm should still succeed: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn cmd_rm_force_refuses_locked_corrupt_worktree_metadata_with_newline_base() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = newline_worktree_template(&env, &["foo-api"]);
+
+        let inputs = make_new_inputs("rm-newline-locked-corrupt", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-newline-locked-corrupt");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+        replace_worktree_with_plain_dir(&worktree);
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        assert!(worktree.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_dry_run_reports_locked_valid_worktree_metadata_failure() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-locked-valid-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-locked-valid-dry-run");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+
+        crate::git::git(source, &["worktree", "lock", worktree.to_str().unwrap()]).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Branch { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("metadata is locked")));
+        assert!(worktree.exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_dry_run_reports_invalid_source_before_corrupt_direct_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("rm-invalid-source-dry-run");
+        let repo_dir = forest_dir.join("not-git");
+        let source_dir = tmp.path().join("plain-source");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(repo_dir.join("README.txt"), "not a git worktree").unwrap();
+
+        let mut repo = make_repo("not-git", "dliv/rm-invalid-source-dry-run");
+        repo.source = AbsolutePath::new(source_dir).unwrap();
+        let meta = make_meta(
+            "rm-invalid-source-dry-run",
+            chrono::Utc::now(),
+            ForestMode::Feature,
+            vec![repo],
+        );
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("could not inspect git worktree metadata")));
+        assert!(repo_dir.exists());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_refuses_invalid_source_before_corrupt_direct_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("rm-invalid-source");
+        let repo_dir = forest_dir.join("not-git");
+        let source_dir = tmp.path().join("plain-source");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(repo_dir.join("README.txt"), "not a git worktree").unwrap();
+
+        let mut repo = make_repo("not-git", "dliv/rm-invalid-source");
+        repo.source = AbsolutePath::new(source_dir).unwrap();
+        let meta = make_meta(
+            "rm-invalid-source",
+            chrono::Utc::now(),
+            ForestMode::Feature,
+            vec![repo],
+        );
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("could not inspect git worktree metadata")));
+        assert!(repo_dir.exists());
+        assert!(forest_dir.exists());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_refuses_invalid_source_for_missing_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("rm-invalid-source-missing");
+        let source_dir = tmp.path().join("plain-source");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+
+        let mut repo = make_repo("missing-repo", "dliv/rm-invalid-source-missing");
+        repo.source = AbsolutePath::new(source_dir).unwrap();
+        let meta = make_meta(
+            "rm-invalid-source-missing",
+            chrono::Utc::now(),
+            ForestMode::Feature,
+            vec![repo],
+        );
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("not a git repository")));
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_reports_stale_metadata_for_missing_worktree() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-stale-missing-dry-run", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-stale-missing-dry-run");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        assert!(meta.repos[0].branch_created);
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let worktrees = crate::git::git(source, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(
+            worktrees.contains(&format!("branch {}", branch_ref)),
+            "expected stale metadata for {} in:\n{}",
+            branch_ref,
+            worktrees
+        );
+
+        let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(result.dry_run);
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("still lists missing worktree metadata")));
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_prunes_stale_metadata_for_missing_worktree() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-stale-missing-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-stale-missing-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Skipped { ref reason } if reason == "worktree already missing"
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
+        let worktrees = crate::git::git(source, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(
+            !worktrees.contains("rm-stale-missing-force"),
+            "stale worktree metadata should be pruned: {}",
+            worktrees
+        );
+    }
+
+    #[test]
+    fn cmd_rm_dry_run_reports_checked_out_source_branch_after_missing_worktree_pruned() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-missing-checked-out", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-missing-checked-out");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        crate::git::git(source, &["worktree", "prune", "--expire", "now"]).unwrap();
+        crate::git::git(source, &["checkout", branch]).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Skipped { ref reason } if reason == "worktree already missing"
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("checked out")));
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_reports_stale_missing_worktree_metadata_for_uncreated_branch() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-stale-uncreated", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-stale-uncreated");
+        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        meta.repos[0].branch_created = false;
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(dry_run
+            .errors
+            .iter()
+            .any(|error| error.contains("still lists missing worktree metadata")));
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].branch_deleted,
+            RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
+        ));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("still lists missing worktree metadata")));
+        assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(!result.forest_dir_removed);
+    }
+
+    #[test]
+    fn cmd_rm_force_recovers_file_at_corrupt_worktree_path() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-corrupt-file-force", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-corrupt-file-force");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
+        let worktree = forest_dir.join("foo-api");
+        replace_worktree_with_plain_file(&worktree);
+
+        let dry_run = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+        assert!(
+            dry_run.errors.is_empty(),
+            "dry-run errors: {:?}",
+            dry_run.errors
+        );
+        assert!(matches!(
+            dry_run.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+
+        let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(matches!(
+            result.repos[0].branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Success
+        ));
+        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.forest_dir_removed);
+        assert!(!forest_dir.exists());
+        assert!(!crate::git::ref_exists(source, &branch_ref).unwrap());
+    }
+
+    #[test]
+    fn cmd_rm_reports_branch_lookup_failure_in_dirty_preflight_progress() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        env.create_repo_with_remote("foo-web");
+        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+
+        let inputs = make_new_inputs("rm-dirty-lookup", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-dirty-lookup");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+
+        let lookup_error_repo = forest_dir.join("foo-web");
+        std::fs::remove_dir_all(&lookup_error_repo).unwrap();
+        std::fs::create_dir_all(&lookup_error_repo).unwrap();
+
+        let progress_lines = std::cell::RefCell::new(Vec::new());
+        let result = cmd_rm(
+            &forest_dir,
+            &meta,
+            false,
+            false,
+            Some(&|progress| match progress {
+                RmProgress::RepoStarting { name } => {
+                    progress_lines
+                        .borrow_mut()
+                        .push(format!("{}: starting", name));
+                }
+                RmProgress::RepoDone(repo) => {
+                    progress_lines.borrow_mut().push(format!(
+                        "{}: {}",
+                        repo.name,
+                        format_repo_done(repo)
+                    ));
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(!result.errors.is_empty());
+        let lookup_error_result = result
+            .repos
+            .iter()
+            .find(|repo| repo.name.as_str() == "foo-web")
+            .unwrap();
+        assert!(matches!(
+            &lookup_error_result.branch_state.actual,
+            ActualBranchState::Unknown { .. }
+        ));
+
+        let progress_lines = progress_lines.borrow();
+        assert!(
+            progress_lines
+                .iter()
+                .any(|line| line.contains("foo-web") && line.contains("branch lookup failed")),
+            "progress lines should include foo-web branch lookup failure: {:?}",
+            *progress_lines
+        );
+    }
+
+    #[test]
     fn cmd_rm_returns_result() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
@@ -1412,11 +3797,13 @@ mod tests {
             repos: vec![
                 RepoRmResult {
                     name: RepoName::new("foo-api".to_string()).unwrap(),
+                    branch_state: WorktreeBranchState::missing_worktree("dliv/test-forest"),
                     worktree_removed: RmOutcome::Success,
                     branch_deleted: RmOutcome::Success,
                 },
                 RepoRmResult {
                     name: RepoName::new("foo-web".to_string()).unwrap(),
+                    branch_state: WorktreeBranchState::missing_worktree("dliv/test-forest"),
                     worktree_removed: RmOutcome::Success,
                     branch_deleted: RmOutcome::Skipped {
                         reason: "branch not created by forest".to_string(),
@@ -1445,6 +3832,7 @@ mod tests {
             force: false,
             repos: vec![RepoRmResult {
                 name: RepoName::new("foo-api".to_string()).unwrap(),
+                branch_state: WorktreeBranchState::missing_worktree("dliv/test-forest"),
                 worktree_removed: RmOutcome::Success,
                 branch_deleted: RmOutcome::Success,
             }],
@@ -1468,6 +3856,7 @@ mod tests {
             force: false,
             repos: vec![RepoRmResult {
                 name: RepoName::new("foo-api".to_string()).unwrap(),
+                branch_state: WorktreeBranchState::missing_worktree("dliv/test-forest"),
                 worktree_removed: RmOutcome::Failed {
                     error: "git worktree remove failed".to_string(),
                 },
@@ -1518,6 +3907,17 @@ mod tests {
         std::fs::write(dir.join(filename), content).unwrap();
         crate::git::git(dir, &["add", filename]).unwrap();
         crate::git::git(dir, &["commit", "-m", message]).unwrap();
+    }
+
+    fn replace_worktree_with_plain_dir(worktree: &std::path::Path) {
+        std::fs::remove_dir_all(worktree).unwrap();
+        std::fs::create_dir_all(worktree).unwrap();
+        std::fs::write(worktree.join("README.txt"), "not a git worktree").unwrap();
+    }
+
+    fn replace_worktree_with_plain_file(worktree: &std::path::Path) {
+        std::fs::remove_dir_all(worktree).unwrap();
+        std::fs::write(worktree, "not a directory").unwrap();
     }
 
     #[test]
@@ -1878,6 +4278,8 @@ mod tests {
         // Error message should hint about squash-merge and include original git error
         assert!(rm_result.errors[0].contains("squash-merge"));
         assert!(rm_result.errors[0].contains("not fully merged"));
+        let human = format_rm_human(&rm_result);
+        assert!(human.contains("git forest rm --force"));
     }
 
     #[test]
@@ -2150,12 +4552,114 @@ mod tests {
                 base_branch: "main".to_string(),
                 remote: Some("origin".to_string()),
                 branch_created: false,
+                branch_state: WorktreeBranchState::missing_worktree("main"),
+                detached_head_safety: DetachedHeadSafety::NotDetached,
                 worktree_exists: false,
                 source_exists: false,
                 has_dirty_files: false,
             }],
         };
         execute_rm(&plan, false, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not inside forest dir")]
+    fn execute_rm_panics_on_parent_dir_path_escape() {
+        let plan = RmPlan {
+            forest_name: ForestName::new("test".to_string()).unwrap(),
+            forest_dir: PathBuf::from("/tmp/forests/test"),
+            repo_plans: vec![RepoRmPlan {
+                name: RepoName::new("evil".to_string()).unwrap(),
+                worktree_path: PathBuf::from("/tmp/forests/test/../victim"),
+                source: AbsolutePath::new(PathBuf::from("/tmp/src")).unwrap(),
+                branch: "main".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: false,
+                branch_state: WorktreeBranchState::missing_worktree("main"),
+                detached_head_safety: DetachedHeadSafety::NotDetached,
+                worktree_exists: false,
+                source_exists: false,
+                has_dirty_files: false,
+            }],
+        };
+        execute_rm(&plan, false, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not inside forest dir")]
+    fn execute_rm_validates_path_escape_before_dirty_preflight() {
+        let plan = RmPlan {
+            forest_name: ForestName::new("test".to_string()).unwrap(),
+            forest_dir: PathBuf::from("/tmp/forests/test"),
+            repo_plans: vec![RepoRmPlan {
+                name: RepoName::new("evil".to_string()).unwrap(),
+                worktree_path: PathBuf::from("/tmp/forests/test/../victim"),
+                source: AbsolutePath::new(PathBuf::from("/tmp/src")).unwrap(),
+                branch: "main".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: false,
+                branch_state: WorktreeBranchState::missing_worktree("main"),
+                detached_head_safety: DetachedHeadSafety::NotDetached,
+                worktree_exists: true,
+                source_exists: false,
+                has_dirty_files: true,
+            }],
+        };
+        execute_rm(&plan, false, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not inside forest dir")]
+    fn dry_run_panics_on_parent_dir_path_escape() {
+        let plan = RmPlan {
+            forest_name: ForestName::new("test".to_string()).unwrap(),
+            forest_dir: PathBuf::from("/tmp/forests/test"),
+            repo_plans: vec![RepoRmPlan {
+                name: RepoName::new("evil".to_string()).unwrap(),
+                worktree_path: PathBuf::from("/tmp/forests/test/../victim"),
+                source: AbsolutePath::new(PathBuf::from("/tmp/src")).unwrap(),
+                branch: "main".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: false,
+                branch_state: WorktreeBranchState::missing_worktree("main"),
+                detached_head_safety: DetachedHeadSafety::NotDetached,
+                worktree_exists: true,
+                source_exists: false,
+                has_dirty_files: true,
+            }],
+        };
+        plan_to_dry_run_result(&plan, false);
+    }
+
+    #[test]
+    fn plan_rm_accepts_canonical_forest_dir_with_parent_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("base-parent");
+        let worktrees = tmp.path().join("worktrees");
+        let forest_dir = parent.join("../worktrees/forest");
+        let repo_dir = forest_dir.join("not-git");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let meta = make_meta(
+            "forest",
+            chrono::Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("not-git", "dliv/forest")],
+        );
+
+        let plan = plan_rm(&forest_dir, &meta);
+
+        assert_eq!(plan.repo_plans.len(), 1);
+        assert!(plan.repo_plans[0].worktree_exists);
+        assert!(plan.repo_plans[0]
+            .worktree_path
+            .canonicalize()
+            .unwrap()
+            .starts_with(worktrees.canonicalize().unwrap()));
     }
 
     // --- rm --all tests ---
@@ -2189,6 +4693,39 @@ mod tests {
         assert_eq!(ls.forests.len(), 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rm_all_deduplicates_symlinked_worktree_bases() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-all-symlink-base", ForestMode::Feature);
+        cmd_new(inputs, &tmpl).unwrap();
+        let base_link = tmpl
+            .worktree_base
+            .as_ref()
+            .parent()
+            .unwrap()
+            .join("worktrees-link");
+        std::os::unix::fs::symlink(tmpl.worktree_base.as_ref(), &base_link).unwrap();
+
+        let result = cmd_rm_all(
+            &[tmpl.worktree_base.as_ref(), base_link.as_path()],
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.total_forests, 1);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 0);
+        assert!(result.results.iter().all(|result| result.errors.is_empty()));
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref(), base_link.as_path()]).unwrap();
+        assert_eq!(ls.forests.len(), 0);
+    }
+
     #[test]
     fn rm_all_dry_run_preserves_forests() {
         let env = TestEnv::new();
@@ -2205,6 +4742,27 @@ mod tests {
         // Forest should still exist
         let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
         assert_eq!(ls.forests.len(), 1);
+    }
+
+    #[test]
+    fn rm_all_dry_run_summary_reports_failed_previews() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("dry-test-extra-file", ForestMode::Feature);
+        let new_result = cmd_new(inputs, &tmpl).unwrap();
+        std::fs::write(new_result.forest_dir.join("notes.txt"), "keep me").unwrap();
+
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], false, true, None).unwrap();
+        assert!(result.dry_run);
+        assert_eq!(result.total_forests, 1);
+        assert_eq!(result.succeeded, 0);
+        assert_eq!(result.failed, 1);
+
+        let human = format_rm_all_human(&result);
+        assert!(human.contains("Would not remove forest directory"));
+        assert!(human.contains("Would remove 0/1 forest(s)."));
     }
 
     #[test]

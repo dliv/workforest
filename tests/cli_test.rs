@@ -344,6 +344,25 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
     (tmp, fake_home, worktree_base)
 }
 
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} in {} failed: {}",
+        args,
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn new_feature_mode_creates_forest() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
@@ -506,6 +525,172 @@ fn ls_shows_new_forest() {
         .assert()
         .success()
         .stdout(predicates::str::contains("visible-forest"));
+
+    drop(tmp);
+}
+
+#[test]
+fn json_outputs_report_branch_metadata_drift() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    bin_cmd()
+        .args(["new", "json-drift", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    let source_repo = tmp.path().join("src").join("foo-api");
+    let forest_dir = worktree_base.join("json-drift");
+    let worktree = forest_dir.join("foo-api");
+    run_git(&source_repo, &["checkout", "-b", "source-other"]);
+    run_git(&worktree, &["checkout", "main"]);
+
+    let status_output = bin_cmd()
+        .args(["--json", "status", "json-drift"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        status_output.status.success(),
+        "status stderr: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["expected_branch"],
+        "testuser/json-drift"
+    );
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["actual_type"],
+        "branch"
+    );
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["actual_branch"],
+        "main"
+    );
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["branch_drift"],
+        true
+    );
+
+    let ls_output = bin_cmd()
+        .args(["--json", "ls"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        ls_output.status.success(),
+        "ls stderr: {}",
+        String::from_utf8_lossy(&ls_output.stderr)
+    );
+    let ls_json: serde_json::Value = serde_json::from_slice(&ls_output.stdout).unwrap();
+    assert_eq!(ls_json["forests"][0]["branch_drift_count"], 1);
+    assert_eq!(
+        ls_json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_type"],
+        "branch"
+    );
+    assert_eq!(
+        ls_json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_branch"],
+        "main"
+    );
+    assert_eq!(ls_json["forests"][0]["branch_lookup_error_count"], 0);
+
+    let rm_output = bin_cmd()
+        .args(["--json", "rm", "json-drift", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        rm_output.status.success(),
+        "rm stderr: {}",
+        String::from_utf8_lossy(&rm_output.stderr)
+    );
+    let rm_json: serde_json::Value = serde_json::from_slice(&rm_output.stdout).unwrap();
+    assert_eq!(
+        rm_json["repos"][0]["branch_state"]["expected_branch"],
+        "testuser/json-drift"
+    );
+    assert_eq!(rm_json["repos"][0]["branch_state"]["actual_type"], "branch");
+    assert_eq!(rm_json["repos"][0]["branch_state"]["actual_branch"], "main");
+    assert_eq!(rm_json["repos"][0]["branch_state"]["branch_drift"], true);
+    assert!(worktree.exists());
+
+    drop(tmp);
+}
+
+#[test]
+fn json_rm_reports_detached_head_safety_outcomes() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    bin_cmd()
+        .args(["new", "json-detached", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    let forest_dir = worktree_base.join("json-detached");
+    let worktree = forest_dir.join("foo-api");
+    run_git(&worktree, &["checkout", "--detach", "HEAD"]);
+    std::fs::write(worktree.join("detached.txt"), "unique detached work").unwrap();
+    run_git(&worktree, &["add", "detached.txt"]);
+    run_git(&worktree, &["commit", "-m", "detached commit"]);
+
+    let status_output = bin_cmd()
+        .args(["--json", "status", "json-detached"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        status_output.status.success(),
+        "status stderr: {}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["actual_type"],
+        "detached"
+    );
+    assert_eq!(
+        status_json["repos"][0]["branch_state"]["branch_drift"],
+        true
+    );
+
+    let rm_output = bin_cmd()
+        .args(["--json", "rm", "json-detached", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        !rm_output.status.success(),
+        "rm should fail safely for unique detached HEAD"
+    );
+    let rm_json: serde_json::Value = serde_json::from_slice(&rm_output.stdout).unwrap();
+    assert_eq!(
+        rm_json["repos"][0]["branch_state"]["actual_type"],
+        "detached"
+    );
+    assert_eq!(rm_json["repos"][0]["worktree_removed"]["status"], "failed");
+    assert!(rm_json["repos"][0]["worktree_removed"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("detached HEAD"));
+    assert_eq!(rm_json["repos"][0]["branch_deleted"]["status"], "skipped");
+    assert_eq!(
+        rm_json["repos"][0]["branch_deleted"]["reason"],
+        "worktree not removed"
+    );
+    assert!(rm_json["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("not reachable"));
+    assert!(worktree.exists());
 
     drop(tmp);
 }

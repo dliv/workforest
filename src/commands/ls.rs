@@ -4,9 +4,10 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::forest::discover_forests;
-use crate::meta::{ForestMeta, ForestMode};
-use crate::paths::ForestName;
+use super::branch_state::{ActualBranchState, WorktreeBranchState};
+use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
+use crate::meta::{ForestMeta, ForestMode, RepoMeta};
+use crate::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct LsResult {
@@ -20,6 +21,12 @@ pub struct ForestSummary {
     pub age_display: String,
     pub mode: ForestMode,
     pub branch_summary: Vec<BranchCount>,
+    pub missing_worktree_count: usize,
+    pub missing_worktrees: Vec<RepoMissingWorktree>,
+    pub branch_drift_count: usize,
+    pub branch_drifts: Vec<RepoBranchDrift>,
+    pub branch_lookup_error_count: usize,
+    pub branch_lookup_errors: Vec<RepoBranchLookupError>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,30 +35,65 @@ pub struct BranchCount {
     pub count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RepoBranchDrift {
+    pub name: RepoName,
+    pub branch_state: WorktreeBranchState,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoMissingWorktree {
+    pub name: RepoName,
+    pub branch_state: WorktreeBranchState,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoBranchLookupError {
+    pub name: RepoName,
+    pub branch_state: WorktreeBranchState,
+}
+
 pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
     let mut forests = Vec::new();
     for base in worktree_bases {
-        forests.extend(discover_forests(base)?);
+        forests.extend(discover_forests_with_dirs(base)?);
     }
-    forests.sort_by_key(|forest| std::cmp::Reverse(forest.created_at));
+    let mut forests = dedupe_discovered_forests(forests);
+    forests.sort_by_key(|forest| std::cmp::Reverse(forest.meta.created_at));
 
-    let summaries = forests.iter().map(summarize_forest).collect();
+    let summaries = forests
+        .iter()
+        .map(|forest| summarize_forest(&forest.dir, &forest.meta))
+        .collect();
     Ok(LsResult { forests: summaries })
 }
 
-fn summarize_forest(forest: &ForestMeta) -> ForestSummary {
+fn summarize_forest(forest_dir: &Path, forest: &ForestMeta) -> ForestSummary {
     let age_seconds = (Utc::now() - forest.created_at).num_seconds();
     let branch_summary = branch_counts(&forest.repos);
+    let branch_states = branch_states(forest_dir, &forest.repos);
+    let missing_worktrees = missing_worktrees(&branch_states);
+    let missing_worktree_count = missing_worktrees.len();
+    let branch_drifts = branch_drifts(&branch_states);
+    let branch_drift_count = branch_drifts.len();
+    let branch_lookup_errors = branch_lookup_errors(&branch_states);
+    let branch_lookup_error_count = branch_lookup_errors.len();
     ForestSummary {
         name: forest.name.clone(),
         age_seconds,
         age_display: format_age(age_seconds),
         mode: forest.mode.clone(),
         branch_summary,
+        missing_worktree_count,
+        missing_worktrees,
+        branch_drift_count,
+        branch_drifts,
+        branch_lookup_error_count,
+        branch_lookup_errors,
     }
 }
 
-fn branch_counts(repos: &[crate::meta::RepoMeta]) -> Vec<BranchCount> {
+fn branch_counts(repos: &[RepoMeta]) -> Vec<BranchCount> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for repo in repos {
         *counts.entry(repo.branch.as_str()).or_default() += 1;
@@ -61,6 +103,59 @@ fn branch_counts(repos: &[crate::meta::RepoMeta]) -> Vec<BranchCount> {
         .map(|(branch, count)| BranchCount {
             branch: branch.to_string(),
             count,
+        })
+        .collect()
+}
+
+fn branch_states(forest_dir: &Path, repos: &[RepoMeta]) -> Vec<(RepoName, WorktreeBranchState)> {
+    repos
+        .iter()
+        .map(|repo| {
+            let worktree = forest_dir.join(repo.name.as_str());
+            let branch_state = WorktreeBranchState::read(&worktree, &repo.branch);
+            (repo.name.clone(), branch_state)
+        })
+        .collect()
+}
+
+fn missing_worktrees(
+    branch_states: &[(RepoName, WorktreeBranchState)],
+) -> Vec<RepoMissingWorktree> {
+    branch_states
+        .iter()
+        .filter(|(_name, branch_state)| {
+            matches!(&branch_state.actual, ActualBranchState::MissingWorktree)
+        })
+        .map(|(name, branch_state)| RepoMissingWorktree {
+            name: name.clone(),
+            branch_state: branch_state.clone(),
+        })
+        .collect()
+}
+
+fn branch_drifts(branch_states: &[(RepoName, WorktreeBranchState)]) -> Vec<RepoBranchDrift> {
+    branch_states
+        .iter()
+        .filter(|(_name, branch_state)| branch_state.branch_drift)
+        .map(|(name, branch_state)| RepoBranchDrift {
+            name: name.clone(),
+            branch_state: branch_state.clone(),
+        })
+        .collect()
+}
+
+fn branch_lookup_errors(
+    branch_states: &[(RepoName, WorktreeBranchState)],
+) -> Vec<RepoBranchLookupError> {
+    branch_states
+        .iter()
+        .filter_map(|(name, branch_state)| {
+            branch_state
+                .lookup_error_message()
+                .map(|_| RepoBranchLookupError {
+                    name: name.clone(),
+                    branch_state: branch_state.clone(),
+                })
         })
         .collect()
 }
@@ -93,6 +188,42 @@ fn format_branches(branch_summary: &[BranchCount]) -> String {
         .join(", ")
 }
 
+fn format_branch_drift_summary(branch_drifts: &[RepoBranchDrift]) -> String {
+    match branch_drifts {
+        [] => String::new(),
+        [drift] => drift
+            .branch_state
+            .drift_message()
+            .map(|message| format!(" [{}: {}]", drift.name, message))
+            .unwrap_or_else(|| " [branch drift: 1 repo]".to_string()),
+        drifts => format!(" [branch drift: {} repos]", drifts.len()),
+    }
+}
+
+fn format_missing_worktree_summary(missing_worktrees: &[RepoMissingWorktree]) -> String {
+    match missing_worktrees {
+        [] => String::new(),
+        [missing] => format!(" [{}: missing worktree]", missing.name),
+        missing => format!(" [missing worktree: {} repos]", missing.len()),
+    }
+}
+
+fn format_branch_lookup_error_summary(branch_lookup_errors: &[RepoBranchLookupError]) -> String {
+    match branch_lookup_errors {
+        [] => String::new(),
+        [error] => error
+            .branch_state
+            .lookup_error_message()
+            .map(|message| format!(" [{}: {}]", error.name, first_line(&message)))
+            .unwrap_or_else(|| " [branch lookup failed: 1 repo]".to_string()),
+        errors => format!(" [branch lookup failed: {} repos]", errors.len()),
+    }
+}
+
+fn first_line(message: &str) -> &str {
+    message.lines().next().unwrap_or(message)
+}
+
 pub fn format_ls_human(result: &LsResult) -> String {
     if result.forests.is_empty() {
         return "No forests found. Create one with `git forest new <name>`.".to_string();
@@ -113,7 +244,12 @@ pub fn format_ls_human(result: &LsResult) -> String {
     ));
 
     for forest in &result.forests {
-        let branches = format_branches(&forest.branch_summary);
+        let mut branches = format_branches(&forest.branch_summary);
+        branches.push_str(&format_missing_worktree_summary(&forest.missing_worktrees));
+        branches.push_str(&format_branch_drift_summary(&forest.branch_drifts));
+        branches.push_str(&format_branch_lookup_error_summary(
+            &forest.branch_lookup_errors,
+        ));
         lines.push(format!(
             "{:<name_width$}  {:<10}  {:<8}  {}",
             forest.name, forest.age_display, forest.mode, branches
@@ -125,10 +261,30 @@ pub fn format_ls_human(result: &LsResult) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::branch_state::ActualBranchState;
     use super::*;
+    use crate::commands::{cmd_new, NewInputs};
+    use crate::meta::META_FILENAME;
     use crate::paths::ForestName;
-    use crate::testutil::{make_meta, make_repo};
+    use crate::testutil::{make_meta, make_repo, TestEnv};
     use chrono::TimeZone;
+
+    fn make_new_inputs(name: &str) -> NewInputs {
+        NewInputs {
+            name: name.to_string(),
+            mode: ForestMode::Feature,
+            branch_override: None,
+            repo_branches: vec![],
+            no_fetch: true,
+            dry_run: false,
+        }
+    }
+
+    fn switch_forest_worktree_to_main(forest_dir: &Path, meta: &ForestMeta) {
+        let source = &meta.repos[0].source;
+        crate::git::git(source, &["checkout", "-b", "source-other"]).unwrap();
+        crate::git::git(&forest_dir.join("foo-api"), &["checkout", "main"]).unwrap();
+    }
 
     // --- format_age tests ---
 
@@ -303,6 +459,29 @@ mod tests {
         assert!(names.contains(&"forest-beta"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cmd_ls_deduplicates_symlinked_worktree_bases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let base_link = tmp.path().join("base-link");
+        let meta = make_meta(
+            "dup",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/dup")],
+        );
+        let dir = base.join("dup");
+        std::fs::create_dir_all(&dir).unwrap();
+        meta.write(&dir.join(".forest-meta.toml")).unwrap();
+        std::os::unix::fs::symlink(&base, &base_link).unwrap();
+
+        let result = cmd_ls(&[base.as_path(), base_link.as_path()]).unwrap();
+
+        assert_eq!(result.forests.len(), 1);
+        assert_eq!(result.forests[0].name.as_str(), "dup");
+    }
+
     #[test]
     fn cmd_ls_nested_bases_no_cross_contamination() {
         let tmp = tempfile::tempdir().unwrap();
@@ -344,6 +523,246 @@ mod tests {
     }
 
     #[test]
+    fn cmd_ls_reports_branch_metadata_drift() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(make_new_inputs("ls-drift"), &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("ls-drift");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        switch_forest_worktree_to_main(&forest_dir, &meta);
+
+        let result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(result.forests.len(), 1);
+
+        let forest = &result.forests[0];
+        assert_eq!(forest.branch_drift_count, 1);
+        assert_eq!(forest.branch_drifts[0].name.as_str(), "foo-api");
+        assert_eq!(
+            forest.branch_drifts[0].branch_state.expected_branch,
+            "testuser/ls-drift"
+        );
+        assert!(forest.branch_drifts[0].branch_state.branch_drift);
+        assert!(matches!(
+            &forest.branch_drifts[0].branch_state.actual,
+            ActualBranchState::Branch { actual_branch } if actual_branch == "main"
+        ));
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["forests"][0]["branch_drift_count"], 1);
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["expected_branch"],
+            "testuser/ls-drift"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_type"],
+            "branch"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_branch"],
+            "main"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["branch_drift"],
+            true
+        );
+
+        let human = format_ls_human(&result);
+        assert!(human.contains("branch drift"));
+        assert!(human.contains("foo-api"));
+        assert!(human.contains("expected testuser/ls-drift"));
+        assert!(human.contains("actual main"));
+    }
+
+    #[test]
+    fn cmd_ls_reports_detached_head_drift() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(make_new_inputs("ls-detached"), &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("ls-detached");
+        let worktree = forest_dir.join("foo-api");
+        let head = crate::git::git(&worktree, &["rev-parse", "HEAD"]).unwrap();
+        crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
+
+        let result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        assert_eq!(result.forests[0].branch_drift_count, 1);
+        assert!(matches!(
+            &result.forests[0].branch_drifts[0].branch_state.actual,
+            ActualBranchState::Detached {
+                actual_detached_head
+            } if actual_detached_head == &head
+        ));
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_type"],
+            "detached"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_drifts"][0]["branch_state"]["actual_detached_head"],
+            head
+        );
+    }
+
+    #[test]
+    fn cmd_ls_reports_branch_lookup_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let forest_dir = base.join("lookup-error");
+        let repo_dir = forest_dir.join("not-git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let meta = make_meta(
+            "lookup-error",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("not-git", "dliv/lookup-error")],
+        );
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_ls(&[base]).unwrap();
+        let forest = &result.forests[0];
+        assert_eq!(forest.missing_worktree_count, 0);
+        assert_eq!(forest.missing_worktrees.len(), 0);
+        assert_eq!(forest.branch_drift_count, 0);
+        assert_eq!(forest.branch_drifts.len(), 0);
+        assert_eq!(forest.branch_lookup_error_count, 1);
+        assert_eq!(forest.branch_lookup_errors[0].name.as_str(), "not-git");
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["forests"][0]["missing_worktree_count"], 0);
+        assert_eq!(json["forests"][0]["branch_drift_count"], 0);
+        assert_eq!(json["forests"][0]["branch_lookup_error_count"], 1);
+        assert_eq!(
+            json["forests"][0]["branch_lookup_errors"][0]["branch_state"]["actual_type"],
+            "unknown"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_lookup_errors"][0]["branch_state"]["branch_drift"],
+            false
+        );
+
+        let human = format_ls_human(&result);
+        assert!(human.contains("branch lookup failed"));
+        assert!(human.contains("not-git"));
+        assert_eq!(
+            human.lines().count(),
+            2,
+            "single lookup error should stay on one table row:\n{}",
+            human
+        );
+        assert!(human.contains("stderr: fatal:"));
+        assert!(
+            !human.lines().any(|line| line.starts_with("stderr:")),
+            "stderr cause should stay inline with the table row:\n{}",
+            human
+        );
+    }
+
+    #[test]
+    fn cmd_ls_treats_plain_dir_inside_parent_repo_as_lookup_error() {
+        let env = TestEnv::new();
+        let parent = env.create_repo("parent");
+        let forest_dir = parent.join("lookup-parent");
+        let repo_dir = forest_dir.join("not-git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("README.txt"), "not a git worktree").unwrap();
+
+        let meta = make_meta(
+            "lookup-parent",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("not-git", "dliv/lookup-parent")],
+        );
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_ls(&[parent.as_ref()]).unwrap();
+        let forest = &result.forests[0];
+        assert_eq!(forest.missing_worktree_count, 0);
+        assert_eq!(forest.branch_drift_count, 0);
+        assert_eq!(forest.branch_lookup_error_count, 1);
+        assert_eq!(forest.branch_lookup_errors[0].name.as_str(), "not-git");
+        assert!(matches!(
+            &forest.branch_lookup_errors[0].branch_state.actual,
+            ActualBranchState::Unknown {
+                branch_lookup_error
+            } if branch_lookup_error.contains("not a git worktree root")
+        ));
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["forests"][0]["branch_lookup_errors"][0]["branch_state"]["actual_type"],
+            "unknown"
+        );
+        assert_eq!(
+            json["forests"][0]["branch_lookup_errors"][0]["branch_state"]["branch_drift"],
+            false
+        );
+        assert!(
+            json["forests"][0]["branch_lookup_errors"][0]["branch_state"]["branch_lookup_error"]
+                .as_str()
+                .unwrap()
+                .contains("not a git worktree root")
+        );
+
+        let human = format_ls_human(&result);
+        assert!(human.contains("branch lookup failed"));
+        assert!(human.contains("not a git worktree root"));
+        assert!(!human.contains("main ("));
+    }
+
+    #[test]
+    fn cmd_ls_reports_missing_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let forest_dir = base.join("missing-worktree");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+
+        let meta = make_meta(
+            "missing-worktree",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("missing-repo", "dliv/missing-worktree")],
+        );
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_ls(&[base]).unwrap();
+        let forest = &result.forests[0];
+        assert_eq!(forest.missing_worktree_count, 1);
+        assert_eq!(forest.missing_worktrees[0].name.as_str(), "missing-repo");
+        assert_eq!(
+            forest.missing_worktrees[0].branch_state.expected_branch,
+            "dliv/missing-worktree"
+        );
+        assert!(!forest.missing_worktrees[0].branch_state.branch_drift);
+        assert!(matches!(
+            &forest.missing_worktrees[0].branch_state.actual,
+            ActualBranchState::MissingWorktree
+        ));
+        assert_eq!(forest.branch_drift_count, 0);
+        assert_eq!(forest.branch_lookup_error_count, 0);
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["forests"][0]["missing_worktree_count"], 1);
+        assert_eq!(
+            json["forests"][0]["missing_worktrees"][0]["branch_state"]["actual_type"],
+            "missing_worktree"
+        );
+        assert_eq!(
+            json["forests"][0]["missing_worktrees"][0]["branch_state"]["branch_drift"],
+            false
+        );
+
+        let human = format_ls_human(&result);
+        assert!(human.contains("missing-repo"));
+        assert!(human.contains("missing worktree"));
+    }
+
+    #[test]
     fn format_ls_human_empty() {
         let result = LsResult { forests: vec![] };
         let text = format_ls_human(&result);
@@ -363,6 +782,12 @@ mod tests {
                         branch: "dliv/a".to_string(),
                         count: 2,
                     }],
+                    missing_worktree_count: 0,
+                    missing_worktrees: vec![],
+                    branch_drift_count: 0,
+                    branch_drifts: vec![],
+                    branch_lookup_error_count: 0,
+                    branch_lookup_errors: vec![],
                 },
                 ForestSummary {
                     name: ForestName::new("review-bar-very-long-name".to_string()).unwrap(),
@@ -379,6 +804,12 @@ mod tests {
                             count: 1,
                         },
                     ],
+                    missing_worktree_count: 0,
+                    missing_worktrees: vec![],
+                    branch_drift_count: 0,
+                    branch_drifts: vec![],
+                    branch_lookup_error_count: 0,
+                    branch_lookup_errors: vec![],
                 },
                 ForestSummary {
                     name: ForestName::new("mid-length".to_string()).unwrap(),
@@ -389,6 +820,12 @@ mod tests {
                         branch: "dliv/mid".to_string(),
                         count: 3,
                     }],
+                    missing_worktree_count: 0,
+                    missing_worktrees: vec![],
+                    branch_drift_count: 0,
+                    branch_drifts: vec![],
+                    branch_lookup_error_count: 0,
+                    branch_lookup_errors: vec![],
                 },
             ],
         };
@@ -407,6 +844,12 @@ mod tests {
                     branch: "dliv/my-feature".to_string(),
                     count: 2,
                 }],
+                missing_worktree_count: 0,
+                missing_worktrees: vec![],
+                branch_drift_count: 0,
+                branch_drifts: vec![],
+                branch_lookup_error_count: 0,
+                branch_lookup_errors: vec![],
             }],
         };
         let text = format_ls_human(&result);
