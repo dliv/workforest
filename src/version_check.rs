@@ -347,6 +347,6 @@ last_checked = "2026-01-01T00:00:00Z"
     #[ignore]
     fn export_bindings() {
         use ts_rs::TS;
-        VersionResponse::export_all().unwrap();
+        VersionResponse::export_all(&ts_rs::Config::from_env()).unwrap();
     }
 }
