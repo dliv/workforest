@@ -1300,8 +1300,85 @@ fn debug_version_check_shows_debug_output() {
     );
 }
 
+fn fake_brew_path(fake_bin: &std::path::Path) -> std::ffi::OsString {
+    let mut paths = vec![fake_bin.to_path_buf()];
+    if let Some(existing_path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing_path));
+    }
+    std::env::join_paths(paths).unwrap()
+}
+
+fn write_fake_brew(fake_bin: &std::path::Path) {
+    std::fs::create_dir_all(fake_bin).unwrap();
+    let brew_path = fake_bin.join("brew");
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$GIT_FOREST_FAKE_BREW_LOG"
+
+case "$*" in
+    "--prefix {app_name}") exit "${{GIT_FOREST_FAKE_BREW_PREFIX_STATUS:-0}}" ;;
+    "update --quiet") exit 0 ;;
+    "upgrade {app_name}") exit 0 ;;
+    *) echo "unexpected brew args: $*" >&2; exit 42 ;;
+esac
+"#,
+        app_name = bin_name()
+    );
+    std::fs::write(&brew_path, script).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&brew_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&brew_path, permissions).unwrap();
+    }
+}
+
 #[test]
-fn update_command_does_not_crash() {
-    // Should print either brew output or download link
-    bin_cmd().arg("update").assert().success();
+fn update_command_uses_homebrew_when_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_bin = tmp.path().join("bin");
+    let brew_log = tmp.path().join("brew.log");
+    write_fake_brew(&fake_bin);
+
+    bin_cmd()
+        .arg("update")
+        .env("PATH", fake_brew_path(&fake_bin))
+        .env("GIT_FOREST_FAKE_BREW_LOG", &brew_log)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Updating via Homebrew..."));
+
+    assert_eq!(
+        std::fs::read_to_string(brew_log).unwrap(),
+        format!(
+            "--prefix {app_name}\nupdate --quiet\nupgrade {app_name}\n",
+            app_name = bin_name()
+        )
+    );
+}
+
+#[test]
+fn update_command_prints_download_link_when_homebrew_package_is_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_bin = tmp.path().join("bin");
+    let brew_log = tmp.path().join("brew.log");
+    write_fake_brew(&fake_bin);
+
+    bin_cmd()
+        .arg("update")
+        .env("PATH", fake_brew_path(&fake_bin))
+        .env("GIT_FOREST_FAKE_BREW_LOG", &brew_log)
+        .env("GIT_FOREST_FAKE_BREW_PREFIX_STATUS", "1")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Download the latest release:"));
+
+    assert_eq!(
+        std::fs::read_to_string(brew_log).unwrap(),
+        format!("--prefix {}\n", bin_name())
+    );
 }
