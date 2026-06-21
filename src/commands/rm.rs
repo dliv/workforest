@@ -20,6 +20,7 @@ pub struct RepoRmPlan {
     pub source: AbsolutePath,
     pub branch: String,
     pub base_branch: String,
+    pub remote: Option<String>,
     pub branch_created: bool,
     pub worktree_exists: bool,
     pub source_exists: bool,
@@ -91,6 +92,7 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
                 source: repo.source.clone(),
                 branch: repo.branch.clone(),
                 base_branch: repo.base_branch.clone(),
+                remote: repo.remote.clone(),
                 branch_created: repo.branch_created,
                 worktree_exists,
                 source_exists: repo.source.is_dir(),
@@ -330,8 +332,12 @@ fn delete_branch(
             }
             // -d failed — check if the branch was merged via a different mechanism
             // (e.g. fully merged but HEAD isn't on base, or fully pushed to upstream)
-            if can_safely_force_delete(&repo_plan.source, &repo_plan.branch, &repo_plan.base_branch)
-            {
+            if can_safely_force_delete(
+                &repo_plan.source,
+                &repo_plan.branch,
+                &repo_plan.base_branch,
+                repo_plan.remote.as_deref(),
+            ) {
                 match crate::git::git(&repo_plan.source, &["branch", "-D", &repo_plan.branch]) {
                     Ok(_) => RmOutcome::Success,
                     Err(e) => {
@@ -356,30 +362,39 @@ fn delete_branch(
 
 /// Check whether a branch can be safely force-deleted after `git branch -d` fails.
 ///
-/// Two checks, tried in order:
+/// Three checks, tried in order:
 /// 1. `git merge-base --is-ancestor <branch> <base_branch>` — the branch is fully
 ///    merged into the base branch (catches cases where `-d` failed due to HEAD position).
-/// 2. The branch has an upstream and all local commits are pushed to it
+/// 2. `git merge-base --is-ancestor <branch> <remote>/<base_branch>` — the branch
+///    is fully merged into the recorded base remote, even if local base is stale.
+/// 3. The branch has an upstream and all local commits are pushed to it
 ///    (`git rev-list --count <upstream>..<branch>` == 0). This proves no local-only
 ///    commits exist, making deletion safe even when the remote branch was squash-merged
 ///    and then deleted.
-fn can_safely_force_delete(source: &AbsolutePath, branch: &str, base_branch: &str) -> bool {
+fn can_safely_force_delete(
+    source: &AbsolutePath,
+    branch: &str,
+    base_branch: &str,
+    remote: Option<&str>,
+) -> bool {
     // Fallback 1: branch is ancestor of base_branch (fully merged)
-    if crate::git::git(
-        source,
-        &["merge-base", "--is-ancestor", branch, base_branch],
-    )
-    .is_ok()
-    {
+    if is_ancestor_of_ref(source, branch, base_branch) {
         return true;
     }
 
-    // Fallback 2: branch has upstream tracking and no unpushed commits
+    // Fallback 2: branch is ancestor of the base branch's remote-tracking ref.
+    if let Some(base_upstream) = base_branch_remote_ref(source, base_branch, remote) {
+        if is_ancestor_of_ref(source, branch, &base_upstream) {
+            return true;
+        }
+    }
+
+    // Fallback 3: branch has upstream tracking and no unpushed commits
     if let Ok(upstream) = crate::git::git(
         source,
         &[
             "for-each-ref",
-            "--format=%(upstream:short)",
+            "--format=%(upstream)",
             &format!("refs/heads/{}", branch),
         ],
     ) {
@@ -394,6 +409,54 @@ fn can_safely_force_delete(source: &AbsolutePath, branch: &str, base_branch: &st
     }
 
     false
+}
+
+fn is_ancestor_of_ref(source: &AbsolutePath, branch: &str, refname: &str) -> bool {
+    crate::git::git(source, &["merge-base", "--is-ancestor", branch, refname]).is_ok()
+}
+
+fn base_branch_remote_ref(
+    source: &AbsolutePath,
+    base_branch: &str,
+    remote: Option<&str>,
+) -> Option<String> {
+    if let Some(remote) = remote {
+        let remote_base_ref = format!("refs/remotes/{}/{}", remote, base_branch);
+        if matches!(crate::git::ref_exists(source, &remote_base_ref), Ok(true)) {
+            return Some(remote_base_ref);
+        }
+        return None;
+    }
+
+    let local_base_ref = format!("refs/heads/{}", base_branch);
+    if let Ok(upstream) = crate::git::git(
+        source,
+        &["for-each-ref", "--format=%(upstream)", &local_base_ref],
+    ) {
+        if !upstream.is_empty() {
+            return Some(upstream);
+        }
+    }
+
+    if let Ok(refs) = crate::git::git(
+        source,
+        &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+    ) {
+        let refs: Vec<&str> = refs
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("refs/remotes/")
+                    .and_then(|remote_branch| remote_branch.split_once('/'))
+                    .map(|(_remote, branch)| branch == base_branch)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if refs.len() == 1 {
+            return Some(refs[0].to_string());
+        }
+    }
+
+    None
 }
 
 fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec<String>) -> bool {
@@ -1400,6 +1463,250 @@ mod tests {
     }
 
     #[test]
+    fn rm_stale_local_base_succeeds_via_remote_tracking_base_check() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-stale-base", ForestMode::Review);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-stale-base");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        // Add a commit on the forest-created branch.
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &wt_dir,
+            "review.txt",
+            "review work",
+            "feat: add review work",
+        );
+
+        // Advance origin/main to include the forest branch, but leave local main stale.
+        let push_ref = format!("refs/heads/{}:refs/heads/main", branch);
+        crate::git::git(&wt_dir, &["push", "origin", &push_ref]).unwrap();
+        crate::git::git(source, &["fetch", "origin", "main"]).unwrap();
+
+        assert!(
+            crate::git::git(source, &["merge-base", "--is-ancestor", branch, "main"]).is_err(),
+            "local main should remain stale"
+        );
+        assert!(
+            crate::git::git(
+                source,
+                &["merge-base", "--is-ancestor", branch, "origin/main"]
+            )
+            .is_ok(),
+            "origin/main should contain the forest branch"
+        );
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success via remote-tracking base check, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(!crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+        assert!(rm_result.errors.is_empty());
+        assert!(rm_result.forest_dir_removed);
+    }
+
+    #[test]
+    fn rm_stale_local_base_succeeds_via_recorded_non_origin_remote() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let source = env.repo_path("foo-api");
+        crate::git::git(&source, &["remote", "rename", "origin", "upstream"]).unwrap();
+        crate::git::git(&source, &["fetch", "upstream", "main"]).unwrap();
+
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.repos[0].remote = "upstream".to_string();
+
+        let inputs = make_new_inputs("rm-upstream-base", ForestMode::Review);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-upstream-base");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let branch = &meta.repos[0].branch;
+
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &wt_dir,
+            "review.txt",
+            "review work",
+            "feat: add review work",
+        );
+
+        let push_ref = format!("refs/heads/{}:refs/heads/main", branch);
+        crate::git::git(&wt_dir, &["push", "upstream", &push_ref]).unwrap();
+        crate::git::git(&source, &["fetch", "upstream", "main"]).unwrap();
+
+        assert!(
+            crate::git::git(&source, &["merge-base", "--is-ancestor", branch, "main"]).is_err(),
+            "local main should remain stale"
+        );
+        assert!(
+            crate::git::git(
+                &source,
+                &["merge-base", "--is-ancestor", branch, "upstream/main"]
+            )
+            .is_ok(),
+            "upstream/main should contain the forest branch"
+        );
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success via recorded non-origin remote, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(!crate::git::ref_exists(&source, &format!("refs/heads/{}", branch)).unwrap());
+        assert!(rm_result.errors.is_empty());
+    }
+
+    #[test]
+    fn rm_does_not_use_unrecorded_origin_when_base_remote_differs() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let source = env.repo_path("foo-api");
+        crate::git::git(&source, &["remote", "rename", "origin", "upstream"]).unwrap();
+        crate::git::git(&source, &["fetch", "upstream", "main"]).unwrap();
+
+        let origin_dir = tempfile::tempdir().unwrap();
+        let origin_path = origin_dir.path().join("origin.git");
+        std::fs::create_dir_all(&origin_path).unwrap();
+        crate::git::git(&origin_path, &["init", "--bare", "-b", "main"]).unwrap();
+        crate::git::git(
+            &source,
+            &["remote", "add", "origin", origin_path.to_str().unwrap()],
+        )
+        .unwrap();
+
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.repos[0].remote = "upstream".to_string();
+
+        let inputs = make_new_inputs("rm-wrong-origin", ForestMode::Review);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-wrong-origin");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let branch = &meta.repos[0].branch;
+
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &wt_dir,
+            "review.txt",
+            "review work",
+            "feat: add review work",
+        );
+
+        let push_ref = format!("refs/heads/{}:refs/heads/main", branch);
+        crate::git::git(&wt_dir, &["push", "origin", &push_ref]).unwrap();
+        crate::git::git(&source, &["fetch", "origin", "main"]).unwrap();
+
+        assert!(
+            crate::git::git(
+                &source,
+                &["merge-base", "--is-ancestor", branch, "origin/main"]
+            )
+            .is_ok(),
+            "origin/main should contain the forest branch"
+        );
+        assert!(
+            crate::git::git(
+                &source,
+                &["merge-base", "--is-ancestor", branch, "upstream/main"]
+            )
+            .is_err(),
+            "recorded upstream/main should not contain the forest branch"
+        );
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected Failed because recorded base remote lacks the branch, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(crate::git::ref_exists(&source, &format!("refs/heads/{}", branch)).unwrap());
+    }
+
+    #[test]
+    fn rm_remote_base_check_ignores_ambiguous_local_branch_name() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        let inputs = make_new_inputs("rm-ambiguous-origin", ForestMode::Review);
+        cmd_new(inputs, &tmpl).unwrap();
+
+        let forest_dir = tmpl.worktree_base.join("rm-ambiguous-origin");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let source = &meta.repos[0].source;
+        let branch = &meta.repos[0].branch;
+
+        let wt_dir = forest_dir.join("foo-api");
+        crate::git::git(&wt_dir, &["config", "user.name", "Test"]).unwrap();
+        crate::git::git(&wt_dir, &["config", "user.email", "test@test.com"]).unwrap();
+        commit_file(
+            &wt_dir,
+            "review.txt",
+            "review work",
+            "feat: add review work",
+        );
+
+        crate::git::git(source, &["branch", "origin/main", branch]).unwrap();
+
+        assert!(crate::git::ref_exists(source, "refs/heads/origin/main").unwrap());
+        assert!(
+            crate::git::git(
+                source,
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    branch,
+                    "refs/heads/origin/main"
+                ]
+            )
+            .is_ok(),
+            "local origin/main should contain the forest branch"
+        );
+        assert!(
+            crate::git::git(
+                source,
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    branch,
+                    "refs/remotes/origin/main"
+                ]
+            )
+            .is_err(),
+            "remote-tracking origin/main should not contain the forest branch"
+        );
+
+        let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(
+            matches!(rm_result.repos[0].branch_deleted, RmOutcome::Failed { .. }),
+            "expected Failed because only the ambiguous local branch contains the work, got: {:?}",
+            rm_result.repos[0].branch_deleted
+        );
+        assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
+    }
+
+    #[test]
     fn rm_unpushed_commits_fails_without_force() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
@@ -1701,6 +2008,7 @@ mod tests {
                 source: AbsolutePath::new(PathBuf::from("/tmp/src")).unwrap(),
                 branch: "main".to_string(),
                 base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
                 branch_created: false,
                 worktree_exists: false,
                 source_exists: false,

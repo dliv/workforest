@@ -11,7 +11,7 @@ Commands that operate on existing forests (`rm`, `status`, `exec`, `ls`) need re
 
 `.forest-meta.toml` captures all resolved values at creation time. Post-creation commands use only the meta file, never the global config.
 
-`ForestMeta` and `RepoMeta` (`src/meta.rs`, lines 23–38) store everything needed: `name`, `source` (absolute path), `branch`, `base_branch`, `branch_created` per repo.
+`ForestMeta` and `RepoMeta` (`src/meta.rs`) store everything needed: `name`, `source` (absolute path), `branch`, `base_branch`, `remote`, `branch_created` per repo. `remote` is optional for compatibility with older forest metadata; new forests record it so cleanup can prove branch reachability against the same remote-tracking base ref used at creation time.
 
 Commands depend only on meta + forest directory:
 
@@ -24,7 +24,7 @@ Config is loaded in `main.rs` only to resolve `worktree_base` for forest discove
 ## Consequences
 
 - **Config changes don't affect existing forests.** Changing `base_branch` in config has no effect on forests already created.
-- **`rm` is self-sufficient.** It has source paths, branch names, and `branch_created` flags — everything needed for cleanup without consulting config.
+- **`rm` is self-sufficient.** It has source paths, branch names, base branches, remotes, and `branch_created` flags — everything needed for cleanup without consulting config.
 - **No config migration concerns.** Each forest is a snapshot of creation-time state. Config schema can evolve freely.
 - **Config is only used by `init` (writes it) and `new` (reads it for defaults).** All other commands are config-independent.
-- Reinforced by ADR 0005 (no type field to track) and ADR 0012 (no template name in meta). Meta stores resolved `base_branch` per repo, enabling ADR 0011 (incremental writes make partial forests self-describing).
+- Reinforced by ADR 0005 (no type field to track) and ADR 0012 (no template name in meta). Meta stores resolved `base_branch` and `remote` per repo, enabling ADR 0011 (incremental writes make partial forests self-describing).

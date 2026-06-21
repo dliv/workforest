@@ -119,6 +119,7 @@ mod tests {
                 source: AbsolutePath::new(PathBuf::from("/tmp/foo")).unwrap(),
                 branch: format!("forest/{}", name),
                 base_branch: "dev".to_string(),
+                remote: Some("origin".to_string()),
                 branch_created: true,
             }],
         };

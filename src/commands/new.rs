@@ -348,6 +348,7 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
                     source: repo_plan.source.clone(),
                     branch: repo_plan.branch.to_string(),
                     base_branch: repo_plan.base_branch.clone(),
+                    remote: Some(repo_plan.remote.clone()),
                     branch_created: branch_created(&repo_plan.checkout),
                 });
                 meta.write(&meta_path)?;
@@ -922,6 +923,7 @@ mod tests {
         assert_eq!(meta.repos[0].name.as_str(), "foo-api");
         assert_eq!(meta.repos[0].branch, "testuser/meta-test");
         assert_eq!(meta.repos[0].base_branch, "main");
+        assert_eq!(meta.repos[0].remote.as_deref(), Some("origin"));
         assert!(meta.repos[0].branch_created);
     }
 

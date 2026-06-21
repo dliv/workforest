@@ -36,6 +36,8 @@ pub struct RepoMeta {
     pub source: AbsolutePath,
     pub branch: String,
     pub base_branch: String,
+    #[serde(default)]
+    pub remote: Option<String>,
     pub branch_created: bool,
 }
 
@@ -75,6 +77,7 @@ mod tests {
                     source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-api")).unwrap(),
                     branch: "forest/review-sues-dialog".to_string(),
                     base_branch: "dev".to_string(),
+                    remote: Some("origin".to_string()),
                     branch_created: true,
                 },
                 RepoMeta {
@@ -82,6 +85,7 @@ mod tests {
                     source: AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-web")).unwrap(),
                     branch: "sue/gh-100/fix-dialog".to_string(),
                     base_branch: "dev".to_string(),
+                    remote: Some("upstream".to_string()),
                     branch_created: false,
                 },
             ],
@@ -103,7 +107,9 @@ mod tests {
         assert_eq!(loaded.repos.len(), original.repos.len());
         assert_eq!(loaded.repos[0].name.as_str(), "foo-api");
         assert!(loaded.repos[0].branch_created);
+        assert_eq!(loaded.repos[0].remote.as_deref(), Some("origin"));
         assert_eq!(loaded.repos[1].name.as_str(), "foo-web");
+        assert_eq!(loaded.repos[1].remote.as_deref(), Some("upstream"));
         assert!(!loaded.repos[1].branch_created);
     }
 
@@ -141,6 +147,7 @@ branch_created = true
             AbsolutePath::new(PathBuf::from("/Users/dliv/src/foo-api")).unwrap()
         );
         assert_eq!(meta.repos[1].base_branch, "main");
+        assert_eq!(meta.repos[0].remote, None);
     }
 
     #[test]

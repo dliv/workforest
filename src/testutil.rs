@@ -154,6 +154,7 @@ pub fn make_repo(name: &str, branch: &str) -> RepoMeta {
         source: AbsolutePath::new(PathBuf::from(format!("/tmp/src/{}", name))).unwrap(),
         branch: branch.to_string(),
         base_branch: "dev".to_string(),
+        remote: Some("origin".to_string()),
         branch_created: true,
     }
 }
