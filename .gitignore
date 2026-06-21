@@ -4,5 +4,6 @@
 /target
 /bindings
 node_modules/
+tmp/
 worker/.env
 worker/.wrangler/
