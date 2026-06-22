@@ -11,6 +11,7 @@ pub struct DiscoveredForest {
     pub meta: ForestMeta,
 }
 
+#[cfg(test)]
 pub fn discover_forests(worktree_base: &Path) -> Result<Vec<ForestMeta>> {
     Ok(discover_forests_with_dirs(worktree_base)?
         .into_iter()

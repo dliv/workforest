@@ -2,9 +2,10 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+use super::branch_state::ActualBranchState;
 use super::rm::{self, RepoRmPlan, RmOutcome};
-use crate::forest::discover_forests;
-use crate::paths::{sanitize_forest_name, RepoName};
+use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
+use crate::paths::RepoName;
 
 // --- Types ---
 
@@ -84,20 +85,11 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
         match crate::config::load_config(&config_path) {
             Ok(config) => {
                 let bases = config.all_worktree_bases();
+                let mut discovered_forests = Vec::new();
                 for base in bases {
-                    match discover_forests(base) {
-                        Ok(metas) => {
-                            for meta in metas {
-                                let dir_name = sanitize_forest_name(meta.name.as_str());
-                                let forest_path = base.join(&dir_name);
-                                let name = meta.name.to_string();
-                                let rm_plan = rm::plan_rm(&forest_path, &meta);
-                                forests.push(ForestInfo {
-                                    name,
-                                    path: forest_path,
-                                    repos: rm_plan.repo_plans,
-                                });
-                            }
+                    match discover_forests_with_dirs(base) {
+                        Ok(mut discovered) => {
+                            discovered_forests.append(&mut discovered);
                         }
                         Err(e) => {
                             warnings.push(format!(
@@ -107,6 +99,17 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                             ));
                         }
                     }
+                }
+                for discovered in dedupe_discovered_forests(discovered_forests) {
+                    let forest_path = discovered.dir;
+                    let meta = discovered.meta;
+                    let name = meta.name.to_string();
+                    let rm_plan = rm::plan_rm(&forest_path, &meta);
+                    forests.push(ForestInfo {
+                        name,
+                        path: forest_path,
+                        repos: rm_plan.repo_plans,
+                    });
                 }
             }
             Err(e) => {
@@ -147,8 +150,10 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         }
 
         // Unregister git worktrees before deleting the directory.
-        // Best-effort: log failures as warnings but don't block directory deletion.
+        // If repo cleanup fails, keep the forest metadata so users can retry
+        // with `git forest rm --force` or inspect the remaining state.
         let mut repos = Vec::new();
+        let forest_error_start = errors.len();
         for repo in &forest.repos {
             assert!(
                 repo.worktree_path.starts_with(&forest.path),
@@ -161,7 +166,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
             repos.push(repo_reset_entry(repo, worktree_removed, branch_deleted));
         }
 
-        let entry = if !path.exists() {
+        let entry = if errors.len() > forest_error_start || !path.exists() {
             ForestResetEntry {
                 name: name.clone(),
                 path: path.clone(),
@@ -194,13 +199,15 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         forest_entries.push(entry);
     }
 
-    let (config_deleted, config_backed_up_to) = if plan.config_exists {
+    let cleanup_succeeded = errors.is_empty();
+
+    let (config_deleted, config_backed_up_to) = if cleanup_succeeded && plan.config_exists {
         backup_file(&plan.config_path, &mut errors)
     } else {
         (false, None)
     };
 
-    let state_deleted = if plan.state_exists {
+    let state_deleted = if cleanup_succeeded && plan.state_exists {
         delete_file(&plan.state_path, &mut errors)
     } else {
         false
@@ -229,15 +236,16 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
 }
 
 fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+    if !repo.worktree_exists {
+        return remove_missing_reset_worktree(repo, errors);
+    }
+
     let wt_str = repo.worktree_path.to_string_lossy();
     match crate::git::git(&repo.source, &["worktree", "remove", "--force", &wt_str]) {
         Ok(_) => (RmOutcome::Success, true),
-        Err(_e) if !repo.worktree_path.exists() => (
-            RmOutcome::Skipped {
-                reason: "worktree already missing".to_string(),
-            },
-            true,
-        ),
+        Err(_e) if repo.worktree_path.symlink_metadata().is_err() => {
+            remove_missing_reset_worktree(repo, errors)
+        }
         Err(e) => {
             let msg = format!("warning: git worktree remove failed for {}: {}", wt_str, e);
             errors.push(msg.clone());
@@ -246,23 +254,57 @@ fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutc
     }
 }
 
-fn plan_reset_worktree_outcome(repo: &RepoRmPlan) -> (RmOutcome, bool) {
-    if !repo.source_exists {
-        return (
-            RmOutcome::Failed {
-                error: "source repo missing".to_string(),
-            },
-            false,
-        );
+fn remove_missing_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+    if let Some(msg) = rm::stale_missing_worktree_metadata_error(repo, true) {
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
     }
 
+    (
+        RmOutcome::Skipped {
+            reason: "worktree already missing".to_string(),
+        },
+        true,
+    )
+}
+
+fn plan_reset_worktree_outcome(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
     if !repo.worktree_exists {
+        if repo.source_exists {
+            if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
+                errors.push(msg.clone());
+                return (RmOutcome::Failed { error: msg }, false);
+            }
+        }
         return (
             RmOutcome::Skipped {
                 reason: "worktree already missing".to_string(),
             },
             true,
         );
+    }
+
+    if !repo.source_exists {
+        let msg = format!(
+            "{}: source repo missing; dry-run cannot prove worktree removal",
+            repo.name
+        );
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
+    }
+
+    if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
+    }
+
+    if matches!(repo.branch_state.actual, ActualBranchState::Unknown { .. }) {
+        let msg = format!(
+            "{}: branch lookup failed; dry-run cannot prove worktree removal",
+            repo.name
+        );
+        errors.push(msg.clone());
+        return (RmOutcome::Failed { error: msg }, false);
     }
 
     (RmOutcome::Success, true)
@@ -318,6 +360,32 @@ fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>)
 
 fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
     let mut errors = Vec::new();
+    let forests: Vec<ForestResetEntry> = plan
+        .forests
+        .iter()
+        .map(|f| {
+            let forest_error_start = errors.len();
+            let repos = f
+                .repos
+                .iter()
+                .map(|repo| {
+                    let (worktree_removed, wt_succeeded) =
+                        plan_reset_worktree_outcome(repo, &mut errors);
+                    let branch_deleted =
+                        rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
+                    repo_reset_entry(repo, worktree_removed, branch_deleted)
+                })
+                .collect();
+            ForestResetEntry {
+                name: f.name.clone(),
+                path: f.path.clone(),
+                removed: f.path.exists() && errors.len() == forest_error_start,
+                repos,
+            }
+        })
+        .collect();
+    let cleanup_succeeded = errors.is_empty();
+
     ResetResult {
         dry_run: true,
         confirm_required: false,
@@ -325,9 +393,9 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
         config_file: FileResetEntry {
             path: plan.config_path.clone(),
             existed: plan.config_exists,
-            deleted: plan.config_exists,
+            deleted: plan.config_exists && cleanup_succeeded,
             // Signal to formatter that this would be backed up, not deleted
-            backed_up_to: if plan.config_exists {
+            backed_up_to: if plan.config_exists && cleanup_succeeded {
                 Some(
                     plan.config_path
                         .with_file_name("config.toml.<timestamp>.bak"),
@@ -339,31 +407,10 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
         state_file: FileResetEntry {
             path: plan.state_path.clone(),
             existed: plan.state_exists,
-            deleted: plan.state_exists,
+            deleted: plan.state_exists && cleanup_succeeded,
             backed_up_to: None,
         },
-        forests: plan
-            .forests
-            .iter()
-            .map(|f| {
-                let repos = f
-                    .repos
-                    .iter()
-                    .map(|repo| {
-                        let (worktree_removed, wt_succeeded) = plan_reset_worktree_outcome(repo);
-                        let branch_deleted =
-                            rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
-                        repo_reset_entry(repo, worktree_removed, branch_deleted)
-                    })
-                    .collect();
-                ForestResetEntry {
-                    name: f.name.clone(),
-                    path: f.path.clone(),
-                    removed: f.path.exists(),
-                    repos,
-                }
-            })
-            .collect(),
+        forests,
         warnings: plan.warnings.clone(),
         errors,
     }
@@ -372,7 +419,7 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
 fn plan_to_confirm_required(plan: &ResetPlan) -> ResetResult {
     let mut result = plan_to_dry_run(plan);
     result.dry_run = false;
-    result.confirm_required = true;
+    result.confirm_required = result.errors.is_empty();
     result
 }
 
@@ -400,17 +447,21 @@ pub fn cmd_reset(
 pub fn format_reset_human(result: &ResetResult) -> String {
     let mut lines = Vec::new();
 
+    let cleanup_blocked = reset_cleanup_blocked(result);
+
     if result.confirm_required {
         lines.push("The following would be deleted:".to_string());
     } else if result.dry_run {
         lines.push("Dry run — no changes will be made.".to_string());
+    } else if cleanup_blocked {
+        lines.push("Reset blocked by errors.".to_string());
     } else if result.errors.is_empty() {
         lines.push("Reset complete.".to_string());
     } else {
         lines.push("Reset completed with errors.".to_string());
     }
 
-    let is_preview = result.dry_run || result.confirm_required;
+    let is_preview = result.dry_run || result.confirm_required || cleanup_blocked;
 
     if !result.config_only {
         if result.forests.is_empty() {
@@ -423,6 +474,8 @@ pub fn format_reset_human(result: &ResetResult) -> String {
                 let status = if is_preview {
                     if forest.removed {
                         "would remove"
+                    } else if forest.path.exists() {
+                        "blocked"
                     } else {
                         "already missing"
                     }
@@ -449,14 +502,14 @@ pub fn format_reset_human(result: &ResetResult) -> String {
 
     lines.push(String::new());
 
-    let config_status = format_file_status(&result.config_file, is_preview);
+    let config_status = format_file_status(&result.config_file, is_preview, cleanup_blocked);
     lines.push(format!(
         "Config: {} ({})",
         config_status,
         result.config_file.path.display()
     ));
 
-    let state_status = format_file_status(&result.state_file, is_preview);
+    let state_status = format_file_status(&result.state_file, is_preview, cleanup_blocked);
     lines.push(format!(
         "State:  {} ({})",
         state_status,
@@ -479,7 +532,7 @@ pub fn format_reset_human(result: &ResetResult) -> String {
         }
     }
 
-    if result.confirm_required {
+    if result.confirm_required && result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Pass --confirm to proceed.".to_string());
     }
@@ -490,7 +543,11 @@ pub fn format_reset_human(result: &ResetResult) -> String {
 pub fn format_reset_summary(result: &ResetResult) -> String {
     let mut lines = Vec::new();
 
-    if result.errors.is_empty() {
+    let cleanup_blocked = reset_cleanup_blocked(result);
+
+    if cleanup_blocked {
+        lines.push("Reset blocked by errors.".to_string());
+    } else if result.errors.is_empty() {
         lines.push("Reset complete.".to_string());
     } else {
         lines.push("Reset completed with errors.".to_string());
@@ -520,13 +577,13 @@ pub fn format_reset_summary(result: &ResetResult) -> String {
     }
 
     lines.push(String::new());
-    let config_status = format_file_status(&result.config_file, is_preview);
+    let config_status = format_file_status(&result.config_file, is_preview, cleanup_blocked);
     lines.push(format!(
         "Config: {} ({})",
         config_status,
         result.config_file.path.display()
     ));
-    let state_status = format_file_status(&result.state_file, is_preview);
+    let state_status = format_file_status(&result.state_file, is_preview, cleanup_blocked);
     lines.push(format!(
         "State:  {} ({})",
         state_status,
@@ -583,21 +640,39 @@ fn format_repo_reset_status(repo: &RepoResetEntry, is_preview: bool) -> String {
     format!("{}: {}{}", repo.name, wt, branch)
 }
 
-fn format_file_status(entry: &FileResetEntry, is_preview: bool) -> String {
+fn reset_cleanup_blocked(result: &ResetResult) -> bool {
+    result.errors.iter().any(|error| !file_cleanup_error(error))
+        && ((result.config_file.existed
+            && !result.config_file.deleted
+            && result.config_file.backed_up_to.is_none())
+            || (result.state_file.existed && !result.state_file.deleted)
+            || result
+                .forests
+                .iter()
+                .any(|forest| !forest.removed && forest.path.exists()))
+}
+
+fn file_cleanup_error(error: &str) -> bool {
+    error.starts_with("failed to back up ") || error.starts_with("failed to delete ")
+}
+
+fn format_file_status(entry: &FileResetEntry, is_preview: bool, cleanup_blocked: bool) -> String {
     if is_preview {
-        if entry.existed {
-            if entry.backed_up_to.is_some() {
-                "would back up".to_string()
-            } else {
-                "would delete".to_string()
-            }
-        } else {
+        if !entry.existed {
             "not found".to_string()
+        } else if !entry.deleted {
+            "blocked".to_string()
+        } else if entry.backed_up_to.is_some() {
+            "would back up".to_string()
+        } else {
+            "would delete".to_string()
         }
     } else if let Some(backup_path) = &entry.backed_up_to {
         format!("backed up to {}", backup_path.display())
     } else if entry.deleted {
         "deleted".to_string()
+    } else if cleanup_blocked && entry.existed {
+        "preserved".to_string()
     } else if entry.existed {
         "failed".to_string()
     } else {
@@ -1052,6 +1127,109 @@ path = "/tmp/nonexistent-repo"
 
     #[test]
     #[serial]
+    fn reset_uses_discovered_forest_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let forest_dir = worktree_base.join("actual-dir");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("metadata-name".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            repos: vec![],
+        };
+        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
+            .unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "test/{{name}}"
+
+[[template.default.repos]]
+path = "/tmp/nonexistent-repo"
+"#,
+            worktree_base.display()
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.forests[0].path, forest_dir);
+        assert!(result.forests[0].removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_deduplicates_symlinked_worktree_bases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        let worktree_base_alias = tmp.path().join("worktrees-alias");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+        std::os::unix::fs::symlink(&worktree_base, &worktree_base_alias).unwrap();
+
+        let forest_dir = worktree_base.join("dedupe-me");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("dedupe-me".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            repos: vec![],
+        };
+        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
+            .unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "test/{{name}}"
+
+[[template.default.repos]]
+path = "/tmp/nonexistent-repo"
+
+[template.alias]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "test/{{name}}"
+
+[[template.alias.repos]]
+path = "/tmp/nonexistent-repo"
+"#,
+            worktree_base.display(),
+            worktree_base_alias.display()
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.forests.len(), 1);
+        assert_eq!(result.forests[0].path, forest_dir);
+        assert!(result.forests[0].removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    #[serial]
     fn reset_config_only_leaves_forests() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(channel::APP_NAME);
@@ -1247,6 +1425,87 @@ name = "repo-a"
 
     #[test]
     #[serial]
+    fn reset_preserves_metadata_when_branch_deletion_fails() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-unmerged-branch");
+        let tmpl = env.default_template(&["repo-unmerged-branch"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-unmerged".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let forest_dir = base.join("reset-unmerged");
+        let worktree = forest_dir.join("repo-unmerged-branch");
+        std::fs::write(worktree.join("unmerged.txt"), "keep me").unwrap();
+        crate::git::git(&worktree, &["add", "unmerged.txt"]).unwrap();
+        crate::git::git(
+            &worktree,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "-m",
+                "unmerged forest work",
+            ],
+        )
+        .unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-unmerged-branch");
+        let state_dir = tmp_root.join("state").join(channel::APP_NAME);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join("state.toml");
+        std::fs::write(&state_file, "").unwrap();
+        let config_file = tmp_root
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("not fully merged")),
+            "{:?}",
+            result.errors
+        );
+        assert!(!result.forests[0].removed);
+        assert!(
+            forest_dir.exists(),
+            "forest metadata should remain retryable"
+        );
+        assert!(config_file.exists(), "config should remain for retry");
+        assert!(
+            state_file.exists(),
+            "state should remain when reset is incomplete"
+        );
+        assert!(crate::git::ref_exists(&repo, "refs/heads/forest/reset-unmerged").unwrap());
+
+        let summary = format_reset_summary(&result);
+        assert!(summary.contains("Config: preserved"), "{}", summary);
+        assert!(summary.contains("State:  preserved"), "{}", summary);
+    }
+
+    #[test]
+    #[serial]
     fn reset_dry_run_reports_planned_branch_deletion_in_json() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::meta::ForestMode;
@@ -1287,6 +1546,379 @@ name = "repo-a"
         );
         assert!(crate::git::ref_exists(&repo, "refs/heads/forest/reset-dry-run").unwrap());
         assert!(base.join("reset-dry-run").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_dry_run_reports_source_missing_as_top_level_error() {
+        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use crate::paths::{AbsolutePath, ForestName};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let forest_dir = worktree_base.join("source-missing");
+        std::fs::create_dir_all(forest_dir.join("repo-missing-source")).unwrap();
+        let missing_source =
+            AbsolutePath::new(tmp.path().join("src").join("missing-source")).unwrap();
+        let meta = ForestMeta {
+            name: ForestName::new("source-missing".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Review,
+            repos: vec![RepoMeta {
+                name: RepoName::new("repo-missing-source".to_string()).unwrap(),
+                source: missing_source,
+                branch: "forest/source-missing".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: true,
+            }],
+        };
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "repo-missing-source"
+"#,
+            worktree_base.display(),
+            tmp.path().join("src").join("missing-source").display(),
+        );
+        std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let result = cmd_reset(false, false, true, None).unwrap();
+        assert!(!result.errors.is_empty());
+        assert!(matches!(
+            result.forests[0].repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(!result.forests[0].removed);
+        assert!(!result.config_file.deleted);
+
+        let output = format_reset_human(&result);
+        assert!(output.contains("source-missing: blocked"), "{}", output);
+        assert!(output.contains("Config: blocked"), "{}", output);
+
+        let confirm_result = cmd_reset(false, false, false, None).unwrap();
+        assert!(!confirm_result.confirm_required);
+        let confirm_output = format_reset_human(&confirm_result);
+        assert!(
+            !confirm_output.contains("Pass --confirm to proceed"),
+            "{}",
+            confirm_output
+        );
+        assert!(
+            confirm_output.contains("Reset blocked by errors."),
+            "{}",
+            confirm_output
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn reset_source_missing_and_worktree_missing_matches_dry_run() {
+        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use crate::paths::{AbsolutePath, ForestName};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let forest_dir = worktree_base.join("source-and-worktree-missing");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let missing_source =
+            AbsolutePath::new(tmp.path().join("src").join("missing-source")).unwrap();
+        let meta = ForestMeta {
+            name: ForestName::new("source-and-worktree-missing".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Review,
+            repos: vec![RepoMeta {
+                name: RepoName::new("repo-missing-both".to_string()).unwrap(),
+                source: missing_source,
+                branch: "forest/source-and-worktree-missing".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: true,
+            }],
+        };
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "repo-missing-both"
+"#,
+            worktree_base.display(),
+            tmp.path().join("src").join("missing-source").display(),
+        );
+        let config_file = config_dir.join("config.toml");
+        std::fs::write(&config_file, &config_content).unwrap();
+        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        assert!(dry_run.errors.is_empty(), "{:?}", dry_run.errors);
+        assert!(dry_run.forests[0].removed);
+        assert!(dry_run.config_file.deleted);
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.forests[0].removed);
+        assert!(!forest_dir.exists());
+        assert!(!config_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_source_missing_and_dangling_symlink_worktree_blocks() {
+        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use crate::paths::{AbsolutePath, ForestName};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let forest_dir = worktree_base.join("dangling-source-missing");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let worktree = forest_dir.join("repo-dangling");
+        std::os::unix::fs::symlink(tmp.path().join("missing-target"), &worktree).unwrap();
+
+        let missing_source =
+            AbsolutePath::new(tmp.path().join("src").join("missing-source")).unwrap();
+        let meta = ForestMeta {
+            name: ForestName::new("dangling-source-missing".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Review,
+            repos: vec![RepoMeta {
+                name: RepoName::new("repo-dangling".to_string()).unwrap(),
+                source: missing_source,
+                branch: "forest/dangling-source-missing".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: true,
+            }],
+        };
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "testuser/{{name}}"
+
+[[template.default.repos]]
+path = "{}"
+name = "repo-dangling"
+"#,
+            worktree_base.display(),
+            tmp.path().join("src").join("missing-source").display(),
+        );
+        let config_file = config_dir.join("config.toml");
+        std::fs::write(&config_file, &config_content).unwrap();
+        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        assert!(!dry_run.errors.is_empty());
+        assert!(!dry_run.forests[0].removed);
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(!result.errors.is_empty());
+        assert!(!result.forests[0].removed);
+        assert!(forest_dir.exists());
+        assert!(config_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_dry_run_blocks_source_present_dangling_symlink_worktree() {
+        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use crate::paths::ForestName;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-source-present-dangling");
+        let base = env.worktree_base();
+        let forest_dir = base.join("source-present-dangling");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let worktree = forest_dir.join("repo-source-present-dangling");
+        std::os::unix::fs::symlink(base.join("missing-target"), &worktree).unwrap();
+
+        let meta = ForestMeta {
+            name: ForestName::new("source-present-dangling".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Review,
+            repos: vec![RepoMeta {
+                name: RepoName::new("repo-source-present-dangling".to_string()).unwrap(),
+                source: repo.clone(),
+                branch: "forest/source-present-dangling".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: true,
+            }],
+        };
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-source-present-dangling");
+        let config_file = tmp_root
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        assert!(!dry_run.errors.is_empty());
+        assert!(matches!(
+            dry_run.forests[0].repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(!dry_run.config_file.deleted);
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(!result.errors.is_empty());
+        assert!(!result.forests[0].removed);
+        assert!(forest_dir.exists());
+        assert!(config_file.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_dry_run_blocks_source_present_corrupt_worktree_dir() {
+        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use crate::paths::ForestName;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-source-present-corrupt");
+        let base = env.worktree_base();
+        let forest_dir = base.join("source-present-corrupt");
+        let worktree = forest_dir.join("repo-source-present-corrupt");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let meta = ForestMeta {
+            name: ForestName::new("source-present-corrupt".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Review,
+            repos: vec![RepoMeta {
+                name: RepoName::new("repo-source-present-corrupt".to_string()).unwrap(),
+                source: repo.clone(),
+                branch: "forest/source-present-corrupt".to_string(),
+                base_branch: "main".to_string(),
+                remote: Some("origin".to_string()),
+                branch_created: true,
+            }],
+        };
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-source-present-corrupt");
+        let config_file = tmp_root
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        assert!(!dry_run.errors.is_empty());
+        assert!(matches!(
+            dry_run.forests[0].repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(!dry_run.config_file.deleted);
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(!result.errors.is_empty());
+        assert!(!result.forests[0].removed);
+        assert!(forest_dir.exists());
+        assert!(config_file.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_preserves_metadata_for_locked_missing_worktree_metadata() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::ForestMode;
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-locked-missing");
+        let tmpl = env.default_template(&["repo-locked-missing"]);
+
+        cmd_new(
+            NewInputs {
+                name: "reset-locked-missing".to_string(),
+                mode: ForestMode::Review,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let forest_dir = base.join("reset-locked-missing");
+        let worktree = forest_dir.join("repo-locked-missing");
+        let worktree_str = worktree.to_string_lossy();
+        crate::git::git(&repo, &["worktree", "lock", &worktree_str]).unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-locked-missing");
+        let config_file = tmp_root
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("metadata still lists missing worktree")
+                    || error.contains("failed to prune stale missing worktree metadata")
+            }),
+            "{:?}",
+            result.errors
+        );
+        assert!(!result.forests[0].removed);
+        assert!(
+            forest_dir.exists(),
+            "forest metadata should remain after stale metadata failure"
+        );
+        assert!(config_file.exists(), "config should remain for retry");
+        assert!(matches!(
+            result.forests[0].repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
     }
 
     #[test]

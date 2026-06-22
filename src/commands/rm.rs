@@ -442,7 +442,10 @@ fn remove_worktree(
     }
 }
 
-fn stale_missing_worktree_metadata_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
+pub(super) fn stale_missing_worktree_metadata_error(
+    repo_plan: &RepoRmPlan,
+    force: bool,
+) -> Option<String> {
     if !repo_plan.source_exists {
         return None;
     }
@@ -1237,7 +1240,10 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
     }
 }
 
-fn worktree_metadata_dry_run_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
+pub(super) fn worktree_metadata_dry_run_error(
+    repo_plan: &RepoRmPlan,
+    force: bool,
+) -> Option<String> {
     if !repo_plan.source_exists {
         return None;
     }
