@@ -35,10 +35,13 @@ git forest init \
   --feature-branch-template "<username>/{name}" \
   --repo ~/code/repo-a \
   --repo ~/code/repo-b \
-  --repo-base-branch repo-b=<branch-if-different>  # optional per-repo override
+  --repo-base-branch repo-b=<branch-if-different> \
+  --disposable-root-entry .idea
 ```
 
-Add more templates with another `init --template other-name`. Use `--force` to overwrite an existing template.
+The per-repo branch override and disposable root entries are optional; both options are repeatable. Add more templates with another `init --template other-name`. Use `--force` to overwrite an existing template.
+
+Disposable root entries are exact top-level names, not nested paths or globs. They are snapshotted into each new forest's metadata, and there are no built-in defaults.
 
 ## Core Workflow
 
@@ -78,9 +81,11 @@ git forest ls                         # list all forests
 ### 4. Clean Up
 
 ```sh
+git forest rm my-feature --dry-run --json  # inspect every planned deletion first
 git forest rm my-feature              # remove forest
 git forest rm                         # auto-detect from cwd
 git forest rm my-feature --force      # force-remove dirty worktrees
+git forest rm my-feature --discard-root-entry .idea --dry-run --json
 git forest reset --confirm            # wipe all config, state, and forests
 git forest reset --config-only --confirm  # wipe config/state only, keep worktrees
 ```
@@ -89,6 +94,11 @@ git forest reset --config-only --confirm  # wipe config/state only, keep worktre
 
 - **Always use `--json`** for structured, parseable output on any command.
 - **Dry-run before mutating:** `new`, `rm`, and `reset` support `--dry-run --json` to preview changes. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
+- **Treat disposable entries as deletion authority:** Configured entries are recursively deleted during ordinary `rm`. For older forests, inspect the entry and use repeatable `--discard-root-entry <entry>` only when its complete contents may be discarded.
+- **Dotfiles are not automatically safe:** Explicitly passing `.env` to `--discard-root-entry` deletes it. Never infer disposable entries merely because their names begin with a dot.
+- **Symlink boundary:** `rm` refuses a symlinked forest root even with `--force`. Inside a real forest, deleting an authorized symlink removes the link rather than following its target.
+- **Recovery blockers are intentional:** Inaccessible or offline symlinked worktree bases, inaccessible forest entries, corrupt forest metadata, or a staged metadata file left beside the worktree base block `rm --all` and prevent `reset` from deleting config/state. Preserve and repair the reported state before retrying.
+- **JSON requires representable paths:** `rm --json` refuses non-UTF-8 forest-root names before mutation. Inspect and rename the reported entry; do not silently retry the destructive command without JSON.
 - **Error messages include hints:** All errors have `hint:` lines with recovery suggestions.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
 - **Exit codes:** 0 = success, 1 = error. `exec` returns 1 if any repo's command fails. `rm` returns 1 if any cleanup step fails.

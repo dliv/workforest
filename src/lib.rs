@@ -55,6 +55,7 @@ fn run(cli: Cli) -> Result<()> {
             feature_branch_template,
             repos,
             repo_base_branches,
+            disposable_root_entries,
             force,
             show_path,
         } => {
@@ -118,6 +119,7 @@ fn run(cli: Cli) -> Result<()> {
                 worktree_base,
                 base_branch,
                 feature_branch_template,
+                disposable_root_entries,
                 repos: repo_inputs,
             };
 
@@ -168,21 +170,26 @@ fn run(cli: Cli) -> Result<()> {
             name,
             all,
             force,
+            discard_root_entries,
             dry_run,
         } => {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
+            let rm_options = commands::RmOptions {
+                require_utf8_json_paths: cli.json,
+                additional_disposable_root_entries: discard_root_entries,
+                ..commands::RmOptions::new(force, dry_run)
+            };
 
             if all {
                 let result = if cli.json || dry_run {
-                    let r = commands::cmd_rm_all(&bases, force, dry_run, None)?;
+                    let r = commands::cmd_rm_all_with_options(&bases, rm_options.clone(), None)?;
                     output(&r, cli.json, commands::format_rm_all_human)?;
                     r
                 } else {
-                    let r = commands::cmd_rm_all(
+                    let r = commands::cmd_rm_all_with_options(
                         &bases,
-                        force,
-                        dry_run,
+                        rm_options,
                         Some(&|progress| match progress {
                             commands::RmAllProgress::ForestStarting { name } => {
                                 println!("Removing forest {:?}", name.as_str());
@@ -208,17 +215,16 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
                 let result = if cli.json || dry_run {
-                    let r = commands::cmd_rm(&dir, &meta, force, dry_run, None)?;
+                    let r = commands::cmd_rm_with_options(&dir, &meta, rm_options.clone(), None)?;
                     output(&r, cli.json, commands::format_rm_human)?;
                     r
                 } else {
                     use std::io::Write;
                     println!("Removing forest {:?}", meta.name.as_str());
-                    let r = commands::cmd_rm(
+                    let r = commands::cmd_rm_with_options(
                         &dir,
                         &meta,
-                        force,
-                        dry_run,
+                        rm_options,
                         Some(&|progress| match progress {
                             commands::RmProgress::RepoStarting { name } => {
                                 print!("  {}: removing...", name);

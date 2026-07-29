@@ -1,4 +1,5 @@
 use crate::meta::ForestMode;
+use crate::paths::DisposableRootEntry;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -53,6 +54,9 @@ pub enum Command {
         /// Per-repo base branch override (format: repo-name=branch, repeatable)
         #[arg(long = "repo-base-branch")]
         repo_base_branches: Vec<String>,
+        /// Forest-root entry that ordinary removal may discard (repeatable)
+        #[arg(long = "disposable-root-entry")]
+        disposable_root_entries: Vec<DisposableRootEntry>,
         /// Overwrite existing template by the same name
         #[arg(long)]
         force: bool,
@@ -93,6 +97,9 @@ pub enum Command {
         /// Force removal of dirty worktrees and unmerged branches
         #[arg(long)]
         force: bool,
+        /// Exact forest-root entry to discard for this removal (repeatable)
+        #[arg(long = "discard-root-entry", conflicts_with = "force")]
+        discard_root_entries: Vec<DisposableRootEntry>,
         /// Show what would be removed without executing
         #[arg(long)]
         dry_run: bool,

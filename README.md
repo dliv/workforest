@@ -39,13 +39,14 @@ just build
 
 # Configure repos and worktree base
 git forest init \
-  --feature-branch-template "dliv/{name}" \
+  --feature-branch-template "user/{name}" \
   --repo ~/foo-api \
   --repo ~/foo-web \
   --repo ~/foo-infra \
   --repo ~/dev-docs \
   --base-branch dev \
   --repo-base-branch dev-docs=main \
+  --disposable-root-entry .idea \
   --worktree-base ~/worktrees
 
 # Create a forest for feature work
@@ -88,6 +89,7 @@ Options:
   --base-branch <branch>              Default base branch (default: dev)
   --feature-branch-template <tmpl>    Feature branch naming template (must contain {name})
   --repo-base-branch <repo=branch>    Per-repo base branch override (repeatable)
+  --disposable-root-entry <entry>     Root entry ordinary removal may discard (repeatable)
   --force                             Overwrite existing template by the same name
   --show-path                         Print config path and exit
 ```
@@ -105,7 +107,7 @@ Options:
   --dry-run                           Show plan without executing
 ```
 
-**Feature mode:** All repos get a branch from the feature branch template (e.g., `dliv/{name}`) off their base branch.
+**Feature mode:** All repos get a branch from the feature branch template (e.g., `user/{name}`) off their base branch.
 
 **Review mode:** All repos get `forest/{name}` branch. Use `--repo-branch` to point specific repos at a PR branch.
 
@@ -115,11 +117,28 @@ Options:
 git forest rm [name] [options]
 
 Options:
-  --force       Force removal of dirty worktrees and unmerged branches
-  --dry-run     Show what would be removed without executing
+  --all                          Remove all forests
+  --force                        Force removal of dirty worktrees and unmerged branches
+  --discard-root-entry <entry>   Discard one exact root entry for this removal (repeatable)
+  --dry-run                      Show what would be removed without executing
 ```
 
 Best-effort cleanup: removes worktrees, deletes branches we created, removes the forest directory. Continues on individual failures and reports all errors.
+
+Disposable root entries are exact top-level names, not paths or globs. Values configured by `init` are snapshotted into each new forest's `.forest-meta.toml`; changing the template later does not change an existing forest's deletion authority. There are no built-in defaults.
+
+Use `--discard-root-entry` for an older forest or one-off cleanup after inspecting the entry. Ordinary removal still enforces dirty-worktree and branch safety. A symlinked forest root is always refused, including under `--force`; a disposable symlink inside a real forest is unlinked without following its target.
+
+Always preview cleanup first:
+
+```sh
+git forest rm my-feature --dry-run --json
+git forest rm my-feature --discard-root-entry .idea --dry-run --json
+```
+
+Dot-prefixed entries are not inherently disposable. For example, explicitly authorizing `.env` deletes it.
+
+Inaccessible or offline symlinked worktree bases, inaccessible forest entries, corrupt forest metadata, or metadata staged by an interrupted removal block `rm --all` and prevent `reset` from deleting config/state until recovery is complete. JSON removal refuses non-UTF-8 forest-root names before mutation rather than returning an incomplete path after cleanup.
 
 ### `ls`, `status`, `exec`
 

@@ -4,13 +4,17 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
-use crate::paths::{expand_tilde, AbsolutePath, RepoName};
+use crate::meta::META_FILENAME;
+use crate::paths::{
+    expand_tilde, validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
+};
 
 pub struct InitInputs {
     pub template_name: String,
     pub worktree_base: String,
     pub base_branch: String,
     pub feature_branch_template: String,
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repos: Vec<RepoInput>,
 }
 
@@ -25,6 +29,7 @@ pub struct InitResult {
     pub config_path: PathBuf,
     pub template_name: String,
     pub worktree_base: AbsolutePath,
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repos: Vec<InitRepoSummary>,
 }
 
@@ -114,10 +119,16 @@ pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
         });
     }
 
+    validate_disposable_root_entries(
+        &inputs.disposable_root_entries,
+        std::iter::once(META_FILENAME).chain(resolved_repos.iter().map(|repo| repo.name.as_str())),
+    )?;
+
     Ok(ResolvedTemplate {
         worktree_base,
         base_branch: inputs.base_branch.clone(),
         feature_branch_template: inputs.feature_branch_template.clone(),
+        disposable_root_entries: inputs.disposable_root_entries.clone(),
         repos: resolved_repos,
     })
 }
@@ -145,6 +156,7 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
     }
 
     let worktree_base = template.worktree_base.clone();
+    let disposable_root_entries = template.disposable_root_entries.clone();
     let repos: Vec<InitRepoSummary> = template
         .repos
         .iter()
@@ -162,6 +174,7 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
         config_path: config_path.to_path_buf(),
         template_name,
         worktree_base,
+        disposable_root_entries,
         repos,
     })
 }
@@ -174,6 +187,17 @@ pub fn format_init_human(result: &InitResult) -> String {
     ));
     lines.push(format!("Template: {}", result.template_name));
     lines.push(format!("Worktree base: {}", result.worktree_base.display()));
+    if !result.disposable_root_entries.is_empty() {
+        lines.push(format!(
+            "Disposable root entries: {}",
+            result
+                .disposable_root_entries
+                .iter()
+                .map(DisposableRootEntry::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     lines.push(format!("Repos ({}): ", result.repos.len()));
     for repo in &result.repos {
         lines.push(format!(
@@ -215,6 +239,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos,
         }
     }
@@ -234,6 +259,45 @@ mod tests {
         assert_eq!(template.repos.len(), 1);
         assert_eq!(template.repos[0].name.as_str(), "my-repo");
         assert_eq!(template.repos[0].base_branch, "dev");
+    }
+
+    #[test]
+    fn validate_init_accepts_disposable_root_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo-a");
+        let mut inputs = make_init_inputs(vec![RepoInput {
+            path: repo.display().to_string(),
+            name: None,
+            base_branch: None,
+        }]);
+        inputs.disposable_root_entries = vec![
+            DisposableRootEntry::new(".idea".to_string()).unwrap(),
+            DisposableRootEntry::new(".claude".to_string()).unwrap(),
+        ];
+
+        let template = validate_init_inputs(&inputs).unwrap();
+
+        assert_eq!(
+            template.disposable_root_entries,
+            inputs.disposable_root_entries
+        );
+    }
+
+    #[test]
+    fn validate_init_rejects_disposable_managed_repo_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = create_test_git_repo(tmp.path(), "repo-a");
+        let mut inputs = make_init_inputs(vec![RepoInput {
+            path: repo.display().to_string(),
+            name: None,
+            base_branch: None,
+        }]);
+        inputs.disposable_root_entries =
+            vec![DisposableRootEntry::new("repo-a".to_string()).unwrap()];
+
+        let error = validate_init_inputs(&inputs).unwrap_err().to_string();
+
+        assert!(error.contains("reserved"), "error: {error}");
     }
 
     #[test]
@@ -297,7 +361,8 @@ mod tests {
             template_name: "default".to_string(),
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
-            feature_branch_template: "dliv/feature".to_string(),
+            feature_branch_template: "user/feature".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -323,6 +388,7 @@ mod tests {
             worktree_base: "~/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -430,6 +496,7 @@ mod tests {
             worktree_base: "/tmp/worktrees/alpha".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_a.display().to_string(),
                 name: None,
@@ -444,6 +511,7 @@ mod tests {
             worktree_base: "/tmp/worktrees/beta".to_string(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_b.display().to_string(),
                 name: None,
@@ -470,6 +538,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -494,6 +563,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_a.display().to_string(),
                 name: None,
@@ -507,6 +577,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_b.display().to_string(),
                 name: None,
@@ -532,6 +603,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_a.display().to_string(),
                 name: None,
@@ -546,6 +618,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_b.display().to_string(),
                 name: None,
@@ -560,6 +633,7 @@ mod tests {
             worktree_base: "/tmp/worktrees/new".to_string(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo_b.display().to_string(),
                 name: None,
@@ -588,6 +662,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -609,6 +684,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,
@@ -631,6 +707,7 @@ mod tests {
             worktree_base: "/tmp/worktrees".to_string(),
             base_branch: "dev".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![RepoInput {
                 path: repo.display().to_string(),
                 name: None,

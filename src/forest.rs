@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 
-use crate::meta::{ForestMeta, META_FILENAME};
+use crate::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
 use crate::paths::sanitize_forest_name;
 
 pub struct DiscoveredForest {
@@ -22,24 +22,20 @@ pub fn discover_forests(worktree_base: &Path) -> Result<Vec<ForestMeta>> {
 pub fn discover_forests_with_dirs(worktree_base: &Path) -> Result<Vec<DiscoveredForest>> {
     let mut forests: Vec<DiscoveredForest> = Vec::new();
 
-    if !worktree_base.exists() {
+    let Some(entries) = worktree_base_entries(worktree_base)? else {
         return Ok(forests);
-    }
+    };
 
-    let entries = sorted_dir_entries(worktree_base)?;
     for entry in entries {
+        let is_dir = entry_path_is_dir(&entry)?;
+        reject_staged_metadata_entry(&entry, is_dir)?;
         let path = entry.path();
-        if !path.is_dir() {
+        if !is_dir {
             continue;
         }
         let meta_path = path.join(META_FILENAME);
-        if !meta_path.exists() {
+        let Some(meta) = read_forest_meta_if_present(&meta_path)? else {
             continue;
-        }
-
-        let meta = match ForestMeta::read(&meta_path) {
-            Ok(meta) => meta,
-            Err(_) => continue,
         };
         forests.push(DiscoveredForest { dir: path, meta });
     }
@@ -73,25 +69,22 @@ pub fn find_forest(
 ) -> Result<Option<(PathBuf, ForestMeta)>> {
     let sanitized = sanitize_forest_name(name_or_dir);
 
-    if !worktree_base.exists() {
+    let Some(entries) = worktree_base_entries(worktree_base)? else {
         return Ok(None);
-    }
+    };
 
-    let entries = sorted_dir_entries(worktree_base)?;
     let mut meta_match = None;
     let mut alias_match = None;
     for entry in entries {
+        let is_dir = entry_path_is_dir(&entry)?;
+        reject_staged_metadata_entry(&entry, is_dir)?;
         let path = entry.path();
-        if !path.is_dir() {
+        if !is_dir {
             continue;
         }
         let meta_path = path.join(META_FILENAME);
-        if !meta_path.exists() {
+        let Some(meta) = read_forest_meta_if_present(&meta_path)? else {
             continue;
-        }
-        let meta = match ForestMeta::read(&meta_path) {
-            Ok(m) => m,
-            Err(_) => continue,
         };
 
         let dir_name = entry.file_name().to_string_lossy().to_string();
@@ -112,10 +105,98 @@ pub fn find_forest(
     Ok(meta_match.or(alias_match))
 }
 
-fn sorted_dir_entries(path: &Path) -> Result<Vec<DirEntry>> {
-    let mut entries = std::fs::read_dir(path)?.collect::<std::result::Result<Vec<_>, _>>()?;
+fn worktree_base_entries(path: &Path) -> Result<Option<Vec<DirEntry>>> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(inspect_error) if inspect_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                Ok(_) => {
+                    return Err(anyhow::anyhow!(
+                        "could not read worktree base {}: {}\n  hint: the configured path exists but its target may be unavailable; restore access before retrying",
+                        path.display(),
+                        error
+                    ));
+                }
+                Err(inspect_error) => {
+                    return Err(anyhow::anyhow!(
+                        "could not inspect unavailable worktree base {}: {}\n  hint: repair filesystem access before retrying",
+                        path.display(),
+                        inspect_error
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "could not read worktree base {}: {}\n  hint: repair filesystem access before retrying",
+                path.display(),
+                error
+            ));
+        }
+    };
+    let mut entries = entries
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "could not read an entry in worktree base {}: {}\n  hint: repair filesystem access before retrying",
+                path.display(),
+                error
+            )
+        })?;
     entries.sort_by_key(|entry| entry.path());
-    Ok(entries)
+    Ok(Some(entries))
+}
+
+fn entry_path_is_dir(entry: &DirEntry) -> Result<bool> {
+    match std::fs::metadata(entry.path()) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling directory symlink or entry removed during inspection is
+            // not a discoverable forest. Other inspection failures remain blocking.
+            Ok(false)
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "could not inspect worktree-base entry {}: {}\n  hint: repair filesystem access before retrying",
+            entry.path().display(),
+            error
+        )),
+    }
+}
+
+fn reject_staged_metadata_entry(entry: &DirEntry, is_dir: bool) -> Result<()> {
+    if !is_dir
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(STAGED_META_PREFIX))
+    {
+        bail!(
+            "found staged forest metadata at {}\n  hint: a previous removal may have been interrupted; preserve the staged file and restore the matching forest metadata before retrying",
+            entry.path().display()
+        );
+    }
+    Ok(())
+}
+
+fn read_forest_meta_if_present(path: &Path) -> Result<Option<ForestMeta>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => ForestMeta::read(path).map(Some).map_err(|error| {
+            anyhow::anyhow!(
+                "could not read forest metadata {}: {:#}\n  hint: repair or restore this metadata before retrying",
+                path.display(),
+                error
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not inspect forest metadata {}: {}\n  hint: repair filesystem access before retrying",
+            path.display(),
+            error
+        )),
+    }
 }
 
 fn should_prefer_discovered_dir(candidate: &Path, current: &Path) -> bool {
@@ -132,8 +213,7 @@ pub fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, ForestMeta
     let mut current = start.to_path_buf();
     loop {
         let meta_path = current.join(META_FILENAME);
-        if meta_path.exists() {
-            let meta = ForestMeta::read(&meta_path)?;
+        if let Some(meta) = read_forest_meta_if_present(&meta_path)? {
             return Ok(Some((current, meta)));
         }
         if !current.pop() {
@@ -272,6 +352,7 @@ mod tests {
             name: ForestName::new(name.to_string()).unwrap(),
             created_at: Utc::now(),
             mode,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("foo".to_string()).unwrap(),
                 source: AbsolutePath::new(PathBuf::from("/tmp/foo")).unwrap(),
@@ -299,6 +380,131 @@ mod tests {
         let names: Vec<&str> = forests.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"forest-a"));
         assert!(names.contains(&"forest-b"));
+    }
+
+    #[test]
+    fn discover_forests_rejects_corrupt_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_dir = tmp.path().join("corrupt-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        std::fs::write(forest_dir.join(META_FILENAME), "not valid metadata").unwrap();
+
+        let error = discover_forests_with_dirs(tmp.path())
+            .err()
+            .expect("corrupt metadata should block discovery");
+
+        assert!(error.to_string().contains("could not read forest metadata"));
+        assert!(error.to_string().contains("repair or restore"));
+    }
+
+    #[test]
+    fn discover_forests_rejects_staged_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{}999999", STAGED_META_PREFIX)),
+            "recoverable metadata",
+        )
+        .unwrap();
+
+        let error = discover_forests_with_dirs(tmp.path())
+            .err()
+            .expect("staged metadata should block discovery");
+
+        assert!(error.to_string().contains("found staged forest metadata"));
+        assert!(error
+            .to_string()
+            .contains("previous removal may have been interrupted"));
+    }
+
+    #[test]
+    fn discover_forests_allows_directory_with_staged_metadata_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest_name = format!("{}legitimate", STAGED_META_PREFIX);
+        write_test_meta(
+            &tmp.path().join(&forest_name),
+            &forest_name,
+            ForestMode::Feature,
+        );
+
+        let forests = discover_forests_with_dirs(tmp.path()).unwrap();
+
+        assert_eq!(forests.len(), 1);
+        assert_eq!(forests[0].meta.name.as_str(), forest_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_forests_propagates_inaccessible_worktree_base() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked_parent = tmp.path().join("blocked");
+        let base = blocked_parent.join("worktrees");
+        write_test_meta(&base.join("forest-a"), "forest-a", ForestMode::Feature);
+        let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&base).is_ok() {
+            std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+            return;
+        }
+
+        let result = discover_forests_with_dirs(&base);
+        std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+        let error = result
+            .err()
+            .expect("an inaccessible base should block discovery");
+
+        assert!(error.to_string().contains("could not read worktree base"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_forests_rejects_dangling_worktree_base_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("worktrees");
+        let base = tmp.path().join("worktrees-link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &base).unwrap();
+        std::fs::remove_dir(&target).unwrap();
+
+        let error = discover_forests_with_dirs(&base)
+            .err()
+            .expect("a dangling configured base should block discovery");
+
+        assert!(error.to_string().contains("could not read worktree base"));
+        assert!(error
+            .to_string()
+            .contains("configured path exists but its target may be unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_forests_propagates_inaccessible_symlink_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("worktrees");
+        let blocked_parent = tmp.path().join("blocked");
+        let target = blocked_parent.join("forest-a");
+        std::fs::create_dir_all(&base).unwrap();
+        write_test_meta(&target, "forest-a", ForestMode::Feature);
+        std::os::unix::fs::symlink(&target, base.join("forest-a")).unwrap();
+        let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(base.join("forest-a")).is_ok() {
+            std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+            return;
+        }
+
+        let result = discover_forests_with_dirs(&base);
+        std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+        let error = result
+            .err()
+            .expect("an inaccessible symlink target should block discovery");
+
+        assert!(error
+            .to_string()
+            .contains("could not inspect worktree-base entry"));
     }
 
     #[cfg(unix)]

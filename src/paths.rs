@@ -1,7 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AbsolutePath(PathBuf);
@@ -87,6 +88,105 @@ pub fn expand_tilde(path: &str) -> Result<AbsolutePath> {
 }
 
 // --- String newtypes ---
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DisposableRootEntry(String);
+
+impl DisposableRootEntry {
+    pub fn new(entry: String) -> Result<Self> {
+        let path = Path::new(&entry);
+        let mut components = path.components();
+        let is_one_normal_component =
+            matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+        if entry.is_empty()
+            || entry.contains('/')
+            || entry.contains('\\')
+            || !is_one_normal_component
+        {
+            bail!(
+                "invalid disposable root entry: {:?}\n  hint: use one exact name at the forest root, such as .idea",
+                entry
+            );
+        }
+
+        Ok(Self(entry))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl std::fmt::Display for DisposableRootEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for DisposableRootEntry {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value.to_string())
+    }
+}
+
+impl Serialize for DisposableRootEntry {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DisposableRootEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let entry = String::deserialize(deserializer)?;
+        Self::new(entry).map_err(serde::de::Error::custom)
+    }
+}
+
+pub fn validate_disposable_root_entries<'a>(
+    entries: &[DisposableRootEntry],
+    reserved_entries: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    // Conservatively fold case because the supported macOS/APFS environment is
+    // commonly case-insensitive. Deletion authority must not alias metadata or
+    // a managed repository merely through a different spelling.
+    let reserved: std::collections::HashSet<String> = reserved_entries
+        .into_iter()
+        .map(forest_root_entry_comparison_key)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+
+    for entry in entries {
+        let comparison_key = forest_root_entry_comparison_key(entry.as_str());
+        ensure!(
+            seen.insert(comparison_key.clone()),
+            "duplicate disposable root entry: {}",
+            entry
+        );
+        ensure!(
+            !reserved.contains(&comparison_key),
+            "disposable root entry {} is reserved\n  hint: choose an incidental root entry that is not forest metadata or a managed repository",
+            entry
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn forest_root_entry_comparison_key(entry: &str) -> String {
+    entry.to_lowercase()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoName(String);
@@ -316,6 +416,60 @@ mod tests {
         assert_eq!(
             *forest_dir(&base, &name),
             *PathBuf::from("/tmp/worktrees/java-84-refactor-auth")
+        );
+    }
+
+    // --- DisposableRootEntry tests ---
+
+    #[test]
+    fn disposable_root_entry_accepts_exact_root_names() {
+        for value in [".idea", ".claude", ".DS_Store", "scratch"] {
+            let entry = DisposableRootEntry::new(value.to_string()).unwrap();
+            assert_eq!(entry.as_str(), value);
+            assert_eq!(entry.as_path(), Path::new(value));
+        }
+    }
+
+    #[test]
+    fn disposable_root_entry_rejects_paths_and_special_components() {
+        for value in [
+            "",
+            ".",
+            "..",
+            "/tmp/cache",
+            ".claude/cache",
+            r".claude\cache",
+        ] {
+            assert!(
+                DisposableRootEntry::new(value.to_string()).is_err(),
+                "disposable root entry should reject {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disposable_root_entry_serde_round_trip() {
+        let entry = DisposableRootEntry::new(".idea".to_string()).unwrap();
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: DisposableRootEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, deserialized);
+    }
+
+    #[test]
+    fn disposable_root_entry_set_rejects_duplicates_and_reserved_entries() {
+        let duplicate = vec![
+            DisposableRootEntry::new(".idea".to_string()).unwrap(),
+            DisposableRootEntry::new(".IDEA".to_string()).unwrap(),
+        ];
+        assert!(validate_disposable_root_entries(&duplicate, [".forest-meta.toml"]).is_err());
+
+        let metadata_alias =
+            vec![DisposableRootEntry::new(".FOREST-META.TOML".to_string()).unwrap()];
+        assert!(validate_disposable_root_entries(&metadata_alias, [".forest-meta.toml"]).is_err());
+
+        let reserved = vec![DisposableRootEntry::new("REPO-A".to_string()).unwrap()];
+        assert!(
+            validate_disposable_root_entries(&reserved, [".forest-meta.toml", "repo-a"]).is_err()
         );
     }
 

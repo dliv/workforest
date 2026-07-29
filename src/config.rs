@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::channel;
-use crate::paths::{expand_tilde, AbsolutePath, RepoName};
+use crate::meta::META_FILENAME;
+use crate::paths::{
+    expand_tilde, validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
+};
 
 // --- Raw deserialization structs (TOML shape) ---
 
@@ -31,6 +34,8 @@ pub struct TemplateConfig {
     pub worktree_base: PathBuf,
     pub base_branch: String,
     pub feature_branch_template: String,
+    #[serde(default)]
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repos: Vec<RepoConfig>,
 }
 
@@ -67,6 +72,7 @@ pub struct ResolvedTemplate {
     pub worktree_base: AbsolutePath,
     pub base_branch: String,
     pub feature_branch_template: String,
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repos: Vec<ResolvedRepo>,
 }
 
@@ -250,10 +256,17 @@ pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
             });
         }
 
+        validate_disposable_root_entries(
+            &tmpl_config.disposable_root_entries,
+            std::iter::once(META_FILENAME).chain(repos.iter().map(|repo| repo.name.as_str())),
+        )
+        .with_context(|| format!("template {:?}: invalid disposable root entries", tmpl_name))?;
+
         let resolved_tmpl = ResolvedTemplate {
             worktree_base,
             base_branch: tmpl_config.base_branch.clone(),
             feature_branch_template: tmpl_config.feature_branch_template.clone(),
+            disposable_root_entries: tmpl_config.disposable_root_entries.clone(),
             repos,
         };
 
@@ -376,6 +389,7 @@ pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
                         worktree_base: tmpl.worktree_base.clone().into_inner(),
                         base_branch: tmpl.base_branch.clone(),
                         feature_branch_template: tmpl.feature_branch_template.clone(),
+                        disposable_root_entries: tmpl.disposable_root_entries.clone(),
                         repos: tmpl
                             .repos
                             .iter()
@@ -410,20 +424,21 @@ mod tests {
     #[test]
     fn parse_full_config() {
         let toml = r#"
-default_template = "opencop"
+default_template = "project_a"
 
-[template.opencop]
+[template.project_a]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
+disposable_root_entries = [".idea", ".claude"]
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo-api"
 name = "foo-api"
 base_branch = "dev"
 remote = "upstream"
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo-web"
 name = "foo-web"
 "#;
@@ -431,7 +446,14 @@ name = "foo-web"
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(*tmpl.worktree_base, *PathBuf::from("/tmp/worktrees"));
         assert_eq!(tmpl.base_branch, "dev");
-        assert_eq!(tmpl.feature_branch_template, "dliv/{name}");
+        assert_eq!(tmpl.feature_branch_template, "user/{name}");
+        assert_eq!(
+            tmpl.disposable_root_entries
+                .iter()
+                .map(DisposableRootEntry::as_str)
+                .collect::<Vec<_>>(),
+            vec![".idea", ".claude"]
+        );
         assert_eq!(tmpl.repos.len(), 2);
         assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
         assert_eq!(tmpl.repos[0].remote, "upstream");
@@ -447,7 +469,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
@@ -457,6 +479,74 @@ path = "/tmp/src/foo-api"
         assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
         assert_eq!(tmpl.repos[0].base_branch, "dev");
         assert_eq!(tmpl.repos[0].remote, "origin");
+        assert!(tmpl.disposable_root_entries.is_empty());
+    }
+
+    #[test]
+    fn disposable_root_entries_reject_nested_reserved_and_duplicate_values() {
+        for entries in [
+            r#"[".claude/cache"]"#,
+            r#"[".forest-meta.toml"]"#,
+            r#"[".FOREST-META.TOML"]"#,
+            r#"["foo-api"]"#,
+            r#"["FOO-API"]"#,
+            r#"[".idea", ".IDEA"]"#,
+        ] {
+            let toml = format!(
+                r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "user/{{name}}"
+disposable_root_entries = {entries}
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#
+            );
+
+            assert!(
+                parse_config(&toml).is_err(),
+                "expected disposable root entries to be rejected: {entries}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_config_round_trips_disposable_root_entries() {
+        let parsed = parse_config(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "main"
+feature_branch_template = "user/{name}"
+disposable_root_entries = [".idea", ".claude"]
+
+[[template.default.repos]]
+path = "/tmp/src/repo-a"
+"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+
+        write_config_atomic(&path, &parsed).unwrap();
+        let reparsed = load_config(&path).unwrap();
+
+        assert_eq!(
+            reparsed
+                .resolve_template(None)
+                .unwrap()
+                .disposable_root_entries,
+            parsed
+                .resolve_template(None)
+                .unwrap()
+                .disposable_root_entries
+        );
     }
 
     #[test]
@@ -468,7 +558,7 @@ default_template = "default"
 [template.default]
 worktree_base = "~/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo"
@@ -487,7 +577,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "~/src/foo-api"
@@ -508,7 +598,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/my-cool-repo"
@@ -526,7 +616,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "develop"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo"
@@ -549,7 +639,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo"
@@ -567,7 +657,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo"
@@ -605,7 +695,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/feature"
+feature_branch_template = "user/feature"
 
 [[template.default.repos]]
 path = "/tmp/src/foo"
@@ -623,104 +713,104 @@ path = "/tmp/src/foo"
     #[test]
     fn parse_multi_template_config() {
         let toml = r#"
-default_template = "opencop"
+default_template = "project_a"
 
-[template.opencop]
-worktree_base = "/tmp/worktrees/opencop"
+[template.project_a]
+worktree_base = "/tmp/worktrees/project_a"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.opencop.repos]]
-path = "/tmp/src/opencop-java"
+[[template.project_a.repos]]
+path = "/tmp/src/project_a-java"
 
-[[template.opencop.repos]]
-path = "/tmp/src/opencop-web"
+[[template.project_a.repos]]
+path = "/tmp/src/project_a-web"
 base_branch = "main"
 
-[template.acme]
-worktree_base = "/tmp/worktrees/acme"
+[template.project_b]
+worktree_base = "/tmp/worktrees/project_b"
 base_branch = "main"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.acme.repos]]
-path = "/tmp/src/acme-api"
+[[template.project_b.repos]]
+path = "/tmp/src/project_b-api"
 "#;
         let config = parse_config(toml).unwrap();
         assert_eq!(config.templates.len(), 2);
 
-        let opencop = config.resolve_template(Some("opencop")).unwrap();
-        assert_eq!(opencop.repos.len(), 2);
-        assert_eq!(opencop.repos[0].base_branch, "dev");
-        assert_eq!(opencop.repos[1].base_branch, "main");
+        let project_a = config.resolve_template(Some("project_a")).unwrap();
+        assert_eq!(project_a.repos.len(), 2);
+        assert_eq!(project_a.repos[0].base_branch, "dev");
+        assert_eq!(project_a.repos[1].base_branch, "main");
 
-        let acme = config.resolve_template(Some("acme")).unwrap();
-        assert_eq!(acme.repos.len(), 1);
-        assert_eq!(acme.base_branch, "main");
+        let project_b = config.resolve_template(Some("project_b")).unwrap();
+        assert_eq!(project_b.repos.len(), 1);
+        assert_eq!(project_b.base_branch, "main");
     }
 
     #[test]
     fn parse_multi_template_default_resolution() {
         let toml = r#"
-default_template = "opencop"
+default_template = "project_a"
 
-[template.opencop]
+[template.project_a]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo"
 
-[template.acme]
-worktree_base = "/tmp/worktrees/acme"
+[template.project_b]
+worktree_base = "/tmp/worktrees/project_b"
 base_branch = "main"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.acme.repos]]
+[[template.project_b.repos]]
 path = "/tmp/src/bar"
 "#;
         let config = parse_config(toml).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(tmpl.base_branch, "dev"); // opencop is the default
+        assert_eq!(tmpl.base_branch, "dev"); // project_a is the default
     }
 
     #[test]
     fn parse_multi_template_explicit_resolution() {
         let toml = r#"
-default_template = "opencop"
+default_template = "project_a"
 
-[template.opencop]
+[template.project_a]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo"
 
-[template.acme]
-worktree_base = "/tmp/worktrees/acme"
+[template.project_b]
+worktree_base = "/tmp/worktrees/project_b"
 base_branch = "main"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.acme.repos]]
+[[template.project_b.repos]]
 path = "/tmp/src/bar"
 "#;
         let config = parse_config(toml).unwrap();
-        let tmpl = config.resolve_template(Some("acme")).unwrap();
+        let tmpl = config.resolve_template(Some("project_b")).unwrap();
         assert_eq!(tmpl.base_branch, "main");
     }
 
     #[test]
     fn parse_multi_template_unknown_template_errors() {
         let toml = r#"
-default_template = "opencop"
+default_template = "project_a"
 
-[template.opencop]
+[template.project_a]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo"
 "#;
         let config = parse_config(toml).unwrap();
@@ -728,7 +818,7 @@ path = "/tmp/src/foo"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"), "error: {}", err);
-        assert!(err.contains("opencop"), "should list available: {}", err);
+        assert!(err.contains("project_a"), "should list available: {}", err);
     }
 
     #[test]
@@ -751,12 +841,12 @@ path = "/tmp/src/foo"
         let toml = r#"
 default_template = "nonexistent"
 
-[template.opencop]
+[template.project_a]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
-[[template.opencop.repos]]
+[[template.project_a.repos]]
 path = "/tmp/src/foo"
 "#;
         let result = parse_config(toml);
@@ -764,7 +854,7 @@ path = "/tmp/src/foo"
         let err = result.unwrap_err().to_string();
         assert!(err.contains("default_template"), "error: {}", err);
         assert!(err.contains("nonexistent"), "error: {}", err);
-        assert!(err.contains("opencop"), "should list available: {}", err);
+        assert!(err.contains("project_a"), "should list available: {}", err);
     }
 
     #[test]
@@ -777,7 +867,7 @@ default_template = ""
 [template.""]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template."".repos]]
 path = "/tmp/src/foo"
@@ -796,6 +886,7 @@ path = "/tmp/src/foo"
                 worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
+                disposable_root_entries: vec![],
                 repos: vec![],
             },
         );
@@ -805,6 +896,7 @@ path = "/tmp/src/foo"
                 worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
+                disposable_root_entries: vec![],
                 repos: vec![],
             },
         );
@@ -826,6 +918,7 @@ path = "/tmp/src/foo"
                 worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees/a")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
+                disposable_root_entries: vec![],
                 repos: vec![],
             },
         );
@@ -835,6 +928,7 @@ path = "/tmp/src/foo"
                 worktree_base: AbsolutePath::new(PathBuf::from("/tmp/worktrees/b")).unwrap(),
                 base_branch: "main".to_string(),
                 feature_branch_template: "test/{name}".to_string(),
+                disposable_root_entries: vec![],
                 repos: vec![],
             },
         );
@@ -855,7 +949,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 repos = []
 "#;
         let result = parse_config(toml);
@@ -893,7 +987,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
@@ -913,7 +1007,7 @@ enabled = false
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
@@ -933,7 +1027,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
-feature_branch_template = "dliv/{name}"
+feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"

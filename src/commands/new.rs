@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use crate::config::ResolvedTemplate;
 use crate::git::ref_exists;
 use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-use crate::paths::{forest_dir, AbsolutePath, BranchName, ForestName, RepoName};
+use crate::paths::{
+    forest_dir, AbsolutePath, BranchName, DisposableRootEntry, ForestName, RepoName,
+};
 
 pub struct NewInputs {
     pub name: String,
@@ -22,6 +24,7 @@ pub struct ForestPlan {
     pub forest_name: ForestName,
     pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repo_plans: Vec<RepoPlan>,
 }
 
@@ -53,6 +56,7 @@ pub struct NewResult {
     pub forest_dir: AbsolutePath,
     pub mode: ForestMode,
     pub dry_run: bool,
+    pub disposable_root_entries: Vec<DisposableRootEntry>,
     pub repos: Vec<NewRepoResult>,
 }
 
@@ -248,6 +252,7 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
         forest_name,
         forest_dir: fdir,
         mode: inputs.mode.clone(),
+        disposable_root_entries: tmpl.disposable_root_entries.clone(),
         repo_plans,
     })
 }
@@ -279,6 +284,7 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
         forest_dir: plan.forest_dir.clone(),
         mode: plan.mode.clone(),
         dry_run,
+        disposable_root_entries: plan.disposable_root_entries.clone(),
         repos,
     }
 }
@@ -294,6 +300,7 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
         name: plan.forest_name.clone(),
         created_at: Utc::now(),
         mode: plan.mode.clone(),
+        disposable_root_entries: plan.disposable_root_entries.clone(),
         repos: vec![],
     };
     // RepoMeta.branch is String, not BranchName, so we use to_string() below
@@ -407,6 +414,17 @@ pub fn format_new_human(result: &NewResult) -> String {
         result.mode
     ));
     lines.push(format!("  {}", result.forest_dir.display()));
+    if !result.disposable_root_entries.is_empty() {
+        lines.push(format!(
+            "  Disposable root entries: {}",
+            result
+                .disposable_root_entries
+                .iter()
+                .map(DisposableRootEntry::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     lines.push(String::new());
 
     for repo in &result.repos {
@@ -578,6 +596,7 @@ mod tests {
             worktree_base: env.worktree_base(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![],
         };
 
@@ -597,6 +616,7 @@ mod tests {
             worktree_base: env.worktree_base(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![crate::config::ResolvedRepo {
                 path: AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap(),
                 name: RepoName::new("missing".to_string()).unwrap(),
@@ -908,17 +928,20 @@ mod tests {
     fn execute_meta_matches_plan() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
-        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+        let mut tmpl = make_template_with_repos(&env, &["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
 
         let inputs = make_new_inputs("meta-test", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
-        execute_plan(&plan).unwrap();
+        let result = execute_plan(&plan).unwrap();
 
         let meta_path = plan.forest_dir.join(META_FILENAME);
         let meta = ForestMeta::read(&meta_path).unwrap();
 
         assert_eq!(meta.name.as_str(), "meta-test");
         assert_eq!(meta.mode, ForestMode::Feature);
+        assert_eq!(meta.disposable_root_entries, tmpl.disposable_root_entries);
+        assert_eq!(result.disposable_root_entries, tmpl.disposable_root_entries);
         assert_eq!(meta.repos.len(), 1);
         assert_eq!(meta.repos[0].name.as_str(), "foo-api");
         assert_eq!(meta.repos[0].branch, "testuser/meta-test");
@@ -1083,6 +1106,7 @@ mod tests {
             worktree_base: env.worktree_base(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos: vec![ResolvedRepo {
                 path: env.repo_path("beta-api"),
                 name: RepoName::new("beta-api".to_string()).unwrap(),

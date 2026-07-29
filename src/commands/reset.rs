@@ -59,6 +59,7 @@ struct ForestInfo {
     name: String,
     path: PathBuf,
     repos: Vec<RepoRmPlan>,
+    root_rejection: Option<String>,
 }
 
 struct ResetPlan {
@@ -69,6 +70,7 @@ struct ResetPlan {
     config_only: bool,
     forests: Vec<ForestInfo>,
     warnings: Vec<String>,
+    discovery_errors: Vec<String>,
 }
 
 fn plan_reset(config_only: bool) -> Result<ResetPlan> {
@@ -80,6 +82,7 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
 
     let mut forests = Vec::new();
     let mut warnings = Vec::new();
+    let mut discovery_errors = Vec::new();
 
     if !config_only && config_exists {
         match crate::config::load_config(&config_path) {
@@ -92,8 +95,8 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                             discovered_forests.append(&mut discovered);
                         }
                         Err(e) => {
-                            warnings.push(format!(
-                                "could not scan worktree base {}: {}",
+                            discovery_errors.push(format!(
+                                "could not safely scan worktree base {}: {}\n  hint: config and state will be preserved until forest recovery is complete",
                                 base.display(),
                                 e
                             ));
@@ -108,6 +111,7 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                     forests.push(ForestInfo {
                         name,
                         path: forest_path,
+                        root_rejection: rm_plan.root_rejection().map(str::to_string),
                         repos: rm_plan.repo_plans,
                     });
                 }
@@ -133,13 +137,14 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
         config_only,
         forests,
         warnings,
+        discovery_errors,
     })
 }
 
 // --- Execution (impure) ---
 
 fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) -> ResetResult {
-    let mut errors = Vec::new();
+    let mut errors = plan.discovery_errors.clone();
     let mut forest_entries = Vec::new();
 
     // Remove forests first (while config still exists for reference)
@@ -154,16 +159,24 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         // with `git forest rm --force` or inspect the remaining state.
         let mut repos = Vec::new();
         let forest_error_start = errors.len();
-        for repo in &forest.repos {
-            assert!(
-                repo.worktree_path.starts_with(&forest.path),
-                "worktree dir {:?} is not inside forest dir {:?}",
-                repo.worktree_path,
-                forest.path
-            );
-            let (worktree_removed, wt_succeeded) = remove_reset_worktree(repo, &mut errors);
-            let branch_deleted = rm::delete_branch(repo, false, wt_succeeded, &mut errors);
-            repos.push(repo_reset_entry(repo, worktree_removed, branch_deleted));
+        if let Some(error) = forest
+            .root_rejection
+            .clone()
+            .or_else(|| rm::current_forest_root_safety_error(path))
+        {
+            errors.push(error);
+        } else {
+            for repo in &forest.repos {
+                assert!(
+                    repo.worktree_path.starts_with(&forest.path),
+                    "worktree dir {:?} is not inside forest dir {:?}",
+                    repo.worktree_path,
+                    forest.path
+                );
+                let (worktree_removed, wt_succeeded) = remove_reset_worktree(repo, &mut errors);
+                let branch_deleted = rm::delete_branch(repo, false, wt_succeeded, &mut errors);
+                repos.push(repo_reset_entry(repo, worktree_removed, branch_deleted));
+            }
         }
 
         let entry = if errors.len() > forest_error_start || !path.exists() {
@@ -173,22 +186,28 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
                 removed: false,
                 repos,
             }
+        } else if let Some(error) = rm::current_forest_root_safety_error(path) {
+            errors.push(error);
+            ForestResetEntry {
+                name: name.clone(),
+                path: path.clone(),
+                removed: false,
+                repos,
+            }
         } else {
-            match std::fs::remove_dir_all(path) {
-                Ok(()) => ForestResetEntry {
+            if rm::remove_forest_dir_recursively_preserving_meta(path, &mut errors) {
+                ForestResetEntry {
                     name: name.clone(),
                     path: path.clone(),
                     removed: true,
                     repos,
-                },
-                Err(e) => {
-                    errors.push(format!("failed to remove forest {}: {}", name, e));
-                    ForestResetEntry {
-                        name: name.clone(),
-                        path: path.clone(),
-                        removed: false,
-                        repos,
-                    }
+                }
+            } else {
+                ForestResetEntry {
+                    name: name.clone(),
+                    path: path.clone(),
+                    removed: false,
+                    repos,
                 }
             }
         };
@@ -359,23 +378,31 @@ fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>)
 // --- Orchestrator ---
 
 fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
-    let mut errors = Vec::new();
+    let mut errors = plan.discovery_errors.clone();
     let forests: Vec<ForestResetEntry> = plan
         .forests
         .iter()
         .map(|f| {
             let forest_error_start = errors.len();
-            let repos = f
-                .repos
-                .iter()
-                .map(|repo| {
-                    let (worktree_removed, wt_succeeded) =
-                        plan_reset_worktree_outcome(repo, &mut errors);
-                    let branch_deleted =
-                        rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
-                    repo_reset_entry(repo, worktree_removed, branch_deleted)
-                })
-                .collect();
+            let repos = if let Some(error) = f
+                .root_rejection
+                .clone()
+                .or_else(|| rm::current_forest_root_safety_error(&f.path))
+            {
+                errors.push(error);
+                vec![]
+            } else {
+                f.repos
+                    .iter()
+                    .map(|repo| {
+                        let (worktree_removed, wt_succeeded) =
+                            plan_reset_worktree_outcome(repo, &mut errors);
+                        let branch_deleted =
+                            rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
+                        repo_reset_entry(repo, worktree_removed, branch_deleted)
+                    })
+                    .collect()
+            };
             ForestResetEntry {
                 name: f.name.clone(),
                 path: f.path.clone(),
@@ -1093,6 +1120,7 @@ path = "/tmp/nonexistent-repo"
             name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
             repos: vec![],
         };
         meta.write(&forest_dir.join(crate::meta::META_FILENAME))
@@ -1125,6 +1153,272 @@ path = "/tmp/nonexistent-repo"
         assert!(result.errors.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_preserves_metadata_when_parent_prevents_final_directory_removal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config").join(channel::APP_NAME);
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let forest_dir = worktree_base.join("recoverable-reset");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("recoverable-reset".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        let meta_path = forest_dir.join(crate::meta::META_FILENAME);
+        meta.write(&meta_path).unwrap();
+        std::fs::write(forest_dir.join("residue.txt"), "discard during reset").unwrap();
+
+        let config_content = format!(
+            r#"
+default_template = "default"
+
+[template.default]
+worktree_base = "{}"
+base_branch = "main"
+feature_branch_template = "test/{{name}}"
+
+[[template.default.repos]]
+path = "/tmp/nonexistent-repo"
+"#,
+            worktree_base.display()
+        );
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(&config_path, &config_content).unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let original_permissions = std::fs::metadata(&worktree_base).unwrap().permissions();
+        std::fs::set_permissions(&worktree_base, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let permission_probe = worktree_base.join("permission-probe");
+        if std::fs::write(&permission_probe, "probe").is_ok() {
+            std::fs::set_permissions(&worktree_base, original_permissions).unwrap();
+            std::fs::remove_file(permission_probe).unwrap();
+            return;
+        }
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        std::fs::set_permissions(&worktree_base, original_permissions).unwrap();
+
+        assert!(!result.forests[0].removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("failed to stage forest metadata")));
+        assert!(meta_path.exists());
+        assert!(forest_dir.join("residue.txt").exists());
+        assert!(config_path.exists());
+
+        let retry = cmd_reset(false, false, true, None).unwrap();
+        assert_eq!(retry.forests.len(), 1);
+        assert_eq!(retry.forests[0].path, forest_dir);
+    }
+
+    #[test]
+    #[serial]
+    fn reset_corrupt_metadata_blocks_config_and_state_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+        let forest_dir = worktree_base.join("corrupt-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        std::fs::write(
+            forest_dir.join(crate::meta::META_FILENAME),
+            "not valid metadata",
+        )
+        .unwrap();
+        write_reset_config(
+            tmp.path(),
+            &worktree_base,
+            Path::new("/tmp/nonexistent-repo"),
+            "repo-a",
+        );
+        let config_path = tmp
+            .path()
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let state_path = tmp
+            .path()
+            .join("state")
+            .join(channel::APP_NAME)
+            .join("state.toml");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "").unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+
+        assert!(!dry_run.config_file.deleted);
+        assert!(!dry_run.state_file.deleted);
+        assert!(dry_run.errors.iter().any(|error| error
+            .contains("could not safely scan worktree base")
+            && error.contains("could not read forest metadata")));
+
+        let actual = cmd_reset(true, false, false, None).unwrap();
+
+        assert!(!actual.config_file.deleted);
+        assert!(!actual.state_file.deleted);
+        assert!(config_path.exists());
+        assert!(state_path.exists());
+        assert!(forest_dir.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn reset_staged_metadata_blocks_config_and_state_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(worktree_base.join("interrupted-forest")).unwrap();
+        let staged_meta = worktree_base.join(format!("{}999999", crate::meta::STAGED_META_PREFIX));
+        std::fs::write(&staged_meta, "recoverable metadata").unwrap();
+        write_reset_config(
+            tmp.path(),
+            &worktree_base,
+            Path::new("/tmp/nonexistent-repo"),
+            "repo-a",
+        );
+        let config_path = tmp
+            .path()
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+
+        assert!(!result.config_file.deleted);
+        assert!(result.errors.iter().any(|error| {
+            error.contains("could not safely scan worktree base")
+                && error.contains("found staged forest metadata")
+        }));
+        assert!(config_path.exists());
+        assert!(staged_meta.exists());
+        assert!(worktree_base.join("interrupted-forest").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_inaccessible_worktree_base_blocks_config_and_state_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked_parent = tmp.path().join("blocked");
+        let worktree_base = blocked_parent.join("worktrees");
+        let forest_dir = worktree_base.join("hidden-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("hidden-forest".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
+            .unwrap();
+        write_reset_config(
+            tmp.path(),
+            &worktree_base,
+            Path::new("/tmp/nonexistent-repo"),
+            "repo-a",
+        );
+        let config_path = tmp
+            .path()
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let state_path = tmp
+            .path()
+            .join("state")
+            .join(channel::APP_NAME)
+            .join("state.toml");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "").unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&worktree_base).is_ok() {
+            std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+            return;
+        }
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+        std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+
+        assert!(!result.config_file.deleted);
+        assert!(!result.state_file.deleted);
+        assert!(result.errors.iter().any(|error| {
+            error.contains("could not safely scan worktree base")
+                && error.contains("could not read worktree base")
+        }));
+        assert!(config_path.exists());
+        assert!(state_path.exists());
+        assert!(forest_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_dangling_worktree_base_symlink_blocks_config_and_state_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_target = tmp.path().join("worktrees");
+        let worktree_base = tmp.path().join("worktrees-link");
+        let forest_dir = worktree_target.join("offline-forest");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("offline-forest".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
+            .unwrap();
+        std::os::unix::fs::symlink(&worktree_target, &worktree_base).unwrap();
+        write_reset_config(
+            tmp.path(),
+            &worktree_base,
+            Path::new("/tmp/nonexistent-repo"),
+            "repo-a",
+        );
+        let config_path = tmp
+            .path()
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let state_path = tmp
+            .path()
+            .join("state")
+            .join(channel::APP_NAME)
+            .join("state.toml");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "").unwrap();
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+        let offline_target = tmp.path().join("worktrees-offline");
+        std::fs::rename(&worktree_target, &offline_target).unwrap();
+
+        let result = cmd_reset(true, false, false, None).unwrap();
+
+        assert!(!result.config_file.deleted);
+        assert!(!result.state_file.deleted);
+        assert!(result.errors.iter().any(|error| {
+            error.contains("could not safely scan worktree base")
+                && error.contains("could not read worktree base")
+        }));
+        assert!(config_path.exists());
+        assert!(state_path.exists());
+        assert!(offline_target.join("offline-forest").exists());
+    }
+
     #[test]
     #[serial]
     fn reset_uses_discovered_forest_directory() {
@@ -1140,6 +1434,7 @@ path = "/tmp/nonexistent-repo"
             name: crate::paths::ForestName::new("metadata-name".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
             repos: vec![],
         };
         meta.write(&forest_dir.join(crate::meta::META_FILENAME))
@@ -1188,6 +1483,7 @@ path = "/tmp/nonexistent-repo"
             name: crate::paths::ForestName::new("dedupe-me".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
             repos: vec![],
         };
         meta.write(&forest_dir.join(crate::meta::META_FILENAME))
@@ -1228,6 +1524,78 @@ path = "/tmp/nonexistent-repo"
         assert!(!forest_dir.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn reset_refuses_symlinked_forest_before_mutation() {
+        use crate::commands::new::{cmd_new, NewInputs};
+        use crate::meta::{ForestMode, META_FILENAME};
+        use crate::testutil::TestEnv;
+
+        let env = TestEnv::new();
+        let repo = env.create_repo_with_remote("repo-reset-symlink");
+        let tmpl = env.default_template(&["repo-reset-symlink"]);
+        cmd_new(
+            NewInputs {
+                name: "reset-symlink".to_string(),
+                mode: ForestMode::Feature,
+                branch_override: None,
+                repo_branches: vec![],
+                no_fetch: true,
+                dry_run: false,
+            },
+            &tmpl,
+        )
+        .unwrap();
+
+        let base = env.worktree_base();
+        let forest_alias = base.join("reset-symlink");
+        let target = env.root().join("relocated-reset-symlink");
+        std::fs::rename(&forest_alias, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &forest_alias).unwrap();
+
+        let tmp_root = base.parent().unwrap();
+        write_reset_config(tmp_root, &base, &repo, "repo-reset-symlink");
+        let config_file = tmp_root
+            .join("config")
+            .join(channel::APP_NAME)
+            .join("config.toml");
+        let state_dir = tmp_root.join("state").join(channel::APP_NAME);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join("state.toml");
+        std::fs::write(&state_file, "").unwrap();
+        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
+        let branch_ref = "refs/heads/testuser/reset-symlink";
+
+        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        assert!(!dry_run.forests[0].removed);
+        assert!(dry_run.forests[0].repos.is_empty());
+        assert!(dry_run
+            .errors
+            .iter()
+            .any(|error| error.contains("forest removal refused") && error.contains("symlink")));
+        assert!(!dry_run.config_file.deleted);
+        assert!(!dry_run.state_file.deleted);
+
+        let actual = cmd_reset(true, false, false, None).unwrap();
+        assert!(!actual.forests[0].removed);
+        assert!(actual.forests[0].repos.is_empty());
+        assert!(actual
+            .errors
+            .iter()
+            .any(|error| error.contains("forest removal refused") && error.contains("symlink")));
+        assert!(forest_alias
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(target.join("repo-reset-symlink").exists());
+        assert!(target.join(META_FILENAME).exists());
+        assert!(crate::git::ref_exists(&repo, branch_ref).unwrap());
+        assert!(config_file.exists());
+        assert!(state_file.exists());
+    }
+
     #[test]
     #[serial]
     fn reset_config_only_leaves_forests() {
@@ -1243,6 +1611,7 @@ path = "/tmp/nonexistent-repo"
             name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
             repos: vec![],
         };
         meta.write(&forest_dir.join(crate::meta::META_FILENAME))
@@ -1568,6 +1937,7 @@ name = "repo-a"
             name: ForestName::new("source-missing".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: ForestMode::Review,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("repo-missing-source".to_string()).unwrap(),
                 source: missing_source,
@@ -1646,6 +2016,7 @@ name = "repo-missing-source"
             name: ForestName::new("source-and-worktree-missing".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: ForestMode::Review,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("repo-missing-both".to_string()).unwrap(),
                 source: missing_source,
@@ -1713,6 +2084,7 @@ name = "repo-missing-both"
             name: ForestName::new("dangling-source-missing".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: ForestMode::Review,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("repo-dangling".to_string()).unwrap(),
                 source: missing_source,
@@ -1775,6 +2147,7 @@ name = "repo-dangling"
             name: ForestName::new("source-present-dangling".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: ForestMode::Review,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("repo-source-present-dangling".to_string()).unwrap(),
                 source: repo.clone(),
@@ -1827,6 +2200,7 @@ name = "repo-dangling"
             name: ForestName::new("source-present-corrupt".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
             mode: ForestMode::Review,
+            disposable_root_entries: vec![],
             repos: vec![RepoMeta {
                 name: RepoName::new("repo-source-present-corrupt".to_string()).unwrap(),
                 source: repo.clone(),

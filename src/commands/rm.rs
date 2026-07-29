@@ -4,15 +4,57 @@ use std::path::{Component, Path, PathBuf};
 
 use super::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
-use crate::meta::{ForestMeta, META_FILENAME};
-use crate::paths::{AbsolutePath, ForestName, RepoName};
+use crate::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
+use crate::paths::{
+    forest_root_entry_comparison_key, validate_disposable_root_entries, AbsolutePath,
+    DisposableRootEntry, ForestName, RepoName,
+};
 
 // --- Types ---
+
+#[derive(Debug, Clone, Default)]
+pub struct RmOptions {
+    pub force: bool,
+    pub dry_run: bool,
+    pub require_utf8_json_paths: bool,
+    pub additional_disposable_root_entries: Vec<DisposableRootEntry>,
+}
+
+impl RmOptions {
+    pub fn new(force: bool, dry_run: bool) -> Self {
+        Self {
+            force,
+            dry_run,
+            require_utf8_json_paths: false,
+            additional_disposable_root_entries: vec![],
+        }
+    }
+}
 
 pub struct RmPlan {
     pub forest_name: ForestName,
     pub forest_dir: PathBuf,
     pub repo_plans: Vec<RepoRmPlan>,
+    root_plan: ForestRootPlan,
+}
+
+enum ForestRootPlan {
+    Missing,
+    Ready {
+        cleanup_actions: Vec<ForestRootCleanupAction>,
+    },
+    Rejected {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForestRootCleanupAction {
+    RemoveDisposableEntry {
+        entry: DisposableRootEntry,
+        path: PathBuf,
+    },
+    RemoveForceEntry(PathBuf),
 }
 
 pub struct RepoRmPlan {
@@ -45,6 +87,7 @@ pub struct RmResult {
     pub dry_run: bool,
     pub force: bool,
     pub repos: Vec<RepoRmResult>,
+    pub forest_root_cleanup: Vec<ForestRootCleanupResult>,
     pub forest_dir_removed: bool,
     pub errors: Vec<String>,
 }
@@ -57,7 +100,21 @@ pub struct RepoRmResult {
     pub branch_deleted: RmOutcome,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForestRootCleanupKind {
+    DisposableEntry,
+    Force,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForestRootCleanupResult {
+    pub path: PathBuf,
+    pub kind: ForestRootCleanupKind,
+    pub removal: RmOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum RmOutcome {
     Success,
@@ -88,51 +145,294 @@ pub enum RmAllProgress<'a> {
 // --- Planning (read-only) ---
 
 pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
-    let repo_plans = meta
-        .repos
-        .iter()
-        .map(|repo| {
-            let worktree_path = forest_dir.join(repo.name.as_str());
-            assert!(
-                worktree_path_is_inside_forest(&worktree_path, forest_dir),
-                "worktree path {:?} is not inside forest dir {:?}",
-                worktree_path,
-                forest_dir
-            );
-            let worktree_exists = path_exists_or_symlink(&worktree_path);
-            let worktree_is_symlink = path_is_symlink(&worktree_path);
-            let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
-            let source_exists = repo.source.is_dir();
-            let detached_head_safety =
-                detached_head_safety(&branch_state, &repo.source, source_exists);
-            let has_dirty_files = worktree_exists
-                && !worktree_is_symlink
-                && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
-                && crate::git::git(&worktree_path, &["status", "--porcelain"])
-                    .map(|output| !output.is_empty())
-                    .unwrap_or(false);
-            RepoRmPlan {
-                name: repo.name.clone(),
-                worktree_path: worktree_path.clone(),
-                source: repo.source.clone(),
-                branch: repo.branch.clone(),
-                base_branch: repo.base_branch.clone(),
-                remote: repo.remote.clone(),
-                branch_created: repo.branch_created,
-                branch_state,
-                detached_head_safety,
-                worktree_exists,
-                source_exists,
-                has_dirty_files,
-            }
-        })
-        .collect();
+    plan_rm_with_options(forest_dir, meta, &RmOptions::default())
+        .expect("validated forest metadata should produce a removal plan")
+}
 
-    RmPlan {
+impl RmPlan {
+    pub(crate) fn root_rejection(&self) -> Option<&str> {
+        match &self.root_plan {
+            ForestRootPlan::Rejected { error } => Some(error),
+            ForestRootPlan::Missing | ForestRootPlan::Ready { .. } => None,
+        }
+    }
+}
+
+fn plan_rm_with_options(
+    forest_dir: &Path,
+    meta: &ForestMeta,
+    options: &RmOptions,
+) -> Result<RmPlan> {
+    if options.force && !options.additional_disposable_root_entries.is_empty() {
+        bail!("--force cannot be combined with --discard-root-entry");
+    }
+
+    let reserved_entries: Vec<&str> = std::iter::once(META_FILENAME)
+        .chain(meta.repos.iter().map(|repo| repo.name.as_str()))
+        .collect();
+    let mut disposable_root_entries: Vec<DisposableRootEntry> = meta
+        .disposable_root_entries
+        .iter()
+        .chain(&options.additional_disposable_root_entries)
+        .cloned()
+        .collect();
+    validate_disposable_root_entries(&disposable_root_entries, reserved_entries.iter().copied())?;
+    disposable_root_entries.sort();
+
+    let root_plan = plan_forest_root(
+        forest_dir,
+        &meta
+            .repos
+            .iter()
+            .map(|repo| repo.name.as_str())
+            .collect::<Vec<_>>(),
+        &disposable_root_entries,
+        options.force,
+        options.require_utf8_json_paths,
+    );
+    validate_json_output_paths(forest_dir, &root_plan, options.require_utf8_json_paths)?;
+
+    let repo_plans = if matches!(root_plan, ForestRootPlan::Rejected { .. }) {
+        vec![]
+    } else {
+        meta.repos
+            .iter()
+            .map(|repo| {
+                let worktree_path = forest_dir.join(repo.name.as_str());
+                assert!(
+                    worktree_path_is_inside_forest(&worktree_path, forest_dir),
+                    "worktree path {:?} is not inside forest dir {:?}",
+                    worktree_path,
+                    forest_dir
+                );
+                let worktree_exists = path_exists_or_symlink(&worktree_path);
+                let worktree_is_symlink = path_is_symlink(&worktree_path);
+                let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
+                let source_exists = repo.source.is_dir();
+                let detached_head_safety =
+                    detached_head_safety(&branch_state, &repo.source, source_exists);
+                let has_dirty_files = worktree_exists
+                    && !worktree_is_symlink
+                    && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
+                    && crate::git::git(&worktree_path, &["status", "--porcelain"])
+                        .map(|output| !output.is_empty())
+                        .unwrap_or(false);
+                RepoRmPlan {
+                    name: repo.name.clone(),
+                    worktree_path,
+                    source: repo.source.clone(),
+                    branch: repo.branch.clone(),
+                    base_branch: repo.base_branch.clone(),
+                    remote: repo.remote.clone(),
+                    branch_created: repo.branch_created,
+                    branch_state,
+                    detached_head_safety,
+                    worktree_exists,
+                    source_exists,
+                    has_dirty_files,
+                }
+            })
+            .collect()
+    };
+
+    Ok(RmPlan {
         forest_name: meta.name.clone(),
         forest_dir: forest_dir.to_path_buf(),
         repo_plans,
+        root_plan,
+    })
+}
+
+fn validate_json_output_paths(
+    forest_dir: &Path,
+    root_plan: &ForestRootPlan,
+    require_utf8_json_paths: bool,
+) -> Result<()> {
+    if !require_utf8_json_paths {
+        return Ok(());
     }
+    if forest_dir.to_str().is_none() {
+        bail!(
+            "--json refuses forest removal because the forest path is not valid UTF-8\n  hint: rename the forest directory or run without --json"
+        );
+    }
+    if let ForestRootPlan::Ready { cleanup_actions } = root_plan {
+        if cleanup_actions
+            .iter()
+            .any(|action| cleanup_action_path(action).to_str().is_none())
+        {
+            bail!(
+                "--json refuses forest removal because a forest-root entry is not valid UTF-8\n  hint: rename that entry or run without --json"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn plan_forest_root(
+    forest_dir: &Path,
+    repo_names: &[&str],
+    disposable_root_entries: &[DisposableRootEntry],
+    force: bool,
+    require_utf8_json_paths: bool,
+) -> ForestRootPlan {
+    let metadata = match std::fs::symlink_metadata(forest_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ForestRootPlan::Missing;
+        }
+        Err(error) => {
+            return ForestRootPlan::Rejected {
+                error: format!(
+                    "forest removal refused: failed to inspect forest root {}: {}",
+                    forest_dir.display(),
+                    error
+                ),
+            };
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        return ForestRootPlan::Rejected {
+            error: format!(
+                "forest removal refused: {} is a symlink\n  hint: inspect and unlink the forest alias manually",
+                forest_dir.display()
+            ),
+        };
+    }
+    if !metadata.is_dir() {
+        return ForestRootPlan::Rejected {
+            error: format!(
+                "forest removal refused: {} is not a directory",
+                forest_dir.display()
+            ),
+        };
+    }
+
+    let entries = match std::fs::read_dir(forest_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return ForestRootPlan::Rejected {
+                error: format!(
+                    "forest removal refused: failed to inspect forest root {}: {}",
+                    forest_dir.display(),
+                    error
+                ),
+            };
+        }
+    };
+    let mut root_entry_names = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                return ForestRootPlan::Rejected {
+                    error: format!(
+                        "forest removal refused: failed to inspect an entry in {}: {}",
+                        forest_dir.display(),
+                        error
+                    ),
+                };
+            }
+        };
+        root_entry_names.push(entry.file_name());
+    }
+    if require_utf8_json_paths && root_entry_names.iter().any(|name| name.to_str().is_none()) {
+        return ForestRootPlan::Rejected {
+            error: "--json refuses forest removal because a forest-root entry is not valid UTF-8\n  hint: rename that entry before retrying the destructive command".to_string(),
+        };
+    }
+
+    let disposable_capacity = if force {
+        0
+    } else {
+        disposable_root_entries.len()
+    };
+    let mut protected_names = Vec::with_capacity(1 + repo_names.len() + disposable_capacity);
+    protected_names.push(META_FILENAME);
+    protected_names.extend(repo_names.iter().copied());
+    if !force {
+        protected_names.extend(disposable_root_entries.iter().map(|entry| entry.as_str()));
+    }
+    for protected_name in protected_names {
+        if root_entry_names
+            .iter()
+            .filter(|name| root_entry_name_matches(name, protected_name))
+            .count()
+            > 1
+        {
+            return ForestRootPlan::Rejected {
+                error: format!(
+                    "forest removal refused: found multiple root entries equivalent to {}\n  hint: inspect and preserve the intended entry before retrying",
+                    protected_name
+                ),
+            };
+        }
+    }
+
+    let mut present_repo_names = Vec::new();
+    for repo_name in repo_names {
+        match std::fs::symlink_metadata(forest_dir.join(repo_name)) {
+            Ok(_) => present_repo_names.push(*repo_name),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return ForestRootPlan::Rejected {
+                    error: format!(
+                        "forest removal refused: failed to inspect managed repository entry {}: {}",
+                        repo_name, error
+                    ),
+                };
+            }
+        }
+    }
+
+    let cleanup_actions = if force {
+        let mut actions = Vec::new();
+        for name in root_entry_names {
+            if root_entry_name_matches(&name, META_FILENAME)
+                || present_repo_names
+                    .iter()
+                    .any(|repo_name| root_entry_name_matches(&name, repo_name))
+            {
+                continue;
+            }
+            actions.push(ForestRootCleanupAction::RemoveForceEntry(PathBuf::from(
+                name,
+            )));
+        }
+        actions.sort_by(|left, right| cleanup_action_path(left).cmp(cleanup_action_path(right)));
+        actions
+    } else {
+        let mut actions = Vec::new();
+        for entry in disposable_root_entries {
+            if let Some(actual_name) = root_entry_names
+                .iter()
+                .find(|name| root_entry_name_matches(name, entry.as_str()))
+            {
+                actions.push(ForestRootCleanupAction::RemoveDisposableEntry {
+                    entry: entry.clone(),
+                    path: PathBuf::from(actual_name),
+                });
+            }
+        }
+        actions
+    };
+
+    ForestRootPlan::Ready { cleanup_actions }
+}
+
+fn cleanup_action_path(action: &ForestRootCleanupAction) -> &Path {
+    match action {
+        ForestRootCleanupAction::RemoveDisposableEntry { path, .. } => path,
+        ForestRootCleanupAction::RemoveForceEntry(path) => path,
+    }
+}
+
+fn root_entry_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
+    name == std::ffi::OsStr::new(expected)
+        || name.to_str().is_some_and(|name| {
+            forest_root_entry_comparison_key(name) == forest_root_entry_comparison_key(expected)
+        })
 }
 
 fn detached_head_safety(
@@ -244,6 +544,10 @@ pub fn execute_rm(
 ) -> RmResult {
     validate_rm_plan_paths(plan);
 
+    if let Some(error) = planned_or_current_root_safety_error(plan) {
+        return rejected_rm_result(plan, false, force, error);
+    }
+
     // Preflight: if not forcing, reject if any repo has dirty files
     if !force {
         let dirty_repos: Vec<&RepoRmPlan> = plan
@@ -304,6 +608,7 @@ pub fn execute_rm(
                 dry_run: false,
                 force,
                 repos,
+                forest_root_cleanup: vec![],
                 forest_dir_removed: false,
                 errors,
             };
@@ -337,9 +642,19 @@ pub fn execute_rm(
         repos.push(result);
     }
 
-    // Defense-in-depth: only remove forest dir if no errors accumulated
+    let mut forest_root_cleanup = Vec::new();
     let forest_dir_removed = if errors.is_empty() {
-        remove_forest_dir(&plan.forest_dir, force, &mut errors)
+        if let Some(error) = current_forest_root_safety_error(&plan.forest_dir) {
+            errors.push(error);
+            false
+        } else {
+            forest_root_cleanup = execute_forest_root_cleanup(plan, &mut errors);
+            if errors.is_empty() {
+                remove_forest_dir(&plan.forest_dir, &mut errors)
+            } else {
+                false
+            }
+        }
     } else {
         // Partial failure (unexpected runtime error) — keep meta for discoverability
         false
@@ -351,9 +666,123 @@ pub fn execute_rm(
         dry_run: false,
         force,
         repos,
+        forest_root_cleanup,
         forest_dir_removed,
         errors,
     }
+}
+
+fn planned_or_current_root_safety_error(plan: &RmPlan) -> Option<String> {
+    match &plan.root_plan {
+        ForestRootPlan::Rejected { error } => Some(error.clone()),
+        ForestRootPlan::Missing | ForestRootPlan::Ready { .. } => {
+            current_forest_root_safety_error(&plan.forest_dir)
+        }
+    }
+}
+
+pub(crate) fn current_forest_root_safety_error(forest_dir: &Path) -> Option<String> {
+    match std::fs::symlink_metadata(forest_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Some(format!(
+            "forest removal refused: {} is a symlink\n  hint: inspect and unlink the forest alias manually",
+            forest_dir.display()
+        )),
+        Ok(metadata) if !metadata.is_dir() => Some(format!(
+            "forest removal refused: {} is not a directory",
+            forest_dir.display()
+        )),
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "forest removal refused: failed to inspect forest root {}: {}",
+            forest_dir.display(),
+            error
+        )),
+    }
+}
+
+fn rejected_rm_result(plan: &RmPlan, dry_run: bool, force: bool, error: String) -> RmResult {
+    RmResult {
+        forest_name: plan.forest_name.clone(),
+        forest_dir: plan.forest_dir.clone(),
+        dry_run,
+        force,
+        repos: vec![],
+        forest_root_cleanup: vec![],
+        forest_dir_removed: false,
+        errors: vec![error],
+    }
+}
+
+fn root_cleanup_results(
+    plan: &RmPlan,
+    mut outcome: impl FnMut(&ForestRootCleanupAction) -> RmOutcome,
+) -> Vec<ForestRootCleanupResult> {
+    let ForestRootPlan::Ready { cleanup_actions } = &plan.root_plan else {
+        return vec![];
+    };
+
+    cleanup_actions
+        .iter()
+        .map(|action| ForestRootCleanupResult {
+            path: cleanup_action_path(action).to_path_buf(),
+            kind: match action {
+                ForestRootCleanupAction::RemoveDisposableEntry { .. } => {
+                    ForestRootCleanupKind::DisposableEntry
+                }
+                ForestRootCleanupAction::RemoveForceEntry(_) => ForestRootCleanupKind::Force,
+            },
+            removal: outcome(action),
+        })
+        .collect()
+}
+
+fn execute_forest_root_cleanup(
+    plan: &RmPlan,
+    errors: &mut Vec<String>,
+) -> Vec<ForestRootCleanupResult> {
+    root_cleanup_results(plan, |action| {
+        let (relative_path, description) = match action {
+            ForestRootCleanupAction::RemoveDisposableEntry { entry, path } => (
+                path.as_path(),
+                format!("disposable root entry {}", entry.as_path().display()),
+            ),
+            ForestRootCleanupAction::RemoveForceEntry(path) => (
+                path.as_path(),
+                format!("force root entry {}", path.display()),
+            ),
+        };
+
+        let path = plan.forest_dir.join(relative_path);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return RmOutcome::Skipped {
+                    reason: "entry already missing".to_string(),
+                };
+            }
+            Err(error) => {
+                let error = format!("failed to inspect {}: {}", description, error);
+                errors.push(error.clone());
+                return RmOutcome::Failed { error };
+            }
+        };
+
+        let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+
+        match result {
+            Ok(()) => RmOutcome::Success,
+            Err(error) => {
+                let error = format!("failed to remove {}: {}", description, error);
+                errors.push(error.clone());
+                RmOutcome::Failed { error }
+            }
+        }
+    })
 }
 
 fn validate_rm_plan_paths(plan: &RmPlan) {
@@ -1032,69 +1461,224 @@ fn base_branch_remote_ref(
     None
 }
 
-fn remove_forest_dir(forest_dir: &std::path::Path, force: bool, errors: &mut Vec<String>) -> bool {
+fn remove_forest_dir(forest_dir: &std::path::Path, errors: &mut Vec<String>) -> bool {
     if !forest_dir.exists() {
         return true;
     }
 
     if path_is_symlink(forest_dir) {
-        if force {
-            return match std::fs::remove_file(forest_dir) {
-                Ok(()) => true,
-                Err(e) => {
-                    errors.push(format!("failed to remove forest directory symlink: {}", e));
-                    false
-                }
-            };
-        }
-
         errors.push(format!(
-            "forest directory not removed: {} is a symlink\n  hint: inspect the symlink target, then re-run with --force to unlink the forest directory symlink",
+            "forest directory not removed: {} is a symlink\n  hint: inspect and unlink the forest alias manually",
             forest_dir.display()
         ));
         return false;
     }
 
-    if force {
-        match std::fs::remove_dir_all(forest_dir) {
-            Ok(()) => true,
-            Err(e) => {
-                errors.push(format!("failed to remove forest directory: {}", e));
-                false
-            }
-        }
-    } else {
-        let meta_path = forest_dir.join(META_FILENAME);
-        if let Some(error) = non_force_forest_dir_cleanup_error(forest_dir, &meta_path) {
+    let metadata_path = match inspect_forest_dir_for_removal(forest_dir) {
+        Ok(metadata_path) => metadata_path,
+        Err(error) => {
             errors.push(error);
             return false;
         }
-
-        if meta_path.exists() {
-            if let Err(e) = std::fs::remove_file(&meta_path) {
-                errors.push(format!("failed to remove meta file: {}", e));
+    };
+    let restore_path = metadata_path
+        .clone()
+        .unwrap_or_else(|| forest_dir.join(META_FILENAME));
+    let staged_meta = match metadata_path {
+        Some(metadata_path) => match stage_forest_meta(forest_dir, &metadata_path) {
+            Ok(staged_meta) => staged_meta,
+            Err(error) => {
+                errors.push(error);
                 return false;
             }
-        }
+        },
+        None => None,
+    };
 
-        match std::fs::remove_dir(forest_dir) {
-            Ok(()) => true,
-            Err(e) => {
-                errors.push(format!(
-                    "forest directory not removed (not empty): {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
-                    e
-                ));
-                false
+    remove_staged_forest_dir(forest_dir, &restore_path, staged_meta, errors)
+}
+
+pub(super) fn remove_forest_dir_recursively_preserving_meta(
+    forest_dir: &Path,
+    errors: &mut Vec<String>,
+) -> bool {
+    if let Some(error) = current_forest_root_safety_error(forest_dir) {
+        errors.push(error);
+        return false;
+    }
+    if !forest_dir.exists() {
+        return true;
+    }
+
+    let inspection = match inspect_forest_dir(forest_dir) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            errors.push(error);
+            return false;
+        }
+    };
+    let Some(metadata_path) = inspection.metadata_path else {
+        errors.push(format!(
+            "forest directory not removed: metadata is missing from {}\n  hint: inspect the directory and restore its metadata before retrying",
+            forest_dir.display()
+        ));
+        return false;
+    };
+    let staged_meta = match stage_forest_meta(forest_dir, &metadata_path) {
+        Ok(staged_meta) => staged_meta,
+        Err(error) => {
+            errors.push(error);
+            return false;
+        }
+    };
+
+    finish_staged_forest_removal(
+        &metadata_path,
+        staged_meta,
+        std::fs::remove_dir_all(forest_dir),
+        errors,
+        |error| {
+            format!(
+                "failed to remove forest directory {}: {}\n  hint: resolve the error and retry reset",
+                forest_dir.display(),
+                error
+            )
+        },
+    )
+}
+
+fn remove_staged_forest_dir(
+    forest_dir: &Path,
+    meta_path: &Path,
+    staged_meta: Option<PathBuf>,
+    errors: &mut Vec<String>,
+) -> bool {
+    finish_staged_forest_removal(
+        meta_path,
+        staged_meta,
+        std::fs::remove_dir(forest_dir),
+        errors,
+        |error| {
+            format!(
+                "forest directory not removed (not empty): {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
+                error
+            )
+        },
+    )
+}
+
+fn finish_staged_forest_removal(
+    meta_path: &Path,
+    staged_meta: Option<PathBuf>,
+    removal: std::io::Result<()>,
+    errors: &mut Vec<String>,
+    removal_error: impl FnOnce(&std::io::Error) -> String,
+) -> bool {
+    match removal {
+        Ok(()) => {
+            if let Some(staged_meta) = staged_meta {
+                if let Err(error) = std::fs::remove_file(&staged_meta) {
+                    errors.push(format!(
+                        "forest directory removed, but failed to remove staged metadata {}: {}",
+                        staged_meta.display(),
+                        error
+                    ));
+                }
             }
+            true
+        }
+        Err(e) => {
+            if let Some(staged_meta) = staged_meta {
+                if let Err(restore_error) = std::fs::rename(&staged_meta, meta_path) {
+                    errors.push(format!(
+                        "failed to restore forest metadata from {} to {}: {}\n  hint: preserve the staged file and restore it before retrying",
+                        staged_meta.display(),
+                        meta_path.display(),
+                        restore_error
+                    ));
+                }
+            }
+            errors.push(removal_error(&e));
+            false
         }
     }
 }
 
-fn non_force_forest_dir_cleanup_error(forest_dir: &Path, meta_path: &Path) -> Option<String> {
+fn stage_forest_meta(
+    forest_dir: &Path,
+    meta_path: &Path,
+) -> std::result::Result<Option<PathBuf>, String> {
+    match std::fs::symlink_metadata(meta_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect forest metadata {}: {}",
+                meta_path.display(),
+                error
+            ));
+        }
+    }
+
+    let parent = forest_dir.parent().ok_or_else(|| {
+        format!(
+            "failed to stage forest metadata: {} has no parent directory",
+            forest_dir.display()
+        )
+    })?;
+    let staged_meta = parent.join(format!("{}{}", STAGED_META_PREFIX, std::process::id()));
+    match std::fs::symlink_metadata(&staged_meta) {
+        Ok(_) => {
+            return Err(format!(
+                "failed to stage forest metadata: temporary path already exists: {}\n  hint: inspect and remove or preserve that stale file before retrying",
+                staged_meta.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect staged metadata path {}: {}",
+                staged_meta.display(),
+                error
+            ));
+        }
+    }
+
+    std::fs::rename(meta_path, &staged_meta).map_err(|error| {
+        format!(
+            "failed to stage forest metadata outside {} before removal: {}\n  hint: ensure the worktree-base parent is writable, then retry",
+            forest_dir.display(),
+            error
+        )
+    })?;
+    Ok(Some(staged_meta))
+}
+
+fn inspect_forest_dir_for_removal(
+    forest_dir: &Path,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let inspection = inspect_forest_dir(forest_dir)?;
+
+    if !inspection.remaining.is_empty() {
+        return Err(format!(
+            "forest directory not removed (not empty): would still contain {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
+            inspection.remaining.join(", ")
+        ));
+    }
+
+    Ok(inspection.metadata_path)
+}
+
+struct ForestDirInspection {
+    metadata_path: Option<PathBuf>,
+    remaining: Vec<String>,
+}
+
+fn inspect_forest_dir(forest_dir: &Path) -> std::result::Result<ForestDirInspection, String> {
     let entries = match std::fs::read_dir(forest_dir) {
         Ok(entries) => entries,
         Err(e) => {
-            return Some(format!(
+            return Err(format!(
                 "forest directory not removed (not empty): failed to inspect {}: {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
                 forest_dir.display(),
                 e
@@ -1103,11 +1687,12 @@ fn non_force_forest_dir_cleanup_error(forest_dir: &Path, meta_path: &Path) -> Op
     };
 
     let mut remaining = Vec::new();
+    let mut metadata_paths = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                return Some(format!(
+                return Err(format!(
                     "forest directory not removed (not empty): failed to inspect an entry in {}: {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
                     forest_dir.display(),
                     e
@@ -1115,28 +1700,36 @@ fn non_force_forest_dir_cleanup_error(forest_dir: &Path, meta_path: &Path) -> Op
             }
         };
 
-        if entry.path() == meta_path {
+        if root_entry_name_matches(&entry.file_name(), META_FILENAME) {
+            metadata_paths.push(entry.path());
             continue;
         }
 
         remaining.push(entry.file_name().to_string_lossy().into_owned());
     }
 
-    if remaining.is_empty() {
-        None
-    } else {
-        remaining.sort();
-        Some(format!(
-            "forest directory not removed (not empty): would still contain {}\n  hint: resolve errors above, then rm the directory manually or re-run with --force",
-            remaining.join(", ")
-        ))
+    if metadata_paths.len() > 1 {
+        return Err(format!(
+            "forest directory not removed: found multiple entries equivalent to {}\n  hint: inspect and preserve the real forest metadata before retrying",
+            META_FILENAME
+        ));
     }
+
+    remaining.sort();
+    Ok(ForestDirInspection {
+        metadata_path: metadata_paths.pop(),
+        remaining,
+    })
 }
 
 // --- Orchestrator ---
 
 fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
     validate_rm_plan_paths(plan);
+
+    if let Some(error) = planned_or_current_root_safety_error(plan) {
+        return rejected_rm_result(plan, true, force, error);
+    }
 
     let has_dirty = !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
 
@@ -1221,7 +1814,9 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         );
     }
 
+    let mut forest_root_cleanup = Vec::new();
     if errors.is_empty() {
+        forest_root_cleanup = root_cleanup_results(plan, |_| RmOutcome::Success);
         if let Some(msg) = forest_dir_dry_run_cleanup_error(plan, &repos, force) {
             errors.push(msg);
         }
@@ -1235,6 +1830,7 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         dry_run: true,
         force,
         repos,
+        forest_root_cleanup,
         forest_dir_removed,
         errors,
     }
@@ -1314,13 +1910,25 @@ fn forest_dir_dry_run_cleanup_error(
         ));
     }
 
-    let removable_repo_names: std::collections::BTreeSet<&str> = repos
+    let removable_repo_names: std::collections::BTreeSet<String> = repos
         .iter()
         .filter_map(|repo| match &repo.worktree_removed {
-            RmOutcome::Success => Some(repo.name.as_str()),
+            RmOutcome::Success => Some(forest_root_entry_comparison_key(repo.name.as_str())),
             RmOutcome::Skipped { .. } | RmOutcome::Failed { .. } => None,
         })
         .collect();
+    let disposable_entry_paths: std::collections::BTreeSet<PathBuf> = match &plan.root_plan {
+        ForestRootPlan::Ready { cleanup_actions } => cleanup_actions
+            .iter()
+            .filter_map(|action| match action {
+                ForestRootCleanupAction::RemoveDisposableEntry { path, .. } => Some(path.clone()),
+                ForestRootCleanupAction::RemoveForceEntry(_) => None,
+            })
+            .collect(),
+        ForestRootPlan::Missing | ForestRootPlan::Rejected { .. } => {
+            std::collections::BTreeSet::new()
+        }
+    };
 
     let entries = match std::fs::read_dir(&plan.forest_dir) {
         Ok(entries) => entries,
@@ -1342,11 +1950,18 @@ fn forest_dir_dry_run_cleanup_error(
             ));
         };
         let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name == META_FILENAME || removable_repo_names.contains(file_name.as_ref()) {
+        let comparison_key = file_name.to_str().map(forest_root_entry_comparison_key);
+        if disposable_entry_paths.contains(&PathBuf::from(&file_name)) {
             continue;
         }
-        remaining.push(file_name.into_owned());
+        if root_entry_name_matches(&file_name, META_FILENAME)
+            || comparison_key
+                .as_ref()
+                .is_some_and(|key| removable_repo_names.contains(key))
+        {
+            continue;
+        }
+        remaining.push(file_name.to_string_lossy().into_owned());
     }
 
     if remaining.is_empty() {
@@ -1360,6 +1975,7 @@ fn forest_dir_dry_run_cleanup_error(
     }
 }
 
+#[cfg(test)]
 pub fn cmd_rm(
     forest_dir: &std::path::Path,
     meta: &ForestMeta,
@@ -1367,13 +1983,27 @@ pub fn cmd_rm(
     dry_run: bool,
     on_progress: Option<&dyn Fn(RmProgress)>,
 ) -> Result<RmResult> {
-    let plan = plan_rm(forest_dir, meta);
+    cmd_rm_with_options(
+        forest_dir,
+        meta,
+        RmOptions::new(force, dry_run),
+        on_progress,
+    )
+}
 
-    if dry_run {
-        return Ok(plan_to_dry_run_result(&plan, force));
+pub fn cmd_rm_with_options(
+    forest_dir: &Path,
+    meta: &ForestMeta,
+    options: RmOptions,
+    on_progress: Option<&dyn Fn(RmProgress)>,
+) -> Result<RmResult> {
+    let plan = plan_rm_with_options(forest_dir, meta, &options)?;
+
+    if options.dry_run {
+        return Ok(plan_to_dry_run_result(&plan, options.force));
     }
 
-    Ok(execute_rm(&plan, force, on_progress))
+    Ok(execute_rm(&plan, options.force, on_progress))
 }
 
 fn format_branch_state_warning_suffix(branch_state: &WorktreeBranchState) -> String {
@@ -1390,10 +2020,17 @@ pub fn format_rm_human(result: &RmResult) -> String {
     if result.dry_run {
         lines.push("Dry run — no changes will be made.".to_string());
         lines.push(String::new());
-        lines.push(format!(
-            "Would remove forest {:?}",
-            result.forest_name.as_str()
-        ));
+        if result.errors.is_empty() && result.forest_dir_removed {
+            lines.push(format!(
+                "Would remove forest {:?}",
+                result.forest_name.as_str()
+            ));
+        } else {
+            lines.push(format!(
+                "Removal blocked for forest {:?}",
+                result.forest_name.as_str()
+            ));
+        }
     } else if result.errors.is_empty() {
         lines.push(format!("Removed forest {:?}", result.forest_name.as_str()));
     } else {
@@ -1442,6 +2079,8 @@ pub fn format_rm_human(result: &RmResult) -> String {
             format_branch_state_warning_suffix(&repo.branch_state)
         ));
     }
+
+    lines.extend(format_forest_root_cleanup(result));
 
     if result.dry_run {
         if result.forest_dir_removed {
@@ -1496,6 +2135,8 @@ pub fn format_repo_done(repo: &RepoRmResult) -> String {
 pub fn format_rm_summary(result: &RmResult) -> String {
     let mut lines = Vec::new();
 
+    lines.extend(format_forest_root_cleanup(result));
+
     if result.forest_dir_removed {
         lines.push("Forest directory removed.".to_string());
     } else {
@@ -1511,6 +2152,33 @@ pub fn format_rm_summary(result: &RmResult) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_forest_root_cleanup(result: &RmResult) -> Vec<String> {
+    result
+        .forest_root_cleanup
+        .iter()
+        .map(|cleanup| {
+            let action = match (&cleanup.kind, &cleanup.removal, result.dry_run) {
+                (ForestRootCleanupKind::DisposableEntry, RmOutcome::Success, true) => {
+                    "Would discard forest-root entry"
+                }
+                (ForestRootCleanupKind::DisposableEntry, RmOutcome::Success, false) => {
+                    "Discarded forest-root entry"
+                }
+                (ForestRootCleanupKind::Force, RmOutcome::Success, true) => {
+                    "Would force-remove forest-root entry"
+                }
+                (ForestRootCleanupKind::Force, RmOutcome::Success, false) => {
+                    "Force-removed forest-root entry"
+                }
+                (_, RmOutcome::Skipped { .. }, true) => "Would skip missing forest-root entry",
+                (_, RmOutcome::Skipped { .. }, false) => "Skipped forest-root entry",
+                (_, RmOutcome::Failed { .. }, _) => "Failed to remove forest-root entry",
+            };
+            format!("  {} {}", action, cleanup.path.display())
+        })
+        .collect()
 }
 
 fn format_error_single_line(error: &str) -> String {
@@ -1544,21 +2212,73 @@ fn compact_hint(error: &str) -> Option<String> {
 // --- rm --all ---
 
 struct RmAllPlan {
-    forest_plans: Vec<(PathBuf, RmPlan)>,
+    forest_plans: Vec<RmAllForestPlan>,
 }
 
-fn plan_rm_all(worktree_bases: &[&Path]) -> Result<RmAllPlan> {
+enum RmAllForestPlan {
+    Ready(RmPlan),
+    Rejected {
+        forest_name: ForestName,
+        forest_dir: PathBuf,
+        error: String,
+    },
+}
+
+impl RmAllForestPlan {
+    fn forest_name(&self) -> &ForestName {
+        match self {
+            Self::Ready(plan) => &plan.forest_name,
+            Self::Rejected { forest_name, .. } => forest_name,
+        }
+    }
+
+    fn result(&self, options: &RmOptions) -> RmResult {
+        match self {
+            Self::Ready(plan) if options.dry_run => plan_to_dry_run_result(plan, options.force),
+            Self::Ready(plan) => execute_rm(plan, options.force, None),
+            Self::Rejected {
+                forest_name,
+                forest_dir,
+                error,
+            } => RmResult {
+                forest_name: forest_name.clone(),
+                forest_dir: forest_dir.clone(),
+                dry_run: options.dry_run,
+                force: options.force,
+                repos: vec![],
+                forest_root_cleanup: vec![],
+                forest_dir_removed: false,
+                errors: vec![error.clone()],
+            },
+        }
+    }
+}
+
+fn plan_rm_all(worktree_bases: &[&Path], options: &RmOptions) -> Result<RmAllPlan> {
     let mut forests = Vec::new();
 
     for base in worktree_bases {
         forests.extend(discover_forests_with_dirs(base)?);
     }
-    let forest_plans = dedupe_discovered_forests(forests)
+    let forests = dedupe_discovered_forests(forests);
+    if options.require_utf8_json_paths && forests.iter().any(|forest| forest.dir.to_str().is_none())
+    {
+        bail!(
+            "--json refuses forest removal because a forest path is not valid UTF-8\n  hint: rename the forest directory or run without --json"
+        );
+    }
+    let forest_plans = forests
         .into_iter()
-        .map(|forest| {
-            let plan = plan_rm(&forest.dir, &forest.meta);
-            (forest.dir, plan)
-        })
+        .map(
+            |forest| match plan_rm_with_options(&forest.dir, &forest.meta, options) {
+                Ok(plan) => RmAllForestPlan::Ready(plan),
+                Err(error) => RmAllForestPlan::Rejected {
+                    forest_name: forest.meta.name,
+                    forest_dir: forest.dir,
+                    error: error.to_string(),
+                },
+            },
+        )
         .collect();
 
     Ok(RmAllPlan { forest_plans })
@@ -1566,23 +2286,22 @@ fn plan_rm_all(worktree_bases: &[&Path]) -> Result<RmAllPlan> {
 
 fn execute_rm_all(
     all_plan: &RmAllPlan,
-    force: bool,
+    options: &RmOptions,
     on_progress: Option<&dyn Fn(RmAllProgress)>,
 ) -> RmAllResult {
     let mut results = Vec::new();
     let total = all_plan.forest_plans.len();
 
-    for (_forest_dir, plan) in &all_plan.forest_plans {
+    for forest_plan in &all_plan.forest_plans {
+        let forest_name = forest_plan.forest_name();
         if let Some(cb) = &on_progress {
-            cb(RmAllProgress::ForestStarting {
-                name: &plan.forest_name,
-            });
+            cb(RmAllProgress::ForestStarting { name: forest_name });
         }
 
-        let result = execute_rm(plan, force, None);
+        let result = forest_plan.result(options);
 
         if let Some(cb) = &on_progress {
-            cb(RmAllProgress::ForestDone(&plan.forest_name, &result));
+            cb(RmAllProgress::ForestDone(forest_name, &result));
         }
 
         results.push(result);
@@ -1593,7 +2312,7 @@ fn execute_rm_all(
 
     RmAllResult {
         dry_run: false,
-        force,
+        force: options.force,
         results,
         total_forests: total,
         succeeded,
@@ -1601,29 +2320,38 @@ fn execute_rm_all(
     }
 }
 
+#[cfg(test)]
 pub fn cmd_rm_all(
     worktree_bases: &[&Path],
     force: bool,
     dry_run: bool,
     on_progress: Option<&dyn Fn(RmAllProgress)>,
 ) -> Result<RmAllResult> {
-    let all_plan = plan_rm_all(worktree_bases)?;
+    cmd_rm_all_with_options(worktree_bases, RmOptions::new(force, dry_run), on_progress)
+}
+
+pub fn cmd_rm_all_with_options(
+    worktree_bases: &[&Path],
+    options: RmOptions,
+    on_progress: Option<&dyn Fn(RmAllProgress)>,
+) -> Result<RmAllResult> {
+    let all_plan = plan_rm_all(worktree_bases, &options)?;
 
     if all_plan.forest_plans.is_empty() {
         bail!("no forests found\n  hint: run `git forest ls` to verify");
     }
 
-    if dry_run {
+    if options.dry_run {
         let results: Vec<RmResult> = all_plan
             .forest_plans
             .iter()
-            .map(|(_, plan)| plan_to_dry_run_result(plan, force))
+            .map(|plan| plan.result(&options))
             .collect();
         let total = results.len();
         let succeeded = results.iter().filter(|r| r.errors.is_empty()).count();
         return Ok(RmAllResult {
             dry_run: true,
-            force,
+            force: options.force,
             total_forests: total,
             succeeded,
             failed: total - succeeded,
@@ -1631,7 +2359,7 @@ pub fn cmd_rm_all(
         });
     }
 
-    Ok(execute_rm_all(&all_plan, force, on_progress))
+    Ok(execute_rm_all(&all_plan, &options, on_progress))
 }
 
 pub fn format_rm_all_human(result: &RmAllResult) -> String {
@@ -1726,6 +2454,7 @@ mod tests {
             worktree_base: env.worktree_base().join("newline\nbase"),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos,
         }
     }
@@ -1737,7 +2466,8 @@ mod tests {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
-        let tmpl = env.default_template(&["foo-api", "foo-web"]);
+        let mut tmpl = env.default_template(&["foo-api", "foo-web"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
 
         let inputs = make_new_inputs("plan-basic", ForestMode::Feature);
         let result = cmd_new(inputs, &tmpl).unwrap();
@@ -1951,6 +2681,8 @@ mod tests {
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
         std::fs::write(&dirty_file, "dirty").unwrap();
         crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -1972,6 +2704,8 @@ mod tests {
         // Both worktrees should still exist (nothing was touched)
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join("foo-web").exists());
+        assert!(forest_dir.join(".idea/workspace.xml").exists());
+        assert!(rm_result.forest_root_cleanup.is_empty());
         assert!(!rm_result.forest_dir_removed);
     }
 
@@ -2260,9 +2994,650 @@ mod tests {
         );
     }
 
+    #[test]
+    fn configured_disposable_root_entry_is_previewed_and_removed() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
+
+        cmd_new(
+            make_new_inputs("rm-disposable-entry", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-disposable-entry");
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(dry_run.forest_dir_removed);
+        assert_eq!(dry_run.forest_root_cleanup.len(), 1);
+        assert_eq!(dry_run.forest_root_cleanup[0].path, PathBuf::from(".idea"));
+        assert_eq!(
+            dry_run.forest_root_cleanup[0].kind,
+            ForestRootCleanupKind::DisposableEntry
+        );
+        assert_eq!(dry_run.forest_root_cleanup[0].removal, RmOutcome::Success);
+        assert!(forest_dir.join(".idea/workspace.xml").exists());
+
+        let actual = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(actual.errors.is_empty(), "errors: {:?}", actual.errors);
+        assert!(actual.forest_dir_removed);
+        assert_eq!(actual.forest_root_cleanup.len(), 1);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn one_off_disposable_root_entry_removes_legacy_residue_without_force() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(
+            make_new_inputs("rm-one-off-entry", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-one-off-entry");
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        assert!(meta.disposable_root_entries.is_empty());
+
+        let ordinary = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+        assert!(!ordinary.forest_dir_removed);
+        assert!(forest_dir.join(".idea/workspace.xml").exists());
+
+        let options = RmOptions {
+            additional_disposable_root_entries: vec![
+                DisposableRootEntry::new(".idea".to_string()).unwrap()
+            ],
+            ..RmOptions::new(false, false)
+        };
+        let actual = cmd_rm_with_options(&forest_dir, &meta, options, None).unwrap();
+
+        assert!(!actual.force);
+        assert!(actual.errors.is_empty(), "errors: {:?}", actual.errors);
+        assert!(actual.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn force_and_one_off_disposable_entry_are_rejected_together() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+        cmd_new(
+            make_new_inputs("rm-force-entry-conflict", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-force-entry-conflict");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let options = RmOptions {
+            additional_disposable_root_entries: vec![
+                DisposableRootEntry::new(".idea".to_string()).unwrap()
+            ],
+            ..RmOptions::new(true, false)
+        };
+
+        let error = cmd_rm_with_options(&forest_dir, &meta, options, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("cannot be combined"));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn repeated_or_snapshotted_one_off_entries_are_rejected() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
+        cmd_new(
+            make_new_inputs("rm-duplicate-entry", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-duplicate-entry");
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let duplicate = DisposableRootEntry::new(".idea".to_string()).unwrap();
+
+        for additional_disposable_root_entries in [
+            vec![duplicate.clone()],
+            vec![duplicate.clone(), duplicate.clone()],
+        ] {
+            let options = RmOptions {
+                additional_disposable_root_entries,
+                ..RmOptions::new(false, true)
+            };
+            let error = cmd_rm_with_options(&forest_dir, &meta, options, None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("duplicate disposable root entry"));
+        }
+
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn metadata_case_alias_is_rejected_before_mutation() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+        cmd_new(
+            make_new_inputs("rm-metadata-alias", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-metadata-alias");
+        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        meta.disposable_root_entries =
+            vec![DisposableRootEntry::new(".FOREST-META.TOML".to_string()).unwrap()];
+
+        let error = cmd_rm(&forest_dir, &meta, false, false, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("reserved"));
+        assert!(forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn unlisted_dotenv_remains_a_cleanup_blocker() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(
+            make_new_inputs("rm-preserve-dotenv", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-preserve-dotenv");
+        std::fs::write(forest_dir.join(".env"), "LOCAL_ONLY=true").unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
+
+        assert!(!result.forest_dir_removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("would still contain .env")));
+        assert!(forest_dir.join(".env").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn force_dry_run_enumerates_unexpected_root_entries() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(
+            make_new_inputs("rm-force-preview-root", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-force-preview-root");
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::write(forest_dir.join("notes.txt"), "keep").unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(result.forest_dir_removed);
+        assert_eq!(
+            result
+                .forest_root_cleanup
+                .iter()
+                .map(|cleanup| cleanup.path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from(".idea"), PathBuf::from("notes.txt")]
+        );
+        assert!(result
+            .forest_root_cleanup
+            .iter()
+            .all(|cleanup| cleanup.kind == ForestRootCleanupKind::Force
+                && cleanup.removal == RmOutcome::Success));
+        assert!(forest_dir.join(".idea").exists());
+        assert!(forest_dir.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn force_execution_reports_each_root_entry_outcome() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(
+            make_new_inputs("rm-force-entry-results", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-force-entry-results");
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::write(forest_dir.join("notes.txt"), "discard").unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let plan = plan_rm_with_options(&forest_dir, &meta, &RmOptions::new(true, false)).unwrap();
+        std::fs::remove_dir(forest_dir.join(".idea")).unwrap();
+
+        let result = execute_rm(&plan, true, None);
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.forest_dir_removed);
+        assert_eq!(result.forest_root_cleanup.len(), 2);
+        assert!(matches!(
+            result.forest_root_cleanup[0].removal,
+            RmOutcome::Skipped { .. }
+        ));
+        assert_eq!(result.forest_root_cleanup[1].removal, RmOutcome::Success);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn force_planning_never_treats_metadata_case_alias_as_residue() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".FOREST-META.TOML"), "metadata").unwrap();
+        let meta = ForestMeta {
+            name: ForestName::new("force-meta-alias".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+
+        let plan = plan_rm_with_options(temp.path(), &meta, &RmOptions::new(true, true)).unwrap();
+        let cleanup = root_cleanup_results(&plan, |_| RmOutcome::Success);
+
+        assert!(cleanup.is_empty());
+    }
+
+    #[test]
+    fn force_treats_lone_case_variant_repo_entry_as_residue_on_case_sensitive_volume() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+
+        cmd_new(
+            make_new_inputs("force-repo-case-variant", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("force-repo-case-variant");
+        std::fs::rename(forest_dir.join("repo-a"), forest_dir.join("REPO-A")).unwrap();
+        if forest_dir.join("repo-a").symlink_metadata().is_ok() {
+            return;
+        }
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let dry_run = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
+
+        assert!(dry_run.errors.is_empty(), "errors: {:?}", dry_run.errors);
+        assert!(dry_run.forest_dir_removed);
+        assert!(dry_run.forest_root_cleanup.iter().any(|cleanup| {
+            cleanup.path == Path::new("REPO-A")
+                && cleanup.kind == ForestRootCleanupKind::Force
+                && cleanup.removal == RmOutcome::Success
+        }));
+
+        let actual = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(actual.errors.is_empty(), "errors: {:?}", actual.errors);
+        assert!(actual.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
     #[cfg(unix)]
     #[test]
-    fn cmd_rm_dry_run_reports_symlink_forest_dir_cleanup_failure() {
+    fn json_path_validation_rejects_non_utf8_cleanup_action() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+        let root_plan = ForestRootPlan::Ready {
+            cleanup_actions: vec![ForestRootCleanupAction::RemoveForceEntry(invalid_path)],
+        };
+
+        let error = validate_json_output_paths(Path::new("/tmp/forest"), &root_plan, true)
+            .expect_err("non-UTF-8 cleanup paths should be rejected for JSON");
+
+        assert!(error
+            .to_string()
+            .contains("forest-root entry is not valid UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_force_rejects_non_utf8_entry_before_mutation_when_supported() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+        cmd_new(make_new_inputs("json-non-utf8", ForestMode::Feature), &tmpl).unwrap();
+        let forest_dir = tmpl.worktree_base.join("json-non-utf8");
+        let invalid_name = std::ffi::OsString::from_vec(vec![b'r', b'a', b'w', 0xff]);
+        let invalid_entry = forest_dir.join(&invalid_name);
+        if std::fs::write(&invalid_entry, "preserve until JSON can represent it").is_err() {
+            return;
+        }
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let options = RmOptions {
+            require_utf8_json_paths: true,
+            ..RmOptions::new(true, false)
+        };
+
+        let result = cmd_rm_with_options(&forest_dir, &meta, options, None).unwrap();
+
+        assert!(!result.forest_dir_removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("forest-root entry is not valid UTF-8")));
+        assert!(forest_dir.exists());
+        assert!(forest_dir.join("repo-a").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(invalid_entry.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_ordinary_rm_rejects_unauthorized_non_utf8_residue_before_mutation_when_supported() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+        cmd_new(
+            make_new_inputs("json-non-utf8-residue", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("json-non-utf8-residue");
+        let invalid_name = std::ffi::OsString::from_vec(vec![b'r', b'a', b'w', 0xfe]);
+        let invalid_entry = forest_dir.join(&invalid_name);
+        if std::fs::write(&invalid_entry, "unauthorized residue").is_err() {
+            return;
+        }
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let options = RmOptions {
+            require_utf8_json_paths: true,
+            ..RmOptions::new(false, false)
+        };
+
+        let result = cmd_rm_with_options(&forest_dir, &meta, options, None).unwrap();
+
+        assert!(!result.forest_dir_removed);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("forest-root entry is not valid UTF-8")));
+        assert!(forest_dir.exists());
+        assert!(forest_dir.join("repo-a").exists());
+        assert!(forest_dir.join(META_FILENAME).exists());
+        assert!(invalid_entry.exists());
+    }
+
+    #[test]
+    fn ordinary_dry_run_matches_disposable_entry_case_conservatively() {
+        let temp = tempfile::tempdir().unwrap();
+        let forest_dir = temp.path().join("forest");
+        std::fs::create_dir(&forest_dir).unwrap();
+        std::fs::write(forest_dir.join(META_FILENAME), "metadata").unwrap();
+        std::fs::create_dir(forest_dir.join(".IDEA")).unwrap();
+        let meta = ForestMeta {
+            name: ForestName::new("dry-run-case-alias".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![DisposableRootEntry::new(".idea".to_string()).unwrap()],
+            repos: vec![],
+        };
+        let plan = plan_rm_with_options(&forest_dir, &meta, &RmOptions::new(false, true)).unwrap();
+
+        let result = plan_to_dry_run_result(&plan, false);
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.forest_dir_removed);
+        assert_eq!(result.forest_root_cleanup[0].path, PathBuf::from(".IDEA"));
+
+        let actual = execute_rm(&plan, false, None);
+
+        assert!(actual.errors.is_empty(), "errors: {:?}", actual.errors);
+        assert!(actual.forest_dir_removed);
+        assert!(!forest_dir.exists());
+    }
+
+    #[test]
+    fn dry_run_rejects_coexisting_disposable_case_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(META_FILENAME), "metadata").unwrap();
+        std::fs::create_dir(temp.path().join(".idea")).unwrap();
+        if std::fs::create_dir(temp.path().join(".IDEA")).is_err() {
+            return;
+        }
+        let meta = ForestMeta {
+            name: ForestName::new("dry-run-disposable-aliases".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![DisposableRootEntry::new(".idea".to_string()).unwrap()],
+            repos: vec![],
+        };
+        let plan = plan_rm_with_options(temp.path(), &meta, &RmOptions::new(false, true)).unwrap();
+
+        let result = plan_to_dry_run_result(&plan, false);
+
+        assert!(!result.forest_dir_removed);
+        assert!(result.forest_root_cleanup.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("multiple root entries equivalent to .idea")));
+    }
+
+    #[test]
+    fn force_dry_run_rejects_coexisting_metadata_case_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(META_FILENAME), "metadata").unwrap();
+        std::fs::write(temp.path().join(".FOREST-META.TOML"), "alias").unwrap();
+        let metadata_alias_count = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| root_entry_name_matches(&entry.file_name(), META_FILENAME))
+            .count();
+        if metadata_alias_count < 2 {
+            return;
+        }
+        let meta = ForestMeta {
+            name: ForestName::new("dry-run-metadata-aliases".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        let plan = plan_rm_with_options(temp.path(), &meta, &RmOptions::new(true, true)).unwrap();
+
+        let result = plan_to_dry_run_result(&plan, true);
+
+        assert!(!result.forest_dir_removed);
+        assert!(result.forest_root_cleanup.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("multiple root entries equivalent to .forest-meta.toml")));
+    }
+
+    #[test]
+    fn final_directory_failure_restores_staged_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let forest_dir = temp.path().join("forest");
+        std::fs::create_dir(&forest_dir).unwrap();
+        let meta_path = forest_dir.join(META_FILENAME);
+        std::fs::write(&meta_path, "recoverable metadata").unwrap();
+        let staged_meta = stage_forest_meta(&forest_dir, &meta_path).unwrap();
+        let staged_path = staged_meta.clone().unwrap();
+        std::fs::write(forest_dir.join("late-entry"), "created after inspection").unwrap();
+        let mut errors = Vec::new();
+
+        let removed = remove_staged_forest_dir(&forest_dir, &meta_path, staged_meta, &mut errors);
+
+        assert!(!removed);
+        assert_eq!(
+            std::fs::read_to_string(&meta_path).unwrap(),
+            "recoverable metadata"
+        );
+        assert!(!staged_path.exists());
+        assert!(forest_dir.join("late-entry").exists());
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn final_removal_stages_metadata_by_its_actual_case() {
+        let temp = tempfile::tempdir().unwrap();
+        let forest_dir = temp.path().join("forest");
+        std::fs::create_dir(&forest_dir).unwrap();
+        let canonical_meta = forest_dir.join(META_FILENAME);
+        let case_alias_meta = forest_dir.join(".FOREST-META.TOML");
+        std::fs::write(&canonical_meta, "metadata").unwrap();
+        std::fs::rename(&canonical_meta, &case_alias_meta).unwrap();
+        let mut errors = Vec::new();
+
+        let removed = remove_forest_dir(&forest_dir, &mut errors);
+
+        assert!(removed, "errors: {:?}", errors);
+        assert!(errors.is_empty());
+        assert!(!forest_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_entry_failure_does_not_hide_later_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("blocked");
+        let removable = temp.path().join("removable");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("sentinel"), "keep").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(&removable, "discard").unwrap();
+        let plan = RmPlan {
+            forest_name: ForestName::new("force-partial".to_string()).unwrap(),
+            forest_dir: temp.path().to_path_buf(),
+            repo_plans: vec![],
+            root_plan: ForestRootPlan::Ready {
+                cleanup_actions: vec![
+                    ForestRootCleanupAction::RemoveForceEntry(PathBuf::from("blocked")),
+                    ForestRootCleanupAction::RemoveForceEntry(PathBuf::from("removable")),
+                ],
+            },
+        };
+        let mut errors = Vec::new();
+
+        let results = execute_forest_root_cleanup(&plan, &mut errors);
+
+        assert!(matches!(results[0].removal, RmOutcome::Failed { .. }));
+        assert_eq!(results[1].removal, RmOutcome::Success);
+        assert!(!removable.exists());
+        assert_eq!(errors.len(), 1);
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disposable_symlink_is_unlinked_without_following_external_target() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
+
+        cmd_new(
+            make_new_inputs("rm-disposable-symlink", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-disposable-symlink");
+        let external = env.root().join("external-idea");
+        std::fs::create_dir(&external).unwrap();
+        std::fs::write(external.join("sentinel"), "keep").unwrap();
+        std::os::unix::fs::symlink(&external, forest_dir.join(".idea")).unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.forest_dir_removed);
+        assert_eq!(
+            std::fs::read_to_string(external.join("sentinel")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disposable_directory_removal_does_not_follow_nested_symlink() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
+
+        cmd_new(
+            make_new_inputs("rm-nested-symlink", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-nested-symlink");
+        let external = env.root().join("external-settings");
+        std::fs::create_dir(&external).unwrap();
+        std::fs::write(external.join("sentinel"), "keep").unwrap();
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::os::unix::fs::symlink(&external, forest_dir.join(".idea/external")).unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.forest_dir_removed);
+        assert_eq!(
+            std::fs::read_to_string(external.join("sentinel")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn disposable_directory_removal_preserves_outside_hard_link() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let mut tmpl = env.default_template(&["foo-api"]);
+        tmpl.disposable_root_entries = vec![DisposableRootEntry::new(".idea".to_string()).unwrap()];
+
+        cmd_new(make_new_inputs("rm-hard-link", ForestMode::Feature), &tmpl).unwrap();
+        let forest_dir = tmpl.worktree_base.join("rm-hard-link");
+        let external = env.root().join("external-file");
+        std::fs::write(&external, "keep").unwrap();
+        std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+        std::fs::hard_link(&external, forest_dir.join(".idea/shared-file")).unwrap();
+        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+
+        let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(result.forest_dir_removed);
+        assert_eq!(std::fs::read_to_string(external).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_rm_dry_run_refuses_symlink_forest_before_repo_planning() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         let tmpl = env.default_template(&["foo-api"]);
@@ -2286,24 +3661,22 @@ mod tests {
         let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
         assert!(result.dry_run);
-        assert!(matches!(
-            result.repos[0].worktree_removed,
-            RmOutcome::Success
-        ));
-        assert!(matches!(result.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(result.repos.is_empty());
         assert!(!result.forest_dir_removed);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("forest directory not removed")
-                && error.contains("is a symlink")));
+        assert!(result.errors.iter().any(
+            |error| error.contains("forest removal refused") && error.contains("is a symlink")
+        ));
+        let human = format_rm_human(&result);
+        assert!(human.contains("Removal blocked for forest"));
+        assert!(!human.contains("Would remove forest"));
         assert!(forest_dir.symlink_metadata().is_ok());
         assert!(target_dir.join(META_FILENAME).exists());
+        assert!(target_dir.join("foo-api").exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn cmd_rm_preserves_meta_when_symlink_forest_dir_blocks_non_force_cleanup() {
+    fn cmd_rm_refuses_symlink_forest_before_any_mutation() {
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         let tmpl = env.default_template(&["foo-api"]);
@@ -2327,16 +3700,32 @@ mod tests {
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!result.forest_dir_removed);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("forest directory not removed")
-                && error.contains("is a symlink")));
+        assert!(result.errors.iter().any(
+            |error| error.contains("forest removal refused") && error.contains("is a symlink")
+        ));
         assert!(forest_dir.symlink_metadata().is_ok());
+        assert!(target_dir.join("foo-api").exists());
         assert!(
             target_dir.join(META_FILENAME).exists(),
-            "failed non-force cleanup must not delete target metadata through a symlink"
+            "refused cleanup must not delete target metadata through a symlink"
         );
+        assert!(crate::git::ref_exists(
+            &meta.repos[0].source,
+            &format!("refs/heads/{}", meta.repos[0].branch)
+        )
+        .unwrap());
+
+        let forced = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
+
+        assert!(!forced.forest_dir_removed);
+        assert!(forced.repos.is_empty());
+        assert!(forced
+            .errors
+            .iter()
+            .any(|error| error.contains("forest removal refused")));
+        assert!(forest_dir.symlink_metadata().is_ok());
+        assert!(target_dir.join("foo-api").exists());
+        assert!(target_dir.join(META_FILENAME).exists());
     }
 
     #[cfg(unix)]
@@ -3816,6 +5205,7 @@ mod tests {
                     },
                 },
             ],
+            forest_root_cleanup: vec![],
             forest_dir_removed: true,
             errors: vec![],
         };
@@ -3842,6 +5232,7 @@ mod tests {
                 worktree_removed: RmOutcome::Success,
                 branch_deleted: RmOutcome::Success,
             }],
+            forest_root_cleanup: vec![],
             forest_dir_removed: true,
             errors: vec![],
         };
@@ -3870,6 +5261,7 @@ mod tests {
                     reason: "worktree still exists, cannot delete branch".to_string(),
                 },
             }],
+            forest_root_cleanup: vec![],
             forest_dir_removed: false,
             errors: vec!["foo-api: git worktree remove failed".to_string()],
         };
@@ -4564,6 +5956,7 @@ mod tests {
                 source_exists: false,
                 has_dirty_files: false,
             }],
+            root_plan: ForestRootPlan::Missing,
         };
         execute_rm(&plan, false, None);
     }
@@ -4588,6 +5981,7 @@ mod tests {
                 source_exists: false,
                 has_dirty_files: false,
             }],
+            root_plan: ForestRootPlan::Missing,
         };
         execute_rm(&plan, false, None);
     }
@@ -4612,6 +6006,7 @@ mod tests {
                 source_exists: false,
                 has_dirty_files: true,
             }],
+            root_plan: ForestRootPlan::Missing,
         };
         execute_rm(&plan, false, None);
     }
@@ -4636,6 +6031,7 @@ mod tests {
                 source_exists: false,
                 has_dirty_files: true,
             }],
+            root_plan: ForestRootPlan::Missing,
         };
         plan_to_dry_run_result(&plan, false);
     }
@@ -4699,6 +6095,125 @@ mod tests {
         assert_eq!(ls.forests.len(), 0);
     }
 
+    #[test]
+    fn rm_all_corrupt_metadata_blocks_all_mutation() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+        cmd_new(make_new_inputs("valid-forest", ForestMode::Feature), &tmpl).unwrap();
+        let valid_forest = tmpl.worktree_base.join("valid-forest");
+        let corrupt_forest = tmpl.worktree_base.join("corrupt-forest");
+        std::fs::create_dir_all(&corrupt_forest).unwrap();
+        std::fs::write(corrupt_forest.join(META_FILENAME), "not valid metadata").unwrap();
+
+        let error = cmd_rm_all(&[tmpl.worktree_base.as_ref()], true, false, None)
+            .expect_err("corrupt metadata should block rm --all planning");
+
+        assert!(error.to_string().contains("could not read forest metadata"));
+        assert!(valid_forest.exists());
+        assert!(valid_forest.join("repo-a").exists());
+        assert!(valid_forest.join(META_FILENAME).exists());
+        assert!(corrupt_forest.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rm_all_inaccessible_base_blocks_all_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+        cmd_new(
+            make_new_inputs("visible-forest", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let visible_forest = tmpl.worktree_base.join("visible-forest");
+
+        let blocked_parent = env.root().join("blocked");
+        let hidden_base = blocked_parent.join("worktrees");
+        let hidden_forest = hidden_base.join("hidden-forest");
+        std::fs::create_dir_all(&hidden_forest).unwrap();
+        let hidden_meta = ForestMeta {
+            name: ForestName::new("hidden-forest".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        hidden_meta
+            .write(&hidden_forest.join(META_FILENAME))
+            .unwrap();
+        let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&hidden_base).is_ok() {
+            std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+            return;
+        }
+
+        let result = cmd_rm_all(
+            &[tmpl.worktree_base.as_ref(), hidden_base.as_path()],
+            true,
+            false,
+            None,
+        );
+        std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
+        let error = result.expect_err("an inaccessible base should block rm --all planning");
+
+        assert!(error.to_string().contains("could not read worktree base"));
+        assert!(visible_forest.exists());
+        assert!(visible_forest.join("repo-a").exists());
+        assert!(visible_forest.join(META_FILENAME).exists());
+        assert!(hidden_forest.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rm_all_dangling_base_symlink_blocks_all_mutation() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        let tmpl = env.default_template(&["repo-a"]);
+        cmd_new(
+            make_new_inputs("visible-forest", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let visible_forest = tmpl.worktree_base.join("visible-forest");
+
+        let offline_target = env.root().join("offline-worktrees");
+        let offline_base = env.root().join("offline-worktrees-link");
+        let hidden_forest = offline_target.join("hidden-forest");
+        std::fs::create_dir_all(&hidden_forest).unwrap();
+        let hidden_meta = ForestMeta {
+            name: ForestName::new("hidden-forest".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        hidden_meta
+            .write(&hidden_forest.join(META_FILENAME))
+            .unwrap();
+        std::os::unix::fs::symlink(&offline_target, &offline_base).unwrap();
+        let moved_target = env.root().join("offline-worktrees-moved");
+        std::fs::rename(&offline_target, &moved_target).unwrap();
+
+        let error = cmd_rm_all(
+            &[tmpl.worktree_base.as_ref(), offline_base.as_path()],
+            true,
+            false,
+            None,
+        )
+        .expect_err("an offline symlinked base should block rm --all planning");
+
+        assert!(error.to_string().contains("could not read worktree base"));
+        assert!(visible_forest.exists());
+        assert!(visible_forest.join("repo-a").exists());
+        assert!(visible_forest.join(META_FILENAME).exists());
+        assert!(moved_target.join("hidden-forest").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn rm_all_deduplicates_symlinked_worktree_bases() {
@@ -4730,6 +6245,65 @@ mod tests {
         assert!(result.results.iter().all(|result| result.errors.is_empty()));
         let ls = cmd_ls(&[tmpl.worktree_base.as_ref(), base_link.as_path()]).unwrap();
         assert_eq!(ls.forests.len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rm_all_rejects_symlink_forest_and_continues_with_real_forest() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+
+        cmd_new(make_new_inputs("linked-forest", ForestMode::Feature), &tmpl).unwrap();
+        cmd_new(make_new_inputs("real-forest", ForestMode::Feature), &tmpl).unwrap();
+
+        let linked_forest = tmpl.worktree_base.join("linked-forest");
+        let linked_target = env.root().join("linked-forest-target");
+        std::fs::rename(&linked_forest, &linked_target).unwrap();
+        std::os::unix::fs::symlink(&linked_target, &linked_forest).unwrap();
+
+        let result = cmd_rm_all(&[tmpl.worktree_base.as_ref()], false, false, None).unwrap();
+
+        assert_eq!(result.total_forests, 2);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 1);
+        assert!(linked_forest.symlink_metadata().is_ok());
+        assert!(linked_target.join("foo-api").exists());
+        assert!(linked_target.join(META_FILENAME).exists());
+        assert!(!tmpl.worktree_base.join("real-forest").exists());
+    }
+
+    #[test]
+    fn rm_all_rejects_override_collision_per_forest_before_execution() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("repo-a");
+        env.create_repo_with_remote("repo-b");
+        let tmpl_a = env.default_template(&["repo-a"]);
+        let tmpl_b = env.default_template(&["repo-b"]);
+
+        cmd_new(make_new_inputs("forest-a", ForestMode::Feature), &tmpl_a).unwrap();
+        cmd_new(make_new_inputs("forest-b", ForestMode::Feature), &tmpl_b).unwrap();
+
+        let options = RmOptions {
+            additional_disposable_root_entries: vec![DisposableRootEntry::new(
+                "repo-a".to_string(),
+            )
+            .unwrap()],
+            ..RmOptions::new(false, false)
+        };
+        let result =
+            cmd_rm_all_with_options(&[tmpl_a.worktree_base.as_ref()], options, None).unwrap();
+
+        assert_eq!(result.total_forests, 2);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 1);
+        assert!(tmpl_a.worktree_base.join("forest-a/repo-a").exists());
+        assert!(tmpl_a
+            .worktree_base
+            .join("forest-a")
+            .join(META_FILENAME)
+            .exists());
+        assert!(!tmpl_b.worktree_base.join("forest-b").exists());
     }
 
     #[test]

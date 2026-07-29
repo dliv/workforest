@@ -334,6 +334,8 @@ fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf
             "main",
             "--worktree-base",
             worktree_base.to_str().unwrap(),
+            "--disposable-root-entry",
+            ".idea",
             "--force",
         ])
         .env("HOME", fake_home.to_str().unwrap())
@@ -464,6 +466,7 @@ fn new_json_output() {
     assert!(json["repos"].is_array());
     assert_eq!(json["repos"].as_array().unwrap().len(), 2);
     assert!(json["repos"][0]["checkout_kind"].is_string());
+    assert_eq!(json["disposable_root_entries"][0], ".idea");
 
     drop(tmp);
 }
@@ -713,6 +716,8 @@ fn rm_removes_forest() {
     assert!(forest_dir.exists());
     assert!(forest_dir.join("foo-api").exists());
     assert!(forest_dir.join("foo-web").exists());
+    std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+    std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
 
     // Remove forest
     bin_cmd()
@@ -721,7 +726,10 @@ fn rm_removes_forest() {
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success()
-        .stdout(predicates::str::contains("Removing forest"));
+        .stdout(predicates::str::contains("Removing forest"))
+        .stdout(predicates::str::contains(
+            "Discarded forest-root entry .idea",
+        ));
 
     // Verify everything is gone
     assert!(!forest_dir.exists());
@@ -744,6 +752,8 @@ fn rm_dry_run_preserves_forest() {
 
     let forest_dir = worktree_base.join("rm-dry-e2e");
     assert!(forest_dir.exists());
+    std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+    std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
 
     // Dry run
     bin_cmd()
@@ -753,7 +763,10 @@ fn rm_dry_run_preserves_forest() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Dry run"))
-        .stdout(predicates::str::contains("Would remove forest"));
+        .stdout(predicates::str::contains("Would remove forest"))
+        .stdout(predicates::str::contains(
+            "Would discard forest-root entry .idea",
+        ));
 
     // Everything should still exist
     assert!(forest_dir.exists());
@@ -765,7 +778,7 @@ fn rm_dry_run_preserves_forest() {
 
 #[test]
 fn rm_json_output() {
-    let (tmp, fake_home, _) = setup_new_env();
+    let (tmp, fake_home, worktree_base) = setup_new_env();
 
     bin_cmd()
         .args(["new", "rm-json-e2e", "--mode", "feature", "--no-fetch"])
@@ -773,6 +786,9 @@ fn rm_json_output() {
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .success();
+    let forest_dir = worktree_base.join("rm-json-e2e");
+    std::fs::create_dir(forest_dir.join(".idea")).unwrap();
+    std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
 
     let output = bin_cmd()
         .args(["--json", "rm", "rm-json-e2e"])
@@ -790,8 +806,119 @@ fn rm_json_output() {
     assert_eq!(json["repos"].as_array().unwrap().len(), 2);
     assert!(json["forest_dir_removed"].as_bool().unwrap());
     assert!(json["errors"].as_array().unwrap().is_empty());
+    assert_eq!(json["forest_root_cleanup"][0]["path"], ".idea");
+    assert_eq!(json["forest_root_cleanup"][0]["kind"], "disposable_entry");
+    assert_eq!(
+        json["forest_root_cleanup"][0]["removal"]["status"],
+        "success"
+    );
 
     drop(tmp);
+}
+
+#[test]
+fn rm_one_off_disposable_entry_is_previewed_and_removed() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    bin_cmd()
+        .args(["new", "rm-one-off-e2e", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+    let forest_dir = worktree_base.join("rm-one-off-e2e");
+    std::fs::create_dir(forest_dir.join(".claude")).unwrap();
+    std::fs::write(forest_dir.join(".claude/state.json"), "incidental").unwrap();
+
+    let preview = bin_cmd()
+        .args([
+            "--json",
+            "rm",
+            "rm-one-off-e2e",
+            "--discard-root-entry",
+            ".claude",
+            "--dry-run",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+
+    assert!(preview.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(json["force"], false);
+    assert_eq!(json["forest_root_cleanup"][0]["path"], ".claude");
+    assert!(forest_dir.join(".claude/state.json").exists());
+
+    bin_cmd()
+        .args(["rm", "rm-one-off-e2e", "--discard-root-entry", ".claude"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Discarded forest-root entry .claude",
+        ));
+
+    assert!(!forest_dir.exists());
+    drop(tmp);
+}
+
+#[test]
+fn rm_rejects_nested_disposable_entry_and_force_combination_at_cli_boundary() {
+    with_no_config()
+        .args(["rm", "test-forest", "--discard-root-entry", ".claude/cache"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "use one exact name at the forest root",
+        ));
+
+    with_no_config()
+        .args([
+            "rm",
+            "test-forest",
+            "--force",
+            "--discard-root-entry",
+            ".idea",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
+fn rm_rejects_repeated_one_off_disposable_entry() {
+    let (_tmp, fake_home, _) = setup_new_env();
+
+    bin_cmd()
+        .args([
+            "new",
+            "rm-duplicate-one-off",
+            "--mode",
+            "feature",
+            "--no-fetch",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    bin_cmd()
+        .args([
+            "rm",
+            "rm-duplicate-one-off",
+            "--discard-root-entry",
+            ".claude",
+            "--discard-root-entry",
+            ".claude",
+            "--dry-run",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("duplicate disposable root entry"));
 }
 
 #[test]

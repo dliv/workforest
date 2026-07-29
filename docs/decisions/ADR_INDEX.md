@@ -20,3 +20,4 @@ Format: `NNNN-short-title.md` with sections: Context, Decision, Consequences.
 | [0012](0012-forests-template-agnostic-after-creation.md) | Forests Are Template-Agnostic After Creation | Accepted (Phase 5B) |
 | [0013](0013-rust-language-choice.md) | Rust Language Choice | Accepted |
 | [0014](0014-xdg-config-paths.md) | XDG Config Paths | Accepted |
+| [0015](0015-snapshotted-disposable-root-entries.md) | Snapshotted Disposable Forest-Root Entries | Accepted |

@@ -22,6 +22,10 @@ impl TestEnv {
         Self { dir }
     }
 
+    pub fn root(&self) -> &Path {
+        self.dir.path()
+    }
+
     pub fn create_repo(&self, name: &str) -> AbsolutePath {
         let repo_path = self.dir.path().join("src").join(name);
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -127,6 +131,7 @@ impl TestEnv {
             worktree_base: self.worktree_base(),
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
             repos,
         }
     }
@@ -144,6 +149,7 @@ pub fn make_meta(
         name: ForestName::new(name.to_string()).unwrap(),
         created_at,
         mode,
+        disposable_root_entries: vec![],
         repos,
     }
 }
