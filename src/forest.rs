@@ -6,9 +6,17 @@ use std::path::{Path, PathBuf};
 use crate::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
 use crate::paths::sanitize_forest_name;
 
+#[derive(Debug)]
 pub struct DiscoveredForest {
     pub dir: PathBuf,
     pub meta: ForestMeta,
+}
+
+#[derive(Debug)]
+pub enum ForestInventoryEntry {
+    Discovered(DiscoveredForest),
+    MissingMetadata { dir: PathBuf },
+    UnreadableMetadata { dir: PathBuf, message: String },
 }
 
 #[cfg(test)]
@@ -41,6 +49,39 @@ pub fn discover_forests_with_dirs(worktree_base: &Path) -> Result<Vec<Discovered
     }
 
     Ok(dedupe_discovered_forests(forests))
+}
+
+pub fn scan_forest_inventory(worktree_base: &Path) -> Result<Vec<ForestInventoryEntry>> {
+    let Some(entries) = worktree_base_entries(worktree_base)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut inventory = Vec::new();
+    for entry in entries {
+        let is_dir = entry_path_is_dir(&entry)?;
+        reject_staged_metadata_entry(&entry, is_dir)?;
+        if !is_dir {
+            continue;
+        }
+
+        let dir = entry.path();
+        let meta_path = dir.join(META_FILENAME);
+        match read_forest_meta_if_present(&meta_path) {
+            Ok(Some(meta)) => {
+                inventory.push(ForestInventoryEntry::Discovered(DiscoveredForest {
+                    dir,
+                    meta,
+                }));
+            }
+            Ok(None) => inventory.push(ForestInventoryEntry::MissingMetadata { dir }),
+            Err(error) => inventory.push(ForestInventoryEntry::UnreadableMetadata {
+                dir,
+                message: format!("{error:#}"),
+            }),
+        }
+    }
+
+    Ok(inventory)
 }
 
 pub fn dedupe_discovered_forests(forests: Vec<DiscoveredForest>) -> Vec<DiscoveredForest> {

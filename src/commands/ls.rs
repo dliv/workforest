@@ -1,17 +1,38 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use super::branch_state::{ActualBranchState, WorktreeBranchState};
-use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
+use crate::forest::{dedupe_discovered_forests, scan_forest_inventory, ForestInventoryEntry};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
 use crate::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct LsResult {
     pub forests: Vec<ForestSummary>,
+    pub findings: Vec<LsFinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LsFindingCode {
+    MissingMetadata,
+    UnreadableMetadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LsFinding {
+    pub code: LsFindingCode,
+    pub path: String,
+    pub message: String,
+}
+
+struct PendingLsFinding {
+    code: LsFindingCode,
+    path: PathBuf,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,17 +76,69 @@ pub struct RepoBranchLookupError {
 
 pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
     let mut forests = Vec::new();
+    let mut findings = Vec::new();
     for base in worktree_bases {
-        forests.extend(discover_forests_with_dirs(base)?);
+        for entry in scan_forest_inventory(base)? {
+            match entry {
+                ForestInventoryEntry::Discovered(forest) => forests.push(forest),
+                ForestInventoryEntry::MissingMetadata { dir } => {
+                    findings.push(PendingLsFinding {
+                        code: LsFindingCode::MissingMetadata,
+                        path: dir,
+                        message: "directory under worktree base has no .forest-meta.toml"
+                            .to_string(),
+                    });
+                }
+                ForestInventoryEntry::UnreadableMetadata { dir, message } => {
+                    findings.push(PendingLsFinding {
+                        code: LsFindingCode::UnreadableMetadata,
+                        path: dir,
+                        message,
+                    });
+                }
+            }
+        }
     }
     let mut forests = dedupe_discovered_forests(forests);
     forests.sort_by_key(|forest| std::cmp::Reverse(forest.meta.created_at));
+
+    let worktree_base_keys: BTreeSet<PathBuf> = worktree_bases
+        .iter()
+        .map(|base| canonical_path_key(base))
+        .collect();
+    findings.retain(|finding| {
+        finding.code != LsFindingCode::MissingMetadata
+            || !worktree_base_keys.contains(&canonical_path_key(&finding.path))
+    });
+    let mut seen_findings = BTreeSet::new();
+    findings
+        .retain(|finding| seen_findings.insert((canonical_path_key(&finding.path), finding.code)));
+    findings.sort_by_key(|finding| (finding.path.clone(), finding.code));
+    let findings = findings
+        .into_iter()
+        .map(|finding| LsFinding {
+            code: finding.code,
+            path: display_path(&finding.path),
+            message: finding.message,
+        })
+        .collect();
 
     let summaries = forests
         .iter()
         .map(|forest| summarize_forest(&forest.dir, &forest.meta))
         .collect();
-    Ok(LsResult { forests: summaries })
+    Ok(LsResult {
+        forests: summaries,
+        findings,
+    })
+}
+
+fn canonical_path_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn summarize_forest(forest_dir: &Path, forest: &ForestMeta) -> ForestSummary {
@@ -225,38 +298,64 @@ fn first_line(message: &str) -> &str {
 }
 
 pub fn format_ls_human(result: &LsResult) -> String {
-    if result.forests.is_empty() {
+    if result.forests.is_empty() && result.findings.is_empty() {
         return "No forests found. Create one with `git forest new <name>`.".to_string();
     }
 
-    let name_width = result
-        .forests
-        .iter()
-        .map(|f| f.name.as_str().len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-
     let mut lines = Vec::new();
-    lines.push(format!(
-        "{:<name_width$}  {:<10}  {:<8}  BRANCHES",
-        "NAME", "AGE", "MODE"
-    ));
+    if result.forests.is_empty() {
+        lines.push("No readable forests found.".to_string());
+    } else {
+        let name_width = result
+            .forests
+            .iter()
+            .map(|f| f.name.as_str().len())
+            .max()
+            .unwrap_or(0)
+            .max(4);
 
-    for forest in &result.forests {
-        let mut branches = format_branches(&forest.branch_summary);
-        branches.push_str(&format_missing_worktree_summary(&forest.missing_worktrees));
-        branches.push_str(&format_branch_drift_summary(&forest.branch_drifts));
-        branches.push_str(&format_branch_lookup_error_summary(
-            &forest.branch_lookup_errors,
-        ));
         lines.push(format!(
-            "{:<name_width$}  {:<10}  {:<8}  {}",
-            forest.name, forest.age_display, forest.mode, branches
+            "{:<name_width$}  {:<10}  {:<8}  BRANCHES",
+            "NAME", "AGE", "MODE"
         ));
+
+        for forest in &result.forests {
+            let mut branches = format_branches(&forest.branch_summary);
+            branches.push_str(&format_missing_worktree_summary(&forest.missing_worktrees));
+            branches.push_str(&format_branch_drift_summary(&forest.branch_drifts));
+            branches.push_str(&format_branch_lookup_error_summary(
+                &forest.branch_lookup_errors,
+            ));
+            lines.push(format!(
+                "{:<name_width$}  {:<10}  {:<8}  {}",
+                forest.name, forest.age_display, forest.mode, branches
+            ));
+        }
+    }
+
+    if !result.findings.is_empty() {
+        lines.push(String::new());
+        lines.push("Inventory findings:".to_string());
+        for finding in &result.findings {
+            lines.push(format!(
+                "  warning: {} at {}: {}",
+                finding.code.as_str(),
+                finding.path,
+                first_line(&finding.message)
+            ));
+        }
     }
 
     lines.join("\n")
+}
+
+impl LsFindingCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingMetadata => "missing-metadata",
+            Self::UnreadableMetadata => "unreadable-metadata",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -359,12 +458,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = cmd_ls(&[tmp.path()]).unwrap();
         assert!(result.forests.is_empty());
+        assert!(result.findings.is_empty());
     }
 
     #[test]
     fn cmd_ls_nonexistent_dir() {
         let result = cmd_ls(&[Path::new("/nonexistent/path")]).unwrap();
         assert!(result.forests.is_empty());
+        assert!(result.findings.is_empty());
     }
 
     #[test]
@@ -422,6 +523,92 @@ mod tests {
             .unwrap();
         assert_eq!(review_pr.mode, ForestMode::Review);
         assert_eq!(review_pr.branch_summary.len(), 2);
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn cmd_ls_keeps_readable_forests_and_reports_metadata_findings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let readable_dir = base.join("readable");
+        let unreadable_dir = base.join("unreadable");
+        let missing_dir = base.join("missing");
+
+        let readable = make_meta(
+            "readable",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/readable")],
+        );
+        std::fs::create_dir_all(&readable_dir).unwrap();
+        readable.write(&readable_dir.join(META_FILENAME)).unwrap();
+        std::fs::create_dir_all(&unreadable_dir).unwrap();
+        std::fs::write(unreadable_dir.join(META_FILENAME), "not valid metadata").unwrap();
+        std::fs::create_dir_all(&missing_dir).unwrap();
+
+        let result = cmd_ls(&[base]).unwrap();
+
+        assert_eq!(result.forests.len(), 1);
+        assert_eq!(result.forests[0].name.as_str(), "readable");
+        assert_eq!(result.findings.len(), 2);
+
+        let missing = result
+            .findings
+            .iter()
+            .find(|finding| finding.code == LsFindingCode::MissingMetadata)
+            .unwrap();
+        assert_eq!(missing.path, missing_dir.to_string_lossy());
+        assert!(missing.message.contains(META_FILENAME));
+
+        let unreadable = result
+            .findings
+            .iter()
+            .find(|finding| finding.code == LsFindingCode::UnreadableMetadata)
+            .unwrap();
+        assert_eq!(unreadable.path, unreadable_dir.to_string_lossy());
+        assert!(unreadable
+            .message
+            .contains("failed to parse forest meta TOML"));
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["code"] == "missing-metadata"
+                && finding["path"].as_str() == Some(missing.path.as_str())
+        }));
+        assert!(json["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["code"] == "unreadable-metadata"
+                && finding["path"].as_str() == Some(unreadable.path.as_str())
+        }));
+
+        let human = format_ls_human(&result);
+        assert!(human.contains("readable"));
+        assert!(human.contains("Inventory findings:"));
+        assert!(human.contains("missing-metadata"));
+        assert!(human.contains("unreadable-metadata"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ls_finding_json_represents_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut directory_name = b"missing-".to_vec();
+        directory_name.push(0xff);
+        let directory = PathBuf::from(std::ffi::OsString::from_vec(directory_name));
+        let result = LsResult {
+            forests: vec![],
+            findings: vec![LsFinding {
+                code: LsFindingCode::MissingMetadata,
+                path: display_path(&directory),
+                message: "missing metadata".to_string(),
+            }],
+        };
+
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].code, LsFindingCode::MissingMetadata);
+        assert!(result.findings[0].path.contains('\u{fffd}'));
+        serde_json::to_string(&result).expect("inventory findings should always serialize");
+        assert!(format_ls_human(&result).contains("missing-metadata"));
     }
 
     #[test]
@@ -520,6 +707,32 @@ mod tests {
         let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"outer-forest"));
         assert!(names.contains(&"inner-forest"));
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn cmd_ls_reports_unreadable_metadata_on_nested_configured_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_outer = tmp.path().join("worktrees");
+        let base_inner = base_outer.join("acme");
+        let forest_dir = base_inner.join("inner-forest");
+        let meta = make_meta(
+            "inner-forest",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/inner")],
+        );
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        std::fs::write(base_inner.join(META_FILENAME), "not valid metadata").unwrap();
+
+        let result = cmd_ls(&[base_outer.as_path(), base_inner.as_path()]).unwrap();
+
+        assert_eq!(result.forests.len(), 1);
+        assert_eq!(result.forests[0].name.as_str(), "inner-forest");
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].code, LsFindingCode::UnreadableMetadata);
+        assert_eq!(result.findings[0].path, base_inner.to_string_lossy());
     }
 
     #[test]
@@ -764,7 +977,10 @@ mod tests {
 
     #[test]
     fn format_ls_human_empty() {
-        let result = LsResult { forests: vec![] };
+        let result = LsResult {
+            forests: vec![],
+            findings: vec![],
+        };
         let text = format_ls_human(&result);
         assert!(text.contains("No forests found"));
     }
@@ -828,6 +1044,7 @@ mod tests {
                     branch_lookup_errors: vec![],
                 },
             ],
+            findings: vec![],
         };
         insta::assert_snapshot!(format_ls_human(&result));
     }
@@ -851,6 +1068,7 @@ mod tests {
                 branch_lookup_error_count: 0,
                 branch_lookup_errors: vec![],
             }],
+            findings: vec![],
         };
         let text = format_ls_human(&result);
         assert!(text.contains("NAME"));

@@ -78,6 +78,15 @@ git forest exec my-feature -- make test   # run command in each repo
 git forest ls                         # list all forests
 ```
 
+With `--json`, `ls` returns both `forests` and `findings`. Always inspect
+`findings`: `missing-metadata` identifies a directory under a configured
+worktree base with no `.forest-meta.toml`, while `unreadable-metadata`
+identifies metadata that could not be read, parsed, or validated. These are
+observations only; they do not make the directory a managed forest or grant
+cleanup authority. Finding paths are display-safe strings; a non-UTF-8 name
+may contain replacement characters but cannot suppress the rest of the JSON
+inventory.
+
 ### 4. Clean Up
 
 ```sh
@@ -98,6 +107,7 @@ git forest reset --config-only --confirm  # wipe config/state only, keep worktre
 - **Dotfiles are not automatically safe:** Explicitly passing `.env` to `--discard-root-entry` deletes it. Never infer disposable entries merely because their names begin with a dot.
 - **Symlink boundary:** `rm` refuses a symlinked forest root even with `--force`. Inside a real forest, deleting an authorized symlink removes the link rather than following its target.
 - **Recovery blockers are intentional:** Inaccessible or offline symlinked worktree bases, inaccessible forest entries, corrupt forest metadata, or a staged metadata file left beside the worktree base block `rm --all` and prevent `reset` from deleting config/state. Preserve and repair the reported state before retrying.
+- **Inspect inventory findings:** `git forest ls --json` continues past missing or unreadable metadata and exits 0 after producing the inventory, even when no readable forests exist. A command-level failure to enumerate a configured worktree base still exits 1.
 - **JSON requires representable paths:** `rm --json` refuses non-UTF-8 forest-root names before mutation. Inspect and rename the reported entry; do not silently retry the destructive command without JSON.
 - **Error messages include hints:** All errors have `hint:` lines with recovery suggestions.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
