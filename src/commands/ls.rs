@@ -108,7 +108,8 @@ pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
         .collect();
     findings.retain(|finding| {
         finding.code != LsFindingCode::MissingMetadata
-            || !worktree_base_keys.contains(&canonical_path_key(&finding.path))
+            || (!worktree_base_keys.contains(&canonical_path_key(&finding.path))
+                && !is_dot_prefixed(&finding.path))
     });
     let mut seen_findings = BTreeSet::new();
     findings
@@ -135,6 +136,11 @@ pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
 
 fn canonical_path_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_dot_prefixed(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
 }
 
 fn display_path(path: &Path) -> String {
@@ -585,6 +591,55 @@ mod tests {
         assert!(human.contains("Inventory findings:"));
         assert!(human.contains("missing-metadata"));
         assert!(human.contains("unreadable-metadata"));
+    }
+
+    #[test]
+    fn cmd_ls_suppresses_only_dot_prefixed_missing_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let hidden_readable_dir = base.join(".hidden-readable");
+        let hidden_unreadable_dir = base.join(".hidden-unreadable");
+        let hidden_missing_dir = base.join(".claude");
+        let visible_missing_dir = base.join("visible-missing");
+
+        let hidden_readable = make_meta(
+            ".hidden-readable",
+            Utc::now(),
+            ForestMode::Feature,
+            vec![make_repo("api", "dliv/hidden-readable")],
+        );
+        std::fs::create_dir_all(&hidden_readable_dir).unwrap();
+        hidden_readable
+            .write(&hidden_readable_dir.join(META_FILENAME))
+            .unwrap();
+        std::fs::create_dir_all(&hidden_unreadable_dir).unwrap();
+        std::fs::write(
+            hidden_unreadable_dir.join(META_FILENAME),
+            "not valid metadata",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&hidden_missing_dir).unwrap();
+        std::fs::create_dir_all(&visible_missing_dir).unwrap();
+
+        let result = cmd_ls(&[base]).unwrap();
+
+        assert!(result
+            .forests
+            .iter()
+            .any(|forest| forest.name.as_str() == ".hidden-readable"));
+        assert_eq!(result.findings.len(), 2);
+        assert!(result.findings.iter().any(|finding| {
+            finding.code == LsFindingCode::UnreadableMetadata
+                && finding.path == hidden_unreadable_dir.to_string_lossy()
+        }));
+        assert!(result.findings.iter().any(|finding| {
+            finding.code == LsFindingCode::MissingMetadata
+                && finding.path == visible_missing_dir.to_string_lossy()
+        }));
+        assert!(!result
+            .findings
+            .iter()
+            .any(|finding| finding.path == hidden_missing_dir.to_string_lossy()));
     }
 
     #[cfg(unix)]

@@ -140,6 +140,8 @@ Dot-prefixed entries are not inherently disposable. For example, explicitly auth
 
 Inaccessible or offline symlinked worktree bases, inaccessible forest entries, corrupt forest metadata, or metadata staged by an interrupted removal block `rm --all` and prevent `reset` from deleting config/state until recovery is complete. JSON removal refuses non-UTF-8 forest-root names before mutation rather than returning an incomplete path after cleanup.
 
+Named `status`, `exec`, and `rm` operations ignore unreadable metadata in unrelated forest directories while still rejecting an unreadable requested forest. `ls` similarly omits metadata-free dot-prefixed directories as worktree-base administrative state, but continues to list or report dot-prefixed directories that contain valid or unreadable forest metadata.
+
 ### `ls`, `status`, `exec`
 
 ```

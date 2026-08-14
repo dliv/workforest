@@ -630,6 +630,111 @@ fn ls_json_succeeds_with_partial_inventory_findings() {
 }
 
 #[test]
+fn ls_json_suppresses_dot_prefixed_directory_without_metadata() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+    let hidden_missing_dir = worktree_base.join(".claude");
+    let hidden_unreadable_dir = worktree_base.join(".hidden-unreadable");
+    let visible_missing_dir = worktree_base.join("visible-missing");
+    std::fs::create_dir_all(&hidden_missing_dir).unwrap();
+    std::fs::create_dir_all(&hidden_unreadable_dir).unwrap();
+    std::fs::write(
+        hidden_unreadable_dir.join(".forest-meta.toml"),
+        "not valid metadata",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&visible_missing_dir).unwrap();
+
+    let output = bin_cmd()
+        .args(["--json", "ls"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ls stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let findings = json["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().any(|finding| {
+        finding["code"] == "unreadable-metadata"
+            && finding["path"] == hidden_unreadable_dir.to_string_lossy().as_ref()
+    }));
+    assert!(findings.iter().any(|finding| {
+        finding["code"] == "missing-metadata"
+            && finding["path"] == visible_missing_dir.to_string_lossy().as_ref()
+    }));
+    assert!(!findings
+        .iter()
+        .any(|finding| finding["path"] == hidden_missing_dir.to_string_lossy().as_ref()));
+
+    drop(tmp);
+}
+
+#[test]
+fn named_commands_ignore_unreadable_sibling_metadata() {
+    let (tmp, fake_home, worktree_base) = setup_new_env();
+
+    bin_cmd()
+        .args(["new", "good-one", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    let unreadable_dir = worktree_base.join("bad-one");
+    std::fs::create_dir_all(&unreadable_dir).unwrap();
+    std::fs::write(
+        unreadable_dir.join(".forest-meta.toml"),
+        "not valid metadata",
+    )
+    .unwrap();
+
+    bin_cmd()
+        .args(["--json", "status", "good-one"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    bin_cmd()
+        .args(["exec", "good-one", "--", "git", "status", "--short"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    bin_cmd()
+        .args(["--json", "rm", "good-one", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    bin_cmd()
+        .args(["status", "bad-one"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("could not read forest metadata"));
+
+    bin_cmd()
+        .args(["--json", "rm", "--all", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("could not read forest metadata"));
+
+    assert!(worktree_base.join("good-one").exists());
+    drop(tmp);
+}
+
+#[test]
 fn json_outputs_report_branch_metadata_drift() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
 

@@ -12,6 +12,11 @@ pub struct DiscoveredForest {
     pub meta: ForestMeta,
 }
 
+struct ForestLookup {
+    found: Option<(PathBuf, ForestMeta)>,
+    unreadable_alias: Option<anyhow::Error>,
+}
+
 #[derive(Debug)]
 pub enum ForestInventoryEntry {
     Discovered(DiscoveredForest),
@@ -108,14 +113,27 @@ pub fn find_forest(
     worktree_base: &Path,
     name_or_dir: &str,
 ) -> Result<Option<(PathBuf, ForestMeta)>> {
+    let lookup = find_forest_in_base(worktree_base, name_or_dir)?;
+    match (lookup.found, lookup.unreadable_alias) {
+        (Some(found), _) => Ok(Some(found)),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(None),
+    }
+}
+
+fn find_forest_in_base(worktree_base: &Path, name_or_dir: &str) -> Result<ForestLookup> {
     let sanitized = sanitize_forest_name(name_or_dir);
 
     let Some(entries) = worktree_base_entries(worktree_base)? else {
-        return Ok(None);
+        return Ok(ForestLookup {
+            found: None,
+            unreadable_alias: None,
+        });
     };
 
     let mut meta_match = None;
     let mut alias_match = None;
+    let mut unreadable_alias = None;
     for entry in entries {
         let is_dir = entry_path_is_dir(&entry)?;
         reject_staged_metadata_entry(&entry, is_dir)?;
@@ -123,27 +141,42 @@ pub fn find_forest(
         if !is_dir {
             continue;
         }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let is_alias = dir_name == sanitized;
         let meta_path = path.join(META_FILENAME);
-        let Some(meta) = read_forest_meta_if_present(&meta_path)? else {
-            continue;
+        let meta = match read_forest_meta_if_present(&meta_path) {
+            Ok(Some(meta)) => meta,
+            Ok(None) => continue,
+            Err(error) if is_alias => {
+                if unreadable_alias.is_none() {
+                    unreadable_alias = Some(error);
+                }
+                continue;
+            }
+            Err(_) => continue,
         };
 
-        let dir_name = entry.file_name().to_string_lossy().to_string();
         if meta.name.as_str() == name_or_dir {
             if !path_is_symlink(&path) {
-                return Ok(Some((path, meta)));
+                return Ok(ForestLookup {
+                    found: Some((path, meta)),
+                    unreadable_alias,
+                });
             }
             if meta_match.is_none() {
                 meta_match = Some((path.clone(), meta.clone()));
             }
         }
 
-        if dir_name == sanitized && alias_match.is_none() {
+        if is_alias && alias_match.is_none() {
             alias_match = Some((path, meta));
         }
     }
 
-    Ok(meta_match.or(alias_match))
+    Ok(ForestLookup {
+        found: meta_match.or(alias_match),
+        unreadable_alias,
+    })
 }
 
 fn worktree_base_entries(path: &Path) -> Result<Option<Vec<DirEntry>>> {
@@ -289,9 +322,14 @@ fn resolve_forest_by_name_or_dir(
 ) -> Result<Option<(PathBuf, ForestMeta)>> {
     let mut symlink_meta_match = None;
     let mut alias_match = None;
+    let mut unreadable_alias = None;
 
     for base in worktree_bases {
-        let Some(found) = find_forest(base, name_or_dir)? else {
+        let lookup = find_forest_in_base(base, name_or_dir)?;
+        if unreadable_alias.is_none() {
+            unreadable_alias = lookup.unreadable_alias;
+        }
+        let Some(found) = lookup.found else {
             continue;
         };
 
@@ -310,7 +348,13 @@ fn resolve_forest_by_name_or_dir(
         }
     }
 
-    Ok(symlink_meta_match.or(alias_match))
+    match symlink_meta_match.or(alias_match) {
+        Some(found) => Ok(Some(found)),
+        None => match unreadable_alias {
+            Some(error) => Err(error),
+            None => Ok(None),
+        },
+    }
 }
 
 fn current_dir_preserving_symlinks() -> Result<PathBuf> {
@@ -617,6 +661,34 @@ mod tests {
         assert!(result.is_some());
     }
 
+    #[test]
+    fn find_forest_ignores_unreadable_sibling_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let unreadable_dir = base.join("bad-one");
+        std::fs::create_dir_all(&unreadable_dir).unwrap();
+        std::fs::write(unreadable_dir.join(META_FILENAME), "not valid metadata").unwrap();
+        write_test_meta(&base.join("good-one"), "good-one", ForestMode::Feature);
+
+        let result = find_forest(base, "good-one").unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().1.name.as_str(), "good-one");
+    }
+
+    #[test]
+    fn find_forest_rejects_unreadable_named_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("bad-one");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join(META_FILENAME), "not valid metadata").unwrap();
+
+        let error = find_forest(tmp.path(), "bad-one")
+            .expect_err("the requested unreadable forest should fail resolution");
+
+        assert!(error.to_string().contains("could not read forest metadata"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn find_forest_follows_directory_symlinks() {
@@ -790,6 +862,24 @@ mod tests {
         let (dir, meta) = resolve_forest_multi(&bases, Some("dup")).unwrap();
 
         assert_eq!(dir, dup_dir);
+        assert_eq!(meta.name.as_str(), "dup");
+    }
+
+    #[test]
+    fn resolve_forest_multi_prefers_readable_target_over_unreadable_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_a = tmp.path().join("a-base");
+        let base_b = tmp.path().join("b-base");
+        let unreadable_alias = base_a.join("dup");
+        let readable_target = base_b.join("zzz-dup");
+        std::fs::create_dir_all(&unreadable_alias).unwrap();
+        std::fs::write(unreadable_alias.join(META_FILENAME), "not valid metadata").unwrap();
+        write_test_meta(&readable_target, "dup", ForestMode::Feature);
+
+        let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
+        let (dir, meta) = resolve_forest_multi(&bases, Some("dup")).unwrap();
+
+        assert_eq!(dir, readable_target);
         assert_eq!(meta.name.as_str(), "dup");
     }
 
