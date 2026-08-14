@@ -431,8 +431,7 @@ mod tests {
         std::fs::write(forest_dir.join(META_FILENAME), "not valid metadata").unwrap();
 
         let error = discover_forests_with_dirs(tmp.path())
-            .err()
-            .expect("corrupt metadata should block discovery");
+            .expect_err("corrupt metadata should block discovery");
 
         assert!(error.to_string().contains("could not read forest metadata"));
         assert!(error.to_string().contains("repair or restore"));
@@ -448,8 +447,7 @@ mod tests {
         .unwrap();
 
         let error = discover_forests_with_dirs(tmp.path())
-            .err()
-            .expect("staged metadata should block discovery");
+            .expect_err("staged metadata should block discovery");
 
         assert!(error.to_string().contains("found staged forest metadata"));
         assert!(error
@@ -491,9 +489,7 @@ mod tests {
 
         let result = discover_forests_with_dirs(&base);
         std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
-        let error = result
-            .err()
-            .expect("an inaccessible base should block discovery");
+        let error = result.expect_err("an inaccessible base should block discovery");
 
         assert!(error.to_string().contains("could not read worktree base"));
     }
@@ -509,8 +505,7 @@ mod tests {
         std::fs::remove_dir(&target).unwrap();
 
         let error = discover_forests_with_dirs(&base)
-            .err()
-            .expect("a dangling configured base should block discovery");
+            .expect_err("a dangling configured base should block discovery");
 
         assert!(error.to_string().contains("could not read worktree base"));
         assert!(error
@@ -539,9 +534,7 @@ mod tests {
 
         let result = discover_forests_with_dirs(&base);
         std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
-        let error = result
-            .err()
-            .expect("an inaccessible symlink target should block discovery");
+        let error = result.expect_err("an inaccessible symlink target should block discovery");
 
         assert!(error
             .to_string()

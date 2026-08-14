@@ -3,13 +3,15 @@ setup:
 
 check:
     cargo fmt --all -- --check
-    cargo clippy --all-targets
+    cargo clippy --no-default-features --features stable --all-targets -- -D warnings
+    cargo clippy --no-default-features --features beta --all-targets -- -D warnings
 
 build:
     cargo build
 
 test:
-    cargo test
+    cargo test --no-default-features --features stable
+    cargo test --no-default-features --features beta
 
 test-linux:
     docker run --rm -v "{{justfile_directory()}}:/work" -w /work rust:latest cargo test

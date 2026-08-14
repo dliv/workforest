@@ -215,7 +215,6 @@ fn subcommand_rm_recognized() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
-#[cfg(feature = "stable")]
 fn with_no_config() -> assert_cmd::Command {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("empty-home");
