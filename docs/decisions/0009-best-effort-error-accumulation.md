@@ -19,7 +19,7 @@ Per-command error policies, documented and enforced:
 - **Named forest resolution:** `status <name>`, `exec <name>`, and `rm <name>` continue past unreadable metadata in unrelated directories. Unreadable metadata in a directory matching the requested name remains an error, as do failures to enumerate or inspect the configured base and staged metadata from an interrupted removal.
 - **Whole-base mutations:** `rm --all` and `reset` retain strict discovery because incomplete enumeration cannot authorize an all-forests mutation.
 
-Exit codes reflect accumulated state: `main.rs` exits 1 when `rm` has errors (line 149) or `exec` has failures (line 172).
+Exit codes reflect accumulated state: `src/lib.rs` exits 1 when `rm` has errors or `exec` has failures.
 
 `--force` escalates behavior within a command (e.g., `git branch -d` → `-D` in `rm`) but does not change the accumulation model.
 

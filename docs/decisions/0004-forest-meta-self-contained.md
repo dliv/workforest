@@ -19,7 +19,7 @@ Commands depend only on meta + forest directory:
 - `cmd_status(forest_dir, meta)` (`src/commands/status.rs`, line 27) — no config parameter.
 - `cmd_exec(forest_dir, meta, cmd)` (`src/commands/exec.rs`, line 13) — no config parameter.
 
-Config is loaded in `main.rs` only to resolve `worktree_base` for forest discovery, then meta takes over.
+Config is loaded in `src/lib.rs` only to resolve `worktree_base` for forest discovery, then meta takes over.
 
 ## Consequences
 

@@ -9,12 +9,12 @@ To support `--json` output (ADR 0001), command logic cannot call `println!` dire
 
 ## Decision
 
-Command functions return typed result structs. `main.rs` handles all output — human-readable or JSON — via a single generic dispatcher.
+Command functions return typed result structs. `src/lib.rs`, the shell behind both binaries in `src/bin/`, handles all output — human-readable or JSON — via a single generic dispatcher.
 
 The pattern in every command:
 
 1. `cmd_xxx(inputs) -> Result<XxxResult>` — pure-ish logic, no printing.
-2. `main.rs:output()` (line 179) — dispatches based on `--json`: either `serde_json::to_string_pretty` or `format_xxx_human`.
+2. `output()` in `src/lib.rs` — dispatches based on `--json`: either `serde_json::to_string_pretty` or `format_xxx_human`.
 
 Concrete types: `NewResult` (`src/commands/new.rs`), `RmResult` (`src/commands/rm.rs`), `LsResult` (`src/commands/ls.rs`), `StatusResult` (`src/commands/status.rs`), `ExecResult` (`src/commands/exec.rs`), `InitResult` (`src/commands/init.rs`). All derive `Serialize`. Each command module also exports a `format_*_human()` function returning `String`.
 
@@ -24,8 +24,8 @@ The call graph is shallow: `main → command → helpers`. IO lives at the edges
 
 ## Consequences
 
-- **Testability:** Tests assert on data structures, not captured stdout. Every command's tests (138 total) check result fields directly.
+- **Testability:** Tests assert on data structures, not captured stdout. Every command's tests check result fields directly.
 - **Dual output for free:** Human and JSON formatting share the same structs with zero duplication.
-- **Clean boundary:** Command logic is pure-ish; all IO is in `main.rs`.
+- **Clean boundary:** Command logic is pure-ish; all IO is in `src/lib.rs`.
 - **Future-proof:** Library or MCP consumers call the same `cmd_*` functions and get typed data back.
 - Plan structs (ADR 0003) follow the same pattern — plans are data too.

@@ -33,7 +33,7 @@ Rust's `debug_assert!` fires in debug/test builds by default and compiles away i
 
 ### `include_str!()` for compile-time embedding
 
-`include_str!("../docs/agent-instructions.md")` (`src/main.rs`, line 204) embeds agent documentation into the binary at compile time. The file's existence is verified by the compiler — a broken path is a build error, not a runtime "file not found." No asset-bundling framework needed.
+`include_str!("../docs/agent-instructions.md")` (`src/lib.rs`) embeds agent documentation into the binary at compile time. The file's existence is verified by the compiler — a broken path is a build error, not a runtime "file not found." No asset-bundling framework needed.
 
 ### Derive macros for serialization and CLI parsing
 

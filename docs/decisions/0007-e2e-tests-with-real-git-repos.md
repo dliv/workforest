@@ -28,7 +28,7 @@ Test examples:
 ## Consequences
 
 - **Real edge cases caught:** Worktree locking, ref resolution, branch-checked-out-elsewhere errors are exercised.
-- **Tests are fast enough:** 138 tests, all on local filesystem with temp directories. No network.
+- **Tests are fast enough:** all on local filesystem with temp directories. No network.
 - **`TestEnv` absorbs setup complexity:** Tests focus on assertions, not git plumbing.
 - **Supports ADR 0003:** Plan tests assert on data; execution tests verify real side effects. Both use the same `TestEnv`.
 - **Enabled by ADR 0008:** Contract-driven plans define what to test; `TestEnv` makes it practical.

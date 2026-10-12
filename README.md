@@ -172,5 +172,3 @@ See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs).
 - **Commands return data, don't print** ([ADR 0002](docs/decisions/0002-functional-core-imperative-shell.md)) — typed result structs, formatted at the edge
 - **Plan/execute for mutations** ([ADR 0003](docs/decisions/0003-plan-execute-split.md)) — `new` and `rm` use plan/execute split with `--dry-run`
 - **Self-contained forest meta** ([ADR 0004](docs/decisions/0004-forest-meta-self-contained.md)) — `.forest-meta.toml` captures all resolved values at creation; post-creation commands never re-consult config
-
-Historical planning docs are in [docs/archive/](docs/archive/).

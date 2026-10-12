@@ -13,7 +13,7 @@ Don't store the template name in `.forest-meta.toml`. The template is a creation
 
 - `ForestMeta` (`src/meta.rs`, lines 23–29) has no `template` field.
 - `src/commands/rm.rs`, `status.rs`, `exec.rs` — none reference config templates.
-- `main.rs` — post-creation commands load config only for `worktree_base`, then work from meta.
+- `src/lib.rs` — post-creation commands load config only for `worktree_base`, then work from meta.
 - The template name is available in `NewResult` for the agent that created the forest — it doesn't need to persist.
 
 ## Consequences
