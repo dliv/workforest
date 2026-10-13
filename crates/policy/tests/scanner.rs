@@ -276,3 +276,109 @@ fn data_include_literals_with_a_backslash_or_control_character_are_refused() {
         );
     }
 }
+
+/// The effectful `std::path` names, kept here as a literal list so that a change to the
+/// scanner's list fails a test.
+const EFFECTFUL_PATH_NAMES: [&str; 11] = [
+    "exists",
+    "try_exists",
+    "metadata",
+    "symlink_metadata",
+    "canonicalize",
+    "read_dir",
+    "read_link",
+    "is_file",
+    "is_dir",
+    "is_symlink",
+    "absolute",
+];
+
+#[test]
+fn effectful_path_methods_are_reported_by_name() {
+    for name in EFFECTFUL_PATH_NAMES
+        .iter()
+        .filter(|name| **name != "absolute")
+    {
+        let source = format!("fn f(p: &std::path::Path) {{ let _ = p.{name}(); }}");
+        assert_eq!(
+            ambient_violations(&source),
+            vec![format!("path effect {name}")],
+            "unexpected ambient violations for: {source}"
+        );
+    }
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"fn f() -> bool { std::path::Path::new("x").exists() }"#,
+            &["path effect exists"],
+        ),
+        (
+            r#"fn f(p: &std::path::Path) -> bool { std::path::Path::is_dir(p) }"#,
+            &["path effect is_dir"],
+        ),
+        (
+            r#"fn f() { let _ = std::fs::metadata("x"); }"#,
+            &["path effect metadata", "std::fs"],
+        ),
+        (
+            r#"fn f(p: &std::path::Path) -> std::path::PathBuf { p.join("x").with_extension("rs") }"#,
+            &[],
+        ),
+        (
+            r#"fn f(p: &std::path::Path) -> bool { p.is_absolute() && p.has_root() }"#,
+            &[],
+        ),
+        (
+            r#"struct S { exists: bool } fn f(s: &S) -> bool { s.exists }"#,
+            &[],
+        ),
+        (r#"fn f() { let _ = "p.exists()"; } // q.metadata()"#, &[]),
+    ];
+    for &(source, expected) in cases {
+        assert_eq!(
+            ambient_violations(source),
+            expected.to_vec(),
+            "unexpected ambient violations for: {source}"
+        );
+    }
+}
+
+#[test]
+fn path_effects_are_reported_as_values_and_imports() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"use std::path::Path; fn f(paths: &[&Path]) -> bool { paths.iter().copied().any(Path::exists) }"#,
+            &["path effect exists"],
+        ),
+        (
+            r#"use std::path::Path; fn g() { let f = Path::exists; let _ = f; }"#,
+            &["path effect exists"],
+        ),
+        (
+            r#"fn f() { let check = std::path::Path::is_file; let _ = check; }"#,
+            &["path effect is_file"],
+        ),
+        (
+            r#"fn f(p: &std::path::Path) { let _ = std::path::absolute(p); }"#,
+            &["path effect absolute"],
+        ),
+        (
+            r#"use std::path::absolute; fn f(p: &std::path::Path) { let _ = absolute(p); }"#,
+            &["path effect absolute"],
+        ),
+        (
+            r#"use std::path::{absolute, Path}; fn f(p: &Path) { let _ = absolute(p); }"#,
+            &["path effect absolute"],
+        ),
+        (
+            r#"use std::path::{Path, PathBuf}; fn f(p: &Path) -> PathBuf { p.to_path_buf() }"#,
+            &[],
+        ),
+    ];
+    for &(source, expected) in cases {
+        assert_eq!(
+            ambient_violations(source),
+            expected.to_vec(),
+            "unexpected ambient violations for: {source}"
+        );
+    }
+}

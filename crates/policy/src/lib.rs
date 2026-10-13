@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod classification;
+pub mod manifest;
 pub mod scan;
 mod tokens;
 

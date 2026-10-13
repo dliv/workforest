@@ -95,6 +95,12 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     },
 ];
 
+/// Dependency crates of the root package that Pure modules may use. `clap`: src/cli.rs
+/// derives its argument types with clap's derive macros; parsing the arguments, which
+/// reads the process's arguments, happens only in src/lib.rs. Every entry must still be
+/// used by a Pure module.
+pub const PURE_ALLOWED_CRATES: &[&str] = &["clap"];
+
 /// "src/lib.rs" -> "crate"; "src/meta.rs" -> "meta"; "src/commands/mod.rs" -> "commands";
 /// "src/commands/rm.rs" -> "commands::rm"; "src/bin/x.rs" -> "bin::x". None for other paths.
 pub fn module_path(relative_file: &str) -> Option<String> {

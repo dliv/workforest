@@ -13,6 +13,26 @@ use crate::tokens::{
 /// Reported for any use of standard input, which reads the outside world.
 const STDIN: &str = "std::io::stdin";
 
+/// `std::path` names with an ambient effect: the `Path` methods that query the filesystem,
+/// and `absolute`, which reads the working directory. Reported by name when called as a
+/// method (`path.exists()`), after `::` whether called or not (`Path::exists(p)`,
+/// `.any(Path::exists)`, `std::path::absolute(p)`), and as the last segment of a `use`
+/// import (`use std::path::{absolute, Path};`). The scan does not know types, so a
+/// same-named item of another type is reported too.
+const EFFECTFUL_PATH_NAMES: [&str; 11] = [
+    "exists",
+    "try_exists",
+    "metadata",
+    "symlink_metadata",
+    "canonicalize",
+    "read_dir",
+    "read_link",
+    "is_file",
+    "is_dir",
+    "is_symlink",
+    "absolute",
+];
+
 /// Tokens of the file minus every `#[cfg(test)] mod <name> { ... }` block (matched braces).
 pub fn production_tokens(source: &str) -> Vec<String> {
     let tokens = rust_code_tokens(source);
@@ -275,6 +295,12 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
             if let Some(name) = imported_macro {
                 violations.insert(format!("{name}!"));
             }
+            let imported_path_effect = path
+                .last()
+                .filter(|name| EFFECTFUL_PATH_NAMES.contains(&name.as_str()));
+            if let Some(name) = imported_path_effect {
+                violations.insert(format!("path effect {name}"));
+            }
         }
         for path in expand_std_paths(&import.path, &aliases) {
             if is_stdin_path(&path) {
@@ -330,6 +356,18 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
                     _ => {}
                 }
                 cursor += 1;
+            }
+        }
+
+        if let Some(name) =
+            token_identifier(token).filter(|name| EFFECTFUL_PATH_NAMES.contains(name))
+        {
+            let previous = index.checked_sub(1).map(|before| tokens[before].as_str());
+            let after_path_separator = previous == Some("::");
+            let called_as_method =
+                previous == Some(".") && tokens.get(index + 1).is_some_and(|next| next == "(");
+            if after_path_separator || called_as_method {
+                violations.insert(format!("path effect {name}"));
             }
         }
 
@@ -393,6 +431,43 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
     }
 
     violations.into_iter().collect()
+}
+
+/// Dependency crates (named in `dependencies`) that this file's production code refers to:
+/// the first segment of every `use` path, and every identifier naming a dependency that is
+/// followed by `::`, whatever precedes it, except after a `::` that itself follows `crate`,
+/// `self`, `super` or `Self` (a crate-internal path). Fails closed: a same-named segment
+/// elsewhere in a path is reported too.
+pub fn external_crate_references(
+    source: &str,
+    dependencies: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let tokens = production_tokens(source);
+    let mut references = BTreeSet::new();
+    for import in use_imports(&tokens) {
+        let first = normalized_path(&import.path).and_then(|path| path.into_iter().next());
+        if let Some(name) = first.filter(|name| dependencies.contains(name)) {
+            references.insert(name);
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        let Some(name) = token_identifier(token).filter(|name| dependencies.contains(*name)) else {
+            continue;
+        };
+        if tokens.get(index + 1).is_none_or(|next| next != "::") {
+            continue;
+        }
+        let crate_internal = index >= 2
+            && tokens[index - 1] == "::"
+            && matches!(
+                tokens[index - 2].as_str(),
+                "crate" | "self" | "super" | "Self"
+            );
+        if !crate_internal {
+            references.insert(name.to_owned());
+        }
+    }
+    references
 }
 
 /// Names of traits declared in the production tokens (the `trait` keyword followed by an identifier).
