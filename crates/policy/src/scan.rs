@@ -16,10 +16,10 @@ const STDIN: &str = "std::io::stdin";
 
 /// `std::path` names with an ambient effect: the `Path` methods that query the filesystem,
 /// and `absolute`, which reads the working directory. Reported by name when called as a
-/// method (`path.exists()`), after `::` whether called or not (`Path::exists(p)`,
-/// `.any(Path::exists)`, `std::path::absolute(p)`), and as the last segment of a `use`
-/// import (`use std::path::{absolute, Path};`). The scan does not know types, so a
-/// same-named item of another type is reported too.
+/// method, with or without a turbofish (`path.exists()`, `path.exists::<>()`), after `::`
+/// whether called or not (`Path::exists(p)`, `.any(Path::exists)`, `std::path::absolute(p)`),
+/// and as the last segment of a `use` import (`use std::path::{absolute, Path};`). The scan
+/// does not know types, so a same-named item of another type is reported too.
 const EFFECTFUL_PATH_NAMES: [&str; 11] = [
     "exists",
     "try_exists",
@@ -34,7 +34,9 @@ const EFFECTFUL_PATH_NAMES: [&str; 11] = [
     "absolute",
 ];
 
-/// Tokens of the file minus every `#[cfg(test)] mod <name> { ... }` block (matched braces).
+/// Tokens of the file minus every test-only inline module: a `mod <name> { ... }` block
+/// (matched braces) whose outer attributes include `#[cfg(test)]`, whatever other attributes
+/// come before or after it and whatever its visibility. The attributes are removed with it.
 pub fn production_tokens(source: &str) -> Vec<String> {
     let tokens = rust_code_tokens(source);
     let mut kept = Vec::with_capacity(tokens.len());
@@ -51,34 +53,56 @@ pub fn production_tokens(source: &str) -> Vec<String> {
     kept
 }
 
-/// If a `#[cfg(test)] mod <name> {` block starts at `start`, the index just past
-/// its matching closing brace. An unterminated block is not stripped.
+/// If a test-only inline module starts at `start`, the index just past its matching closing
+/// brace. The module starts with one or more consecutive outer attributes `#[ ... ]`
+/// (balanced brackets), one of which is exactly `#[cfg(test)]`, then an optional `pub` or
+/// `pub(...)`, then `mod <name> {`. Any other shape, and an unterminated block, is production
+/// code.
 fn test_module_end(tokens: &[String], start: usize) -> Option<usize> {
-    const HEADER: [&str; 8] = ["#", "[", "cfg", "(", "test", ")", "]", "mod"];
-    let header_matches = HEADER
-        .iter()
-        .enumerate()
-        .all(|(offset, expected)| tokens.get(start + offset).is_some_and(|t| t == expected));
-    if !header_matches {
+    let mut cursor = start;
+    let mut has_cfg_test = false;
+    while tokens.get(cursor).is_some_and(|t| t == "#") && tokens.get(cursor + 1)? == "[" {
+        let close = matching_close(tokens, cursor + 1, "[", "]")?;
+        has_cfg_test |= tokens[cursor + 2..close] == ["cfg", "(", "test", ")"];
+        cursor = close + 1;
+    }
+    if !has_cfg_test {
         return None;
     }
-    let name = start + HEADER.len();
-    token_identifier(tokens.get(name)?)?;
-    let open = name + 1;
+    if tokens.get(cursor)? == "pub" {
+        cursor += 1;
+        if tokens.get(cursor)? == "(" {
+            cursor = matching_close(tokens, cursor, "(", ")")? + 1;
+        }
+    }
+    if tokens.get(cursor)? != "mod" {
+        return None;
+    }
+    token_identifier(tokens.get(cursor + 1)?)?;
+    let open = cursor + 2;
     if tokens.get(open)? != "{" {
         return None;
     }
+    matching_close(tokens, open, "{", "}").map(|close| close + 1)
+}
+
+/// The index of the token closing the `open_token` at `open`, counting nested pairs, or
+/// `None` when it is never closed.
+fn matching_close(
+    tokens: &[String],
+    open: usize,
+    open_token: &str,
+    close_token: &str,
+) -> Option<usize> {
     let mut depth = 0_usize;
     for (index, token) in tokens.iter().enumerate().skip(open) {
-        match token.as_str() {
-            "{" => depth += 1,
-            "}" => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index + 1);
-                }
+        if token == open_token {
+            depth += 1;
+        } else if token == close_token {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
             }
-            _ => {}
         }
     }
     None
@@ -191,10 +215,22 @@ fn without_visibility_qualifiers(tokens: Vec<String>) -> Vec<String> {
 
 /// Every `crate::`, `super::` or `self::` path written inline, with its further segments and
 /// the index of its first token. A `crate`, `super` or `self` preceded by `::` continues a path
-/// already read (`super::super::x`) and does not start another.
+/// already read (`super::super::x`) and does not start another. `use` statements are skipped
+/// up to their `;`, because the use-tree reader expands them, so a grouped prefix such as
+/// `use super::super::{a, b}` adds no edge of its own; `use<...>`, a precise-capturing bound
+/// inside a type, is not a statement and is not skipped.
 fn inline_crate_paths(tokens: &[String]) -> Vec<(usize, Vec<String>)> {
     let mut paths = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == "use" && tokens.get(index + 1).is_none_or(|next| next != "<") {
+            index = tokens[index..]
+                .iter()
+                .position(|t| t == ";")
+                .map_or(tokens.len(), |offset| index + offset + 1);
+            continue;
+        }
         let continues_path = index > 0 && tokens[index - 1] == "::";
         let starts_path = !continues_path
             && matches!(token.as_str(), "crate" | "super" | "self")
@@ -203,6 +239,7 @@ fn inline_crate_paths(tokens: &[String]) -> Vec<(usize, Vec<String>)> {
                 .get(index + 2)
                 .is_some_and(|t| token_identifier(t).is_some());
         if !starts_path {
+            index += 1;
             continue;
         }
         let mut path = vec![token.clone()];
@@ -215,6 +252,7 @@ fn inline_crate_paths(tokens: &[String]) -> Vec<(usize, Vec<String>)> {
             cursor += 2;
         }
         paths.push((index, path));
+        index += 1;
     }
     paths
 }
@@ -250,6 +288,30 @@ fn is_stdin_path(path: &[String]) -> bool {
         path,
         [root, io, name, ..] if root == "std" && io == "io" && (name == "stdin" || name == "Stdin")
     )
+}
+
+/// The index just past a turbofish `::<...>` (balanced `<` and `>` tokens) starting at
+/// `index`, or `index` itself when none starts there.
+fn after_turbofish(tokens: &[String], index: usize) -> usize {
+    let starts_turbofish = tokens.get(index).is_some_and(|t| t == "::")
+        && tokens.get(index + 1).is_some_and(|t| t == "<");
+    if !starts_turbofish {
+        return index;
+    }
+    let mut depth = 0_usize;
+    for (cursor, token) in tokens.iter().enumerate().skip(index + 1) {
+        match token.as_str() {
+            "<" => depth += 1,
+            ">" => {
+                depth -= 1;
+                if depth == 0 {
+                    return cursor + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    index
 }
 
 /// Ambient-effect violations in a Pure module's production tokens: any path into `std::fs`,
@@ -347,8 +409,10 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
         {
             let previous = index.checked_sub(1).map(|before| tokens[before].as_str());
             let after_path_separator = previous == Some("::");
-            let called_as_method =
-                previous == Some(".") && tokens.get(index + 1).is_some_and(|next| next == "(");
+            let called_as_method = previous == Some(".")
+                && tokens
+                    .get(after_turbofish(&tokens, index + 1))
+                    .is_some_and(|next| next == "(");
             if after_path_separator || called_as_method {
                 violations.insert(format!("path effect {name}"));
             }

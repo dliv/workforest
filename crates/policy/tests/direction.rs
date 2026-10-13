@@ -193,3 +193,23 @@ fn use_trees_inside_inline_modules_resolve_against_their_scope() {
         module_set(&[])
     );
 }
+
+#[test]
+fn grouped_use_prefixes_add_no_edge_of_their_own() {
+    assert_eq!(
+        crate_edges(
+            "commands::rm",
+            "use super::super::{channel::APP_NAME, meta::ForestMode};",
+            &known_modules()
+        ),
+        module_set(&["channel", "meta"])
+    );
+    assert_eq!(
+        crate_edges(
+            "commands::rm",
+            "mod inner { use super::super::super::{channel::APP_NAME, meta::ForestMode}; }",
+            &known_modules()
+        ),
+        module_set(&["channel", "meta"])
+    );
+}

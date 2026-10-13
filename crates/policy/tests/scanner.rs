@@ -2,7 +2,11 @@
 //! grouped and glob imports, raw identifiers, macros and literals cannot hide an
 //! ambient effect, and comments and strings cannot fake one.
 
-use git_forest_policy::scan::ambient_violations;
+use std::collections::BTreeSet;
+
+use git_forest_policy::scan::{
+    ambient_violations, crate_edges, external_crate_references, trait_declarations,
+};
 
 #[test]
 fn ambient_scanner_rejects_aliases_grouped_imports_and_spaced_unsafe() {
@@ -178,6 +182,22 @@ fn effectful_path_methods_are_reported_by_name() {
             &[],
         ),
         (r#"fn f() { let _ = "p.exists()"; } // q.metadata()"#, &[]),
+        (
+            r#"fn f(p: &std::path::Path) -> bool { p.exists::<>() }"#,
+            &["path effect exists"],
+        ),
+        (
+            r#"fn f(ps: &[&std::path::Path]) -> bool { ps.iter().any(|p| p.is_file::<>()) }"#,
+            &["path effect is_file"],
+        ),
+        (
+            r#"fn f(p: &std::path::Path) -> bool { p.exists::<Vec<u8>>() }"#,
+            &["path effect exists"],
+        ),
+        (
+            r#"struct S { exists: u8 } fn f(s: &S) -> bool { s.exists < 1 }"#,
+            &[],
+        ),
     ];
     for &(source, expected) in cases {
         assert_eq!(
@@ -227,4 +247,52 @@ fn path_effects_are_reported_as_values_and_imports() {
             "unexpected ambient violations for: {source}"
         );
     }
+}
+
+#[test]
+fn test_only_modules_are_skipped_whatever_their_attributes() {
+    let body = r#"trait T {} fn f() -> bool { std::path::Path::new("x").exists() }
+fn g() -> usize { core::mem::size_of::<crate::meta::ForestMode>() }
+fn h() { let _ = directories::UserDirs::new(); }"#;
+    let known: Vec<String> = ["channel", "meta"].map(ToOwned::to_owned).to_vec();
+    let deps: BTreeSet<String> = ["directories".to_owned()].into_iter().collect();
+    let set = |names: &[&str]| -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    };
+    for header in [
+        "#[cfg(test)] #[allow(dead_code)] mod t",
+        "#[allow(dead_code)] #[cfg(test)] mod t",
+        "#[cfg(test)] pub mod t",
+        "#[cfg(test)] pub(crate) mod t",
+    ] {
+        let source = format!("{header} {{ {body} }}");
+        assert_eq!(
+            ambient_violations(&source),
+            Vec::<String>::new(),
+            "ambient: {source}"
+        );
+        assert_eq!(
+            trait_declarations(&source),
+            Vec::<String>::new(),
+            "traits: {source}"
+        );
+        assert_eq!(
+            crate_edges("channel", &source, &known),
+            set(&[]),
+            "edges: {source}"
+        );
+        assert_eq!(
+            external_crate_references(&source, &deps),
+            set(&[]),
+            "crates: {source}"
+        );
+    }
+    let source = format!("#[allow(dead_code)] mod t {{ {body} }}");
+    assert_eq!(ambient_violations(&source), vec!["path effect exists"]);
+    assert_eq!(trait_declarations(&source), vec!["T"]);
+    assert_eq!(crate_edges("channel", &source, &known), set(&["meta"]));
+    assert_eq!(
+        external_crate_references(&source, &deps),
+        set(&["directories"])
+    );
 }
