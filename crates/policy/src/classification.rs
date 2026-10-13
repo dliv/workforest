@@ -13,7 +13,8 @@ pub enum ModuleClass {
     Command,
     /// Types and helpers used across commands. Imports Shared and Pure.
     Shared,
-    /// No ambient effects in its own source. Imports only Pure plus allowlisted edges.
+    /// None of the effects the purity scan lists in its own source. Imports only Pure plus
+    /// allowlisted edges.
     Pure,
     /// Test helpers compiled only for tests. Not scanned.
     TestSupport,
@@ -56,7 +57,8 @@ const BRANCH_STATE_HELPER: &str =
 const CLI_TYPE_IMPORT: &str =
     "type-only import of ForestMode or DisposableRootEntry, until these types move into a Pure module";
 
-/// Edges the class rules would refuse but that are sanctioned, each with a reason naming who removes it.
+/// Edges the class rules would refuse but that are sanctioned, each with a reason: the
+/// permanent boundary it is, or the change that removes it.
 pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     AllowedEdge {
         from: "commands::ls",

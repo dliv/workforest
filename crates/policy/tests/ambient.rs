@@ -1,4 +1,5 @@
-//! Pure modules contain no ambient effects in their production code.
+//! Pure modules contain none of the effects the purity scan lists and use only allowlisted
+//! dependency crates.
 
 use std::collections::BTreeSet;
 use std::path::Path;

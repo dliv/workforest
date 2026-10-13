@@ -1,7 +1,8 @@
 //! Token-level scans of product sources: the production region of a file,
-//! the crate-internal modules it imports, ambient effects in Pure modules, and
-//! trait declarations. Every scan works on tokens, so comments and string
-//! literals can neither hide nor fake a path.
+//! the crate-internal modules it imports, the effects the purity scan reports in
+//! Pure modules, the dependency crates a file refers to, and trait declarations.
+//! Every scan works on tokens, so comments and string literals can neither hide
+//! nor fake a path.
 
 use std::collections::BTreeSet;
 
