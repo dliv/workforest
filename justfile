@@ -1,7 +1,7 @@
 setup:
     git config core.hooksPath .githooks
 
-check: fmt-check lint test
+check: fmt-check lint test policy-control
 
 fmt-check:
     cargo fmt --all -- --check
@@ -9,6 +9,9 @@ fmt-check:
 lint:
     cargo clippy --workspace --locked --no-default-features --features stable --all-targets -- -D warnings
     cargo clippy --workspace --locked --no-default-features --features beta --all-targets -- -D warnings
+
+policy-control:
+    bash scripts/policy-control.sh
 
 build:
     cargo build
