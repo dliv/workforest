@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 
 use crate::tokens::{
-    direct_string_macro_arguments, expand_std_paths, normalized_path, rust_code_tokens,
-    std_aliases, token_identifier, use_imports,
+    direct_string_macro_arguments, expand_std_paths, normalized_path, positioned_use_imports,
+    rust_code_tokens, std_aliases, token_identifier, use_imports,
 };
 
 /// Reported for any use of standard input, which reads the outside world.
@@ -84,32 +84,38 @@ fn test_module_end(tokens: &[String], start: usize) -> Option<usize> {
 }
 
 /// Crate-internal modules this file's production tokens refer to. A path is the token `crate`,
-/// `super` or `self` immediately followed by `::` and an identifier, then any further `::`
-/// segments; `use` trees are expanded the same way (`use super::rm::{self, X}` yields
-/// `super::rm`). Tokens inside a visibility qualifier `pub ( ... )` are skipped, so `pub(crate)`,
-/// `pub(super)` and `pub(in crate::x)` produce no edge. `super` resolves against `module`
-/// (`commands::rm` + `super::branch_state` = `commands::branch_state`); `self` refers to
-/// `module` itself. Each resolved path is truncated to the longest module path present in
-/// MODULES; a path that resolves to `crate` itself becomes an edge to Root, which the class
-/// rules refuse (none exist today). `use` paths starting with anything else (external crates,
-/// `std`, bare child names) are ignored. Self-edges and edges to the module's own children are
-/// dropped.
+/// `super` or `self` (not itself preceded by `::`) immediately followed by `::` and an
+/// identifier, then any further `::` segments; `use` trees are expanded the same way
+/// (`use super::rm::{self, X}` yields `super::rm`). A path is read once, from its first segment,
+/// so `super::super::x` climbs two levels. Tokens inside a visibility qualifier `pub ( ... )`
+/// are skipped, so `pub(crate)`, `pub(super)` and `pub(in crate::x)` produce no edge. `super`
+/// and `self` resolve against `module` plus the inline `mod name { ... }` blocks enclosing the
+/// path (`commands::rm` + `super::branch_state` = `commands::branch_state`; inside an inline
+/// module `child` of `channel`, `super::X` is `channel::X`). Each resolved path is truncated
+/// to the longest module path present in MODULES; a path that resolves to `crate` itself
+/// becomes an edge to Root, which the class rules refuse (none exist today). `use` paths
+/// starting with anything else (external crates, `std`, bare child names) are ignored.
+/// Self-edges, which include edges into the file's own inline modules, and edges to the
+/// module's own children are dropped.
 pub fn crate_edges(module: &str, source: &str, known_modules: &[String]) -> BTreeSet<String> {
     let tokens = without_visibility_qualifiers(production_tokens(source));
-    let base: Vec<String> = if module == "crate" {
+    let scopes = inline_module_scopes(&tokens);
+    let module_segments: Vec<String> = if module == "crate" {
         Vec::new()
     } else {
         module.split("::").map(ToOwned::to_owned).collect()
     };
 
-    let mut paths: Vec<Vec<String>> = use_imports(&tokens)
-        .iter()
-        .filter_map(|import| normalized_path(&import.path))
+    let mut paths: Vec<(usize, Vec<String>)> = positioned_use_imports(&tokens)
+        .into_iter()
+        .filter_map(|(index, import)| normalized_path(&import.path).map(|path| (index, path)))
         .collect();
     paths.extend(inline_crate_paths(&tokens));
 
     let mut edges = BTreeSet::new();
-    for path in paths {
+    for (index, path) in paths {
+        let mut base = module_segments.clone();
+        base.extend(scopes[index].iter().cloned());
         let Some(resolved) = resolve_crate_path(&base, &path) else {
             continue;
         };
@@ -120,6 +126,42 @@ pub fn crate_edges(module: &str, source: &str, known_modules: &[String]) -> BTre
         }
     }
     edges
+}
+
+/// For each token index, the names of the inline `mod <name> { ... }` blocks enclosing it,
+/// outermost first. A block opens at the `{` right after `mod <identifier>` and closes at the
+/// `}` that brings the brace depth back below it.
+fn inline_module_scopes(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut scopes = Vec::with_capacity(tokens.len());
+    let mut depth = 0_usize;
+    // Open inline modules, innermost last, each with the brace depth inside its block.
+    let mut open: Vec<(String, usize)> = Vec::new();
+    // A module name waiting for its `{`, with the index of that `{`.
+    let mut pending: Option<(String, usize)> = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "mod" && tokens.get(index + 2).is_some_and(|brace| brace == "{") {
+            if let Some(name) = tokens.get(index + 1).and_then(|t| token_identifier(t)) {
+                pending = Some((name.to_owned(), index + 2));
+            }
+        }
+        match token.as_str() {
+            "{" => {
+                depth += 1;
+                if let Some((name, _)) = pending.take_if(|(_, brace)| *brace == index) {
+                    open.push((name, depth));
+                }
+            }
+            "}" => {
+                if open.last().is_some_and(|(_, inside)| *inside == depth) {
+                    open.pop();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        scopes.push(open.iter().map(|(name, _)| name.clone()).collect());
+    }
+    scopes
 }
 
 /// Drops the parenthesized part of `pub(crate)`, `pub(super)`, `pub(self)` and `pub(in path)`.
@@ -146,11 +188,15 @@ fn without_visibility_qualifiers(tokens: Vec<String>) -> Vec<String> {
     kept
 }
 
-/// Every `crate::`, `super::` or `self::` path written inline, with its further segments.
-fn inline_crate_paths(tokens: &[String]) -> Vec<Vec<String>> {
+/// Every `crate::`, `super::` or `self::` path written inline, with its further segments and
+/// the index of its first token. A `crate`, `super` or `self` preceded by `::` continues a path
+/// already read (`super::super::x`) and does not start another.
+fn inline_crate_paths(tokens: &[String]) -> Vec<(usize, Vec<String>)> {
     let mut paths = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
-        let starts_path = matches!(token.as_str(), "crate" | "super" | "self")
+        let continues_path = index > 0 && tokens[index - 1] == "::";
+        let starts_path = !continues_path
+            && matches!(token.as_str(), "crate" | "super" | "self")
             && tokens.get(index + 1).is_some_and(|t| t == "::")
             && tokens
                 .get(index + 2)
@@ -167,7 +213,7 @@ fn inline_crate_paths(tokens: &[String]) -> Vec<Vec<String>> {
             path.push(segment.to_owned());
             cursor += 2;
         }
-        paths.push(path);
+        paths.push((index, path));
     }
     paths
 }

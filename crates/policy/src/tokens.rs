@@ -254,7 +254,8 @@ pub(crate) fn parse_use_tree(
     }
 }
 
-pub(crate) fn use_imports(tokens: &[String]) -> Vec<UseImport> {
+/// Every import of every `use` statement, paired with the index of its `use` token.
+pub(crate) fn positioned_use_imports(tokens: &[String]) -> Vec<(usize, UseImport)> {
     let mut imports = Vec::new();
     for (start, token) in tokens.iter().enumerate() {
         if token != "use" {
@@ -266,9 +267,19 @@ pub(crate) fn use_imports(tokens: &[String]) -> Vec<UseImport> {
             .map_or(tokens.len(), |offset| start + 1 + offset);
         let statement = &tokens[start + 1..end];
         let mut cursor = 0;
-        parse_use_tree(statement, &mut cursor, &[], &mut imports);
+        let mut statement_imports = Vec::new();
+        parse_use_tree(statement, &mut cursor, &[], &mut statement_imports);
+        imports.extend(statement_imports.into_iter().map(|import| (start, import)));
     }
     imports
+}
+
+/// Every import of every `use` statement.
+pub(crate) fn use_imports(tokens: &[String]) -> Vec<UseImport> {
+    positioned_use_imports(tokens)
+        .into_iter()
+        .map(|(_, import)| import)
+        .collect()
 }
 
 pub(crate) fn normalized_path(path: &[String]) -> Option<Vec<String>> {
