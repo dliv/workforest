@@ -7,8 +7,8 @@
 use std::collections::BTreeSet;
 
 use crate::tokens::{
-    direct_string_macro_arguments, expand_std_paths, normalized_path, positioned_use_imports,
-    rust_code_tokens, std_aliases, token_identifier, use_imports,
+    expand_std_paths, normalized_path, positioned_use_imports, rust_code_tokens, std_aliases,
+    token_identifier, use_imports,
 };
 
 /// Reported for any use of standard input, which reads the outside world.
@@ -252,76 +252,17 @@ fn is_stdin_path(path: &[String]) -> bool {
     )
 }
 
-/// Macros that embed a file's contents as data at compile time. Embedding a
-/// repository file is an import, not an effect; only the path decides whether
-/// the build depends on the build machine.
-const DATA_INCLUDE_MACROS: [&str; 2] = ["include_str", "include_bytes"];
-
-/// The `env!` names Cargo sets from the manifest for every compilation, overriding any value
-/// inherited from the caller's environment. Any other name, even one starting with
-/// `CARGO_PKG_`, could come from the build machine.
-const MANIFEST_ENV_NAMES: [&str; 14] = [
-    "CARGO_PKG_VERSION",
-    "CARGO_PKG_VERSION_MAJOR",
-    "CARGO_PKG_VERSION_MINOR",
-    "CARGO_PKG_VERSION_PATCH",
-    "CARGO_PKG_VERSION_PRE",
-    "CARGO_PKG_AUTHORS",
-    "CARGO_PKG_NAME",
-    "CARGO_PKG_DESCRIPTION",
-    "CARGO_PKG_HOMEPAGE",
-    "CARGO_PKG_REPOSITORY",
-    "CARGO_PKG_LICENSE",
-    "CARGO_PKG_LICENSE_FILE",
-    "CARGO_PKG_RUST_VERSION",
-    "CARGO_PKG_README",
-];
-
-/// Whether a path literal names a file relative to the including source file,
-/// rather than an absolute, home-relative or drive-prefixed location.
-fn is_relative_path_literal(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    let has_drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-    !path.is_empty() && !path.starts_with(['/', '\\', '~']) && !has_drive_prefix
-}
-
-/// Whether a data-include literal is accepted: relative, and free of backslashes and
-/// control characters. The compiler rewrites escapes and CR LF line breaks inside a
-/// literal, so without either the literal's characters are exactly the path it opens.
-fn is_accepted_include_literal(path: &str) -> bool {
-    is_relative_path_literal(path) && !path.contains('\\') && !path.chars().any(char::is_control)
-}
-
-/// Accepted literals embedded with `include_str!` or `include_bytes!` in the production
-/// tokens, all `include_str!` literals in source order, then all `include_bytes!` literals:
-/// relative, free of backslashes and control characters, and passed by the macro's plain name
-/// as its only argument. Refused literals are left out, so they are never resolved; the purity
-/// scan reports them. Callers resolve each against the including file's directory to check
-/// that it stays inside the repository.
-pub fn data_include_paths(source: &str) -> Vec<String> {
-    let tokens = production_tokens(source);
-    DATA_INCLUDE_MACROS
-        .iter()
-        .flat_map(|name| direct_string_macro_arguments(&tokens, name))
-        .flatten()
-        .filter(|path| is_accepted_include_literal(path))
-        .collect()
-}
-
-/// Ambient-effect violations in a Pure module's production tokens. `env!` is accepted only
-/// with one literal naming a variable Cargo sets from the manifest (`MANIFEST_ENV_NAMES`);
-/// `include_str!` and `include_bytes!` only with one accepted literal (relative, no backslash,
-/// no control character), which `data_include_paths` then lists for the containment check.
+/// Ambient-effect violations in a Pure module's production tokens: any path into `std::fs`,
+/// `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported
+/// and through aliases; standard input; the effectful `std::path` names
+/// (`EFFECTFUL_PATH_NAMES`); `include!`, under its own name or an imported alias, and
+/// `#[path = ...]`; `unsafe`, `extern` and `macro_rules!`; glob imports of `std` or `core`,
+/// importing `std` itself or aliasing `core`; and non-ASCII identifiers. `include_str!`,
+/// `include_bytes!`, `env!` and `option_env!` are compile-time inputs and are not reported.
 pub fn ambient_violations(source: &str) -> Vec<String> {
     let tokens = production_tokens(source);
     let forbidden_modules = ["fs", "env", "process", "net", "time", "thread"];
-    let forbidden_imported_macros = [
-        "include",
-        "include_str",
-        "include_bytes",
-        "env",
-        "option_env",
-    ];
+    let forbidden_imported_macros = ["include"];
     let imports = use_imports(&tokens);
     let aliases = std_aliases(&imports);
     let mut violations = BTreeSet::new();
@@ -373,11 +314,6 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
         }
         if token == "unsafe" || token == "extern" {
             violations.insert(token.clone());
-        }
-        if token_identifier(token) == Some("option_env")
-            && tokens.get(index + 1).is_some_and(|token| token == "!")
-        {
-            violations.insert(format!("{}!", token_identifier(token).unwrap()));
         }
         if token == "macro_rules" && tokens.get(index + 1).is_some_and(|token| token == "!") {
             violations.insert("macro_rules!".to_owned());
@@ -453,27 +389,6 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
                     violations.insert(format!("std::{module}"));
                 }
             }
-        }
-    }
-
-    let reads_build_environment =
-        direct_string_macro_arguments(&tokens, "env")
-            .iter()
-            .any(|argument| {
-                !argument
-                    .as_deref()
-                    .is_some_and(|name| MANIFEST_ENV_NAMES.contains(&name))
-            });
-    if reads_build_environment {
-        violations.insert("env!".to_owned());
-    }
-
-    for name in DATA_INCLUDE_MACROS {
-        let embeds_build_machine_file = direct_string_macro_arguments(&tokens, name)
-            .iter()
-            .any(|argument| !argument.as_deref().is_some_and(is_accepted_include_literal));
-        if embeds_build_machine_file {
-            violations.insert(format!("{name}!"));
         }
     }
 
