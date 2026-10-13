@@ -54,7 +54,8 @@ A Pure module's production code may not contain an ambient effect. `crates/polic
 - any use of `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported;
 - standard input (`std::io::stdin` or `std::io::Stdin`);
 - `env!` unless its only argument is a string literal starting with `CARGO_PKG_` (Cargo sets those from the manifest, so they are fixed per build; `src/cli.rs` uses `env!("CARGO_PKG_VERSION")`), and every `option_env!`;
-- `include!`, `include_str!`, `include_bytes!` and `#[path = ...]`, which pull in text the scanner does not see;
+- `include!` and `#[path = ...]`, which pull Rust code into the module from a file the scanner does not read;
+- `include_str!` and `include_bytes!`, unless called by their plain name with one relative string literal that resolves to an existing file inside the repository. Embedding a repository file as data is a compile-time import, not an effect; an absolute or home-relative path, or one that climbs out of the repository, would make the build depend on the build machine, like `env!("HOME")`. Importing these macros under another name is refused because the alias hides what is called;
 - `unsafe`, `extern`, `macro_rules!`, glob imports of `std` or `core`, importing or aliasing `std` itself, and non-ASCII identifiers.
 
 `std::path` is allowed: `PathBuf` is data, not an effect.
@@ -113,7 +114,7 @@ Every exemption and allowlist reason names the change that removes it. Together 
 ## What the gates do not prove
 
 - Bare child-module paths are not followed by the direction scan: a path that starts with a child module's name, such as `init::x` or the `pub use rm::*;` re-exports in `src/commands/mod.rs`, is ignored. Only `crate::`, `super::` and `self::` paths are checked.
-- Macro-generated code and text pulled in with `include!` are not scanned outside Pure modules; the scanner reads source tokens, not expanded code. In Pure modules, `macro_rules!` and the `include` macros are refused outright.
+- Macro-generated code and text pulled in with `include!` are not scanned outside Pure modules; the scanner reads source tokens, not expanded code. In Pure modules, `macro_rules!` and `include!` are refused outright, and data includes are limited to files inside the repository.
 - Network calls are not banned: the `ureq` constructors are not in `clippy.toml`, because `src/version_check.rs` is the only network user. Filesystem access is banned only in Pure modules; commands read and write forests by design.
 - The policy scans read only files under `src/`; integration tests, the policy crate itself and the `worker/` directory are not classified.
 - A `clippy.toml` entry with no call site anywhere is covered only by Clippy's own "does not refer to a reachable function" warning. Judging from Clippy's source, that warning is not emitted when the path's first segment names a crate that is not loaded, so such an entry could do nothing unnoticed. This has not been verified.

@@ -53,7 +53,9 @@ fn ambient_scanner_rejects_aliases_grouped_imports_and_spaced_unsafe() {
         "use std::*; fn f() { let _ = fs::read(\"x\"); }",
         "fn f() { std::thread::spawn(|| {}); }",
         "const V: &str = env!(\"HOME\");",
-        "const B: &[u8] = include_bytes!(\"data.bin\");",
+        "const B: &[u8] = include_bytes!(\"/etc/hosts\");",
+        "const T: &str = include_str!(concat!(\"a\", \"b\"));",
+        "const R: &str = include!(\"generated.rs\");",
     ] {
         assert!(
             !ambient_violations(forbidden).is_empty(),
@@ -97,7 +99,7 @@ fn ambient_scanner_rejects_aliases_grouped_imports_and_spaced_unsafe() {
 
 #[test]
 fn ambient_scanner_reports_exact_workforest_differences() {
-    let cases: [(&str, &[&str]); 7] = [
+    let cases: &[(&str, &[&str])] = &[
         ("fn f() { let _ = std::io::stdin(); }", &["std::io::stdin"]),
         ("fn f() { std::thread::spawn(|| {}); }", &["std::thread"]),
         ("const V: &str = env!(\"HOME\");", &["env!"]),
@@ -107,12 +109,31 @@ fn ambient_scanner_reports_exact_workforest_differences() {
         ),
         ("use std::io::Stdin; fn f(_: Stdin) {}", &["std::io::stdin"]),
         ("const V: &str = env!(\"CARGO_PKG_VERSION\");", &[]),
+        ("const B: &[u8] = include_bytes!(\"data.bin\");", &[]),
+        ("const T: &str = include_str!(\"../docs/notes.md\");", &[]),
         (
-            "const B: &[u8] = include_bytes!(\"data.bin\");",
+            "const B: &[u8] = include_bytes!(\"/etc/hosts\");",
             &["include_bytes!"],
         ),
+        (
+            "const T: &str = include_str!(\"~/notes.md\");",
+            &["include_str!"],
+        ),
+        (
+            "const T: &str = include_str!(\"C:/notes.md\");",
+            &["include_str!"],
+        ),
+        (
+            "const T: &str = include_str!(concat!(\"a\", \"b\"));",
+            &["include_str!"],
+        ),
+        ("const R: &str = include!(\"generated.rs\");", &["include!"]),
+        (
+            "use std::include_str as text; const T: &str = text!(\"notes.md\");",
+            &["include_str!"],
+        ),
     ];
-    for (source, expected) in cases {
+    for &(source, expected) in cases {
         assert_eq!(
             ambient_violations(source),
             expected.to_vec(),

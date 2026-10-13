@@ -185,6 +185,32 @@ fn is_stdin_path(path: &[String]) -> bool {
     )
 }
 
+/// Macros that embed a file's contents as data at compile time. Embedding a
+/// repository file is an import, not an effect; only the path decides whether
+/// the build depends on the build machine.
+const DATA_INCLUDE_MACROS: [&str; 2] = ["include_str", "include_bytes"];
+
+/// Whether a path literal names a file relative to the including source file,
+/// rather than an absolute, home-relative or drive-prefixed location.
+fn is_relative_path_literal(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let has_drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    !path.is_empty() && !path.starts_with(['/', '\\', '~']) && !has_drive_prefix
+}
+
+/// Relative paths embedded with `include_str!` or `include_bytes!` in the
+/// production tokens. Callers resolve each against the including file's
+/// directory to check that it stays inside the repository.
+pub fn data_include_paths(source: &str) -> Vec<String> {
+    let tokens = production_tokens(source);
+    DATA_INCLUDE_MACROS
+        .iter()
+        .flat_map(|name| direct_string_macro_arguments(&tokens, name))
+        .flatten()
+        .filter(|path| is_relative_path_literal(path))
+        .collect()
+}
+
 /// Ambient-effect violations in a Pure module's production tokens.
 pub fn ambient_violations(source: &str) -> Vec<String> {
     let tokens = production_tokens(source);
@@ -250,12 +276,10 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
         if token == "macro_rules" && tokens.get(index + 1).is_some_and(|token| token == "!") {
             violations.insert("macro_rules!".to_owned());
         }
-        if matches!(
-            token_identifier(token),
-            Some("include" | "include_str" | "include_bytes")
-        ) && tokens.get(index + 1).is_some_and(|token| token == "!")
+        if token_identifier(token) == Some("include")
+            && tokens.get(index + 1).is_some_and(|token| token == "!")
         {
-            violations.insert(format!("{}!", token_identifier(token).unwrap()));
+            violations.insert("include!".to_owned());
         }
         if token == "#" && tokens.get(index + 1).is_some_and(|token| token == "[") {
             let mut cursor = index + 2;
@@ -324,6 +348,15 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
             });
     if reads_build_environment {
         violations.insert("env!".to_owned());
+    }
+
+    for name in DATA_INCLUDE_MACROS {
+        let embeds_build_machine_file = direct_string_macro_arguments(&tokens, name)
+            .iter()
+            .any(|argument| !argument.as_deref().is_some_and(is_relative_path_literal));
+        if embeds_build_machine_file {
+            violations.insert(format!("{name}!"));
+        }
     }
 
     violations.into_iter().collect()
