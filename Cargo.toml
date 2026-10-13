@@ -46,3 +46,4 @@ members = ["crates/policy"]
 [lints.clippy]
 print_stdout = "warn"
 print_stderr = "warn"
+dbg_macro = "warn"

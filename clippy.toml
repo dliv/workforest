@@ -2,6 +2,7 @@
 # this file for that crate instead of extending it. Rules and their homes are
 # documented in docs/architecture.md.
 allow-print-in-tests = true
+allow-dbg-in-tests = true
 
 disallowed-methods = [
   { path = "std::env::var", reason = "read the environment only in src/lib.rs and pass values in" },
@@ -19,6 +20,9 @@ disallowed-methods = [
   { path = "std::process::exit", reason = "decide the exit code only in src/lib.rs" },
   { path = "std::process::abort", reason = "decide the exit code only in src/lib.rs" },
   { path = "std::process::Command::new", reason = "run git only through src/git.rs; other processes only at a named shell site" },
+  { path = "std::io::stdout", reason = "acquire standard streams only in src/lib.rs" },
+  { path = "std::io::stderr", reason = "acquire standard streams only in src/lib.rs" },
+  { path = "std::io::stdin", reason = "acquire standard streams only in src/lib.rs" },
   { path = "chrono::Utc::now", reason = "read the clock once at the shell and pass the time in" },
   { path = "chrono::Local::now", reason = "read the clock once at the shell and pass the time in" },
   { path = "std::time::SystemTime::now", reason = "read the clock once at the shell and pass the time in" },

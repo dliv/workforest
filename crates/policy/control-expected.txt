@@ -12,6 +12,7 @@
 3	src/lib.rs	use of `print!`
 19	src/lib.rs	use of `println!`
 1	src/lib.rs	use of a disallowed method `std::env::args`
+2	src/lib.rs	use of a disallowed method `std::io::stdout`
 3	src/lib.rs	use of a disallowed method `std::process::Command::new`
 6	src/lib.rs	use of a disallowed method `std::process::exit`
 2	src/paths.rs	use of a disallowed method `std::env::var`
