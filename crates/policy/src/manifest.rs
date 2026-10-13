@@ -3,10 +3,11 @@
 
 use std::collections::BTreeSet;
 
-/// Crate names of a package's normal dependencies, as code spells them: every key of the
+/// Names of a package's normal dependencies, taken from their package keys: every key of the
 /// `[dependencies]` table and of every `[target.<cfg>.dependencies]` table, plus `<name>` of
 /// dotted `[dependencies.<name>]` and `[target.<cfg>.dependencies.<name>]` tables, with
-/// hyphens replaced by underscores. Dev- and build-dependencies are not included.
+/// hyphens replaced by underscores. Dev- and build-dependencies are not included. Quoted
+/// table-name segments, escaped keys and a dependency's own `[lib] name` are not read.
 pub fn dependency_crate_names(manifest: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut in_dependency_table = false;
