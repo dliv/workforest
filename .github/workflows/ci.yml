@@ -10,37 +10,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
+  check:
+    name: just check
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --no-default-features --features stable --all-targets -- -D warnings
-      - run: cargo clippy --no-default-features --features beta --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --no-default-features --features stable
-      - run: cargo test --no-default-features --features beta
+      - name: Install just from the Ubuntu archive
+        run: sudo apt-get update && sudo apt-get install -y just
+      - run: just check
 
   audit-worker:
     name: Audit worker deps
