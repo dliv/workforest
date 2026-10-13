@@ -13,7 +13,7 @@ Canonical agent instructions for this project. `CLAUDE.md` is only a pointer to 
 just setup           # one-time: configure git hooks
 just build           # build
 just test            # run all tests
-just check           # fmt --check + clippy
+just check           # fmt, clippy (both channels), all tests incl. policy, positive control
 cargo check          # typecheck only
 ```
 
@@ -39,6 +39,7 @@ When pushing tags manually, push by name - `git push origin v0.x.y` - not `--tag
 - **Validate at boundaries, trust internally.** Raw strings enter from CLI args and config files. Wrap them in newtypes at the command boundary (e.g., `ForestName::new()` at the top of `plan_forest()`). Internal code receives validated types.
 - **`debug_assert!` is for invariants types can't express** - collection-level properties (uniqueness), or preconditions at `&Path` boundaries where `AbsolutePath` isn't in the signature.
 - Architecture decisions are recorded in [`docs/decisions/ADR_INDEX.md`](docs/decisions/ADR_INDEX.md). Read relevant ADRs before changing patterns they govern.
+- Architecture rules and how they are enforced are in `docs/architecture.md`; run `just check` before every commit and before handing work back.
 
 ## Using git-forest
 

@@ -160,7 +160,7 @@ Requires [just](https://just.systems/man/en/) and [tokei](https://github.com/XAM
 just setup    # configure git hooks
 just build    # build
 just test     # run all tests
-just check    # fmt --check + clippy
+just check    # fmt, clippy (both channels), all tests incl. policy, positive control
 just loc      # count lines of code
 ```
 
