@@ -67,6 +67,10 @@ impl<'de> Deserialize<'de> for AbsolutePath {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "HOME read below the root, until the home directory is passed in from src/lib.rs"
+)]
 pub fn expand_tilde(path: &str) -> Result<AbsolutePath> {
     let result = if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {

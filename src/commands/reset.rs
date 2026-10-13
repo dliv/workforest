@@ -355,6 +355,10 @@ fn delete_file(path: &Path, errors: &mut Vec<String>) -> bool {
 
 /// Rename a file to `<name>.<timestamp>.bak` instead of deleting it.
 /// Returns `(removed_from_original_path, backup_path)`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
+)]
 fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>) {
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let file_stem = path.file_name().unwrap_or_default().to_string_lossy();

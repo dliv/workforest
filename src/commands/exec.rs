@@ -11,6 +11,11 @@ pub struct ExecResult {
     pub failures: Vec<String>,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::print_stderr,
+    reason = "exec spawns the user's command by design; its progress printing breaks ADR 0002 until it moves to a progress callback as rm does"
+)]
 pub fn cmd_exec(forest_dir: &Path, meta: &ForestMeta, cmd: &[String]) -> Result<ExecResult> {
     debug_assert!(forest_dir.is_absolute(), "forest_dir must be absolute");
     if cmd.is_empty() {

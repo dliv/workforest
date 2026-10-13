@@ -42,3 +42,7 @@ ts-rs = "12"
 
 [workspace]
 members = ["crates/policy"]
+
+[lints.clippy]
+print_stdout = "warn"
+print_stderr = "warn"

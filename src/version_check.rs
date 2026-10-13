@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    clippy::print_stderr,
+    reason = "self-contained update-check subsystem: reads the clock, resolves and spawns its own executable and prints notices; its final place in the module structure is an open follow-up"
+)]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -1,4 +1,11 @@
 #![warn(clippy::all)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        reason = "unit tests build real git repositories and read the environment; the non-test build still lints production code"
+    )
+)]
 
 pub mod channel;
 mod cli;
@@ -15,6 +22,11 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::print_stderr,
+    reason = "composition root: reads process arguments, prints the final error and owns the exit code"
+)]
 pub fn main_entry() {
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
@@ -46,6 +58,12 @@ pub fn main_entry() {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "composition root: dispatches commands, prints progress, spawns brew for update and decides per-command exit codes until typed failures move exit codes into main_entry"
+)]
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init {
@@ -375,6 +393,10 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "composition root: the single output dispatcher of ADR 0002"
+)]
 fn output<T: serde::Serialize>(result: &T, json: bool, human_fn: fn(&T) -> String) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(result)?);

@@ -132,6 +132,10 @@ pub(crate) fn xdg_state_dir() -> Result<PathBuf> {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "environment read below the root, until XDG locations are passed in from src/lib.rs"
+)]
 fn xdg_dir(
     env_var: &str,
     default_suffix: &str,

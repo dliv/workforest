@@ -147,6 +147,10 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
+)]
 fn summarize_forest(forest_dir: &Path, forest: &ForestMeta) -> ForestSummary {
     let age_seconds = (Utc::now() - forest.created_at).num_seconds();
     let branch_summary = branch_counts(&forest.repos);

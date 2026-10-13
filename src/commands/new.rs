@@ -289,6 +289,10 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
+)]
 pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     // SAFETY: create_dir (not create_dir_all) is intentional. It fails atomically
     // if the directory already exists, preventing a TOCTOU race between plan_forest

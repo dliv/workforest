@@ -1,0 +1,26 @@
+# The only clippy.toml in this workspace. A per-crate clippy.toml would replace
+# this file for that crate instead of extending it. Rules and their homes are
+# documented in docs/architecture.md.
+allow-print-in-tests = true
+
+disallowed-methods = [
+  { path = "std::env::var", reason = "read the environment only in src/lib.rs and pass values in" },
+  { path = "std::env::var_os", reason = "read the environment only in src/lib.rs and pass values in" },
+  { path = "std::env::vars", reason = "read the environment only in src/lib.rs and pass values in" },
+  { path = "std::env::vars_os", reason = "read the environment only in src/lib.rs and pass values in" },
+  { path = "std::env::args", reason = "read process arguments only in src/lib.rs" },
+  { path = "std::env::args_os", reason = "read process arguments only in src/lib.rs" },
+  { path = "std::env::current_dir", reason = "read the working directory only in src/lib.rs and pass it in" },
+  { path = "std::env::set_current_dir", reason = "never change the process working directory" },
+  { path = "std::env::current_exe", reason = "resolve the executable only in the shell" },
+  { path = "std::env::home_dir", reason = "read the home directory only in src/lib.rs and pass it in" },
+  { path = "std::env::set_var", reason = "never mutate the process environment" },
+  { path = "std::env::remove_var", reason = "never mutate the process environment" },
+  { path = "std::process::exit", reason = "decide the exit code only in src/lib.rs" },
+  { path = "std::process::abort", reason = "decide the exit code only in src/lib.rs" },
+  { path = "std::process::Command::new", reason = "run git only through src/git.rs; other processes only at a named shell site" },
+  { path = "chrono::Utc::now", reason = "read the clock once at the shell and pass the time in" },
+  { path = "chrono::Local::now", reason = "read the clock once at the shell and pass the time in" },
+  { path = "std::time::SystemTime::now", reason = "read the clock once at the shell and pass the time in" },
+  { path = "std::time::Instant::now", reason = "read the clock once at the shell and pass the time in" },
+]

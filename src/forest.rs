@@ -357,6 +357,10 @@ fn resolve_forest_by_name_or_dir(
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "working-directory read below the root, until it is passed in from src/lib.rs"
+)]
 fn current_dir_preserving_symlinks() -> Result<PathBuf> {
     let physical = std::env::current_dir()?;
     let Some(logical) = std::env::var_os("PWD").map(PathBuf::from) else {

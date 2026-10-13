@@ -40,6 +40,10 @@ pub struct InitRepoSummary {
     pub base_branch: String,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "checks for git directly, until the check is routed through src/git.rs"
+)]
 pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
     if inputs.repos.is_empty() {
         bail!("at least one --repo is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
