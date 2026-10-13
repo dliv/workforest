@@ -91,14 +91,21 @@ fn pure_module_data_includes_stay_inside_the_repository() {
 
 #[test]
 fn data_include_paths_lists_only_relative_literals_in_production_code() {
-    let source = "const A: &str = include_str!(\"../docs/a.md\");\n\
-                  const B: &[u8] = include_bytes!(\"data/b.bin\");\n\
-                  const C: &str = include_str!(\"/etc/hosts\");\n\
-                  #[cfg(test)]\n\
-                  mod tests {\n    const D: &str = include_str!(\"d.txt\");\n}\n";
+    let source = r#"const A: &str = include_str!("../docs/a.md");
+const B: &[u8] = include_bytes!("data/b.bin");
+const C: &str = include_str!("/etc/hosts");
+const E: &str = include_str!["e.md",];
+const F: &[u8] = include_bytes! { "f.bin" };
+const G: &str = include_str!("g\u{2e}md");
+const H: &str = include_str!(r"h\i.md");
+#[cfg(test)]
+mod tests {
+    const D: &str = include_str!("d.txt");
+}
+"#;
     assert_eq!(
         data_include_paths(source),
-        vec!["../docs/a.md", "data/b.bin"]
+        vec!["../docs/a.md", "e.md", "data/b.bin", "f.bin"]
     );
 }
 

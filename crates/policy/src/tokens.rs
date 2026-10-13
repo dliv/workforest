@@ -346,24 +346,39 @@ pub(crate) fn std_aliases(imports: &[UseImport]) -> BTreeMap<String, BTreeSet<Ve
     aliases
 }
 
+/// The single string literal between a macro call's delimiters, which start at `open`:
+/// `( "x" )`, `[ "x" ]` or `{ "x" }`, with at most one trailing comma before the closer.
+/// `None` for any other shape.
+fn single_literal_argument(tokens: &[String], open: usize) -> Option<String> {
+    let close = match tokens.get(open)?.as_str() {
+        "(" => ")",
+        "[" => "]",
+        "{" => "}",
+        _ => return None,
+    };
+    let literal = tokens.get(open + 1)?.strip_prefix("@str:")?;
+    let mut after = open + 2;
+    if tokens.get(after).is_some_and(|token| token == ",") {
+        after += 1;
+    }
+    (tokens.get(after)? == close).then(|| literal.to_owned())
+}
+
+/// One entry per `name!` call in `tokens`: the literal for a call by the plain name (not
+/// preceded by `::`) whose argument is exactly one string literal, in parentheses, brackets
+/// or braces with at most one trailing comma; `None` for every other call.
 pub(crate) fn direct_string_macro_arguments(tokens: &[String], name: &str) -> Vec<Option<String>> {
     let mut arguments = Vec::new();
     for index in 0..tokens.len().saturating_sub(1) {
         if token_identifier(&tokens[index]) != Some(name) || tokens[index + 1] != "!" {
             continue;
         }
-        let direct = (index == 0 || tokens[index - 1] != "::")
-            && tokens.get(index + 2).is_some_and(|token| token == "(")
-            && tokens.get(index + 4).is_some_and(|token| token == ")");
-        arguments.push(
-            direct
-                .then(|| {
-                    tokens[index + 3]
-                        .strip_prefix("@str:")
-                        .map(ToOwned::to_owned)
-                })
-                .flatten(),
-        );
+        let plain_name = index == 0 || tokens[index - 1] != "::";
+        arguments.push(if plain_name {
+            single_literal_argument(tokens, index + 2)
+        } else {
+            None
+        });
     }
     arguments
 }

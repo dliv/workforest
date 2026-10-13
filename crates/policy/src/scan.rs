@@ -190,6 +190,26 @@ fn is_stdin_path(path: &[String]) -> bool {
 /// the build depends on the build machine.
 const DATA_INCLUDE_MACROS: [&str; 2] = ["include_str", "include_bytes"];
 
+/// The `env!` names Cargo sets from the manifest for every compilation, overriding any value
+/// inherited from the caller's environment. Any other name, even one starting with
+/// `CARGO_PKG_`, could come from the build machine.
+const MANIFEST_ENV_NAMES: [&str; 14] = [
+    "CARGO_PKG_VERSION",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_PKG_AUTHORS",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_DESCRIPTION",
+    "CARGO_PKG_HOMEPAGE",
+    "CARGO_PKG_REPOSITORY",
+    "CARGO_PKG_LICENSE",
+    "CARGO_PKG_LICENSE_FILE",
+    "CARGO_PKG_RUST_VERSION",
+    "CARGO_PKG_README",
+];
+
 /// Whether a path literal names a file relative to the including source file,
 /// rather than an absolute, home-relative or drive-prefixed location.
 fn is_relative_path_literal(path: &str) -> bool {
@@ -198,20 +218,33 @@ fn is_relative_path_literal(path: &str) -> bool {
     !path.is_empty() && !path.starts_with(['/', '\\', '~']) && !has_drive_prefix
 }
 
-/// Relative paths embedded with `include_str!` or `include_bytes!` in the
-/// production tokens. Callers resolve each against the including file's
-/// directory to check that it stays inside the repository.
+/// Whether a data-include literal is accepted: relative, and free of backslashes and
+/// control characters. The compiler rewrites escapes and CR LF line breaks inside a
+/// literal, so without either the literal's characters are exactly the path it opens.
+fn is_accepted_include_literal(path: &str) -> bool {
+    is_relative_path_literal(path) && !path.contains('\\') && !path.chars().any(char::is_control)
+}
+
+/// Accepted literals embedded with `include_str!` or `include_bytes!` in the production
+/// tokens, all `include_str!` literals in source order, then all `include_bytes!` literals:
+/// relative, free of backslashes and control characters, and passed by the macro's plain name
+/// as its only argument. Refused literals are left out, so they are never resolved; the purity
+/// scan reports them. Callers resolve each against the including file's directory to check
+/// that it stays inside the repository.
 pub fn data_include_paths(source: &str) -> Vec<String> {
     let tokens = production_tokens(source);
     DATA_INCLUDE_MACROS
         .iter()
         .flat_map(|name| direct_string_macro_arguments(&tokens, name))
         .flatten()
-        .filter(|path| is_relative_path_literal(path))
+        .filter(|path| is_accepted_include_literal(path))
         .collect()
 }
 
-/// Ambient-effect violations in a Pure module's production tokens.
+/// Ambient-effect violations in a Pure module's production tokens. `env!` is accepted only
+/// with one literal naming a variable Cargo sets from the manifest (`MANIFEST_ENV_NAMES`);
+/// `include_str!` and `include_bytes!` only with one accepted literal (relative, no backslash,
+/// no control character), which `data_include_paths` then lists for the containment check.
 pub fn ambient_violations(source: &str) -> Vec<String> {
     let tokens = production_tokens(source);
     let forbidden_modules = ["fs", "env", "process", "net", "time", "thread"];
@@ -344,7 +377,7 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
             .any(|argument| {
                 !argument
                     .as_deref()
-                    .is_some_and(|name| name.starts_with("CARGO_PKG_"))
+                    .is_some_and(|name| MANIFEST_ENV_NAMES.contains(&name))
             });
     if reads_build_environment {
         violations.insert("env!".to_owned());
@@ -353,7 +386,7 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
     for name in DATA_INCLUDE_MACROS {
         let embeds_build_machine_file = direct_string_macro_arguments(&tokens, name)
             .iter()
-            .any(|argument| !argument.as_deref().is_some_and(is_relative_path_literal));
+            .any(|argument| !argument.as_deref().is_some_and(is_accepted_include_literal));
         if embeds_build_machine_file {
             violations.insert(format!("{name}!"));
         }
