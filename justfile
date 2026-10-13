@@ -1,17 +1,21 @@
 setup:
     git config core.hooksPath .githooks
 
-check:
+check: fmt-check lint test
+
+fmt-check:
     cargo fmt --all -- --check
-    cargo clippy --no-default-features --features stable --all-targets -- -D warnings
-    cargo clippy --no-default-features --features beta --all-targets -- -D warnings
+
+lint:
+    cargo clippy --workspace --locked --no-default-features --features stable --all-targets -- -D warnings
+    cargo clippy --workspace --locked --no-default-features --features beta --all-targets -- -D warnings
 
 build:
     cargo build
 
 test:
-    cargo test --no-default-features --features stable
-    cargo test --no-default-features --features beta
+    cargo test --workspace --locked --no-default-features --features stable
+    cargo test --workspace --locked --no-default-features --features beta
 
 test-linux:
     docker run --rm -v "{{justfile_directory()}}:/work" -w /work rust:latest cargo test

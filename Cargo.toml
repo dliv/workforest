@@ -39,3 +39,6 @@ predicates = "3"
 serial_test = "3"
 tempfile = "3"
 ts-rs = "12"
+
+[workspace]
+members = ["crates/policy"]
