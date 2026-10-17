@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t,\n&[\"--json\", \"init\", \"--feature-branch-template\", \"t/{name}\", \"--repo\", repo_a,\n\"--repo-base-branch\", \"nope=main\",])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: unknown repo(s) in --repo-base-branch: nope
+  hint: repo names are derived from the last path segment of --repo

@@ -1,0 +1,16 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"--json\", \"exec\", \"feat\", \"--\", \"true\"])"
+---
+exit: 1
+--- stdout ---
+{
+  "forest_name": "feat",
+  "failures": [
+    "foo-web"
+  ]
+}
+--- stderr ---
+=== foo-api ===
+=== foo-web ===
+  warning: worktree missing at [TMP]/worktrees/feat/foo-web

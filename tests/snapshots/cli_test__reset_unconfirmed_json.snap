@@ -1,0 +1,57 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"--json\", \"reset\"])"
+---
+exit: 1
+--- stdout ---
+{
+  "dry_run": false,
+  "confirm_required": true,
+  "config_only": false,
+  "config_file": {
+    "path": "[TMP]/home/.config/git-forest/config.toml",
+    "existed": true,
+    "deleted": true,
+    "backed_up_to": "[TMP]/home/.config/git-forest/config.toml.<timestamp>.bak"
+  },
+  "state_file": {
+    "path": "[TMP]/golden-state/git-forest/state.toml",
+    "existed": false,
+    "deleted": false,
+    "backed_up_to": null
+  },
+  "forests": [
+    {
+      "name": "feat",
+      "path": "[TMP]/worktrees/feat",
+      "removed": true,
+      "repos": [
+        {
+          "name": "foo-api",
+          "branch": "testuser/feat",
+          "branch_created": true,
+          "worktree_removed": {
+            "status": "success"
+          },
+          "branch_deleted": {
+            "status": "success"
+          }
+        },
+        {
+          "name": "foo-web",
+          "branch": "testuser/feat",
+          "branch_created": true,
+          "worktree_removed": {
+            "status": "success"
+          },
+          "branch_deleted": {
+            "status": "success"
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [],
+  "errors": []
+}
+--- stderr ---

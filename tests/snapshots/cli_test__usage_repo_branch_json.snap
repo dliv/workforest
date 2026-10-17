@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t,\n&[\"--json\", \"new\", \"x\", \"--mode\", \"feature\", \"--no-fetch\", \"--repo-branch\",\n\"nope\",])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: invalid --repo-branch format: "nope"
+  hint: use --repo-branch repo-name=branch-name

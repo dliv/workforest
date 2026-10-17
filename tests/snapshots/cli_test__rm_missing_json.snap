@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"--json\", \"rm\", \"nope\"])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: forest "nope" not found
+  hint: run `git forest ls` to see available forests

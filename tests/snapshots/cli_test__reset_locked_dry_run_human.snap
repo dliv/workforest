@@ -1,0 +1,19 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"reset\", \"--dry-run\"])"
+---
+exit: 1
+--- stdout ---
+Dry run — no changes will be made.
+
+Forests:
+  feat: blocked ([TMP]/worktrees/feat)
+    foo-api: worktree FAILED, branch skipped (worktree not removed)
+    foo-web: would remove worktree, would delete branch testuser/feat
+
+Config: blocked ([TMP]/home/.config/git-forest/config.toml)
+State:  not found ([TMP]/golden-state/git-forest/state.toml)
+
+Errors:
+  foo-api: refusing removal because git worktree metadata is locked
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(f, &[\"--json\", \"ls\"])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: config not found at [TMP]/home/.config/git-forest/config.toml
+  hint: run `git forest init` to create one

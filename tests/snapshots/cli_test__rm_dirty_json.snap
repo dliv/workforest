@@ -1,0 +1,55 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"--json\", \"rm\", \"feat\"])"
+---
+exit: 1
+--- stdout ---
+{
+  "forest_name": "feat",
+  "forest_dir": "[TMP]/worktrees/feat",
+  "dry_run": false,
+  "force": false,
+  "repos": [
+    {
+      "name": "foo-api",
+      "branch_state": {
+        "expected_branch": "testuser/feat",
+        "actual_type": "branch",
+        "actual_branch": "testuser/feat",
+        "branch_drift": false
+      },
+      "worktree_removed": {
+        "status": "failed",
+        "error": "foo-api: worktree has uncommitted changes"
+      },
+      "branch_deleted": {
+        "status": "skipped",
+        "reason": "worktree not removed"
+      }
+    },
+    {
+      "name": "foo-web",
+      "branch_state": {
+        "expected_branch": "testuser/feat",
+        "actual_type": "branch",
+        "actual_branch": "testuser/feat",
+        "branch_drift": false
+      },
+      "worktree_removed": {
+        "status": "skipped",
+        "reason": "blocked by dirty repos"
+      },
+      "branch_deleted": {
+        "status": "skipped",
+        "reason": "blocked by dirty repos"
+      }
+    }
+  ],
+  "forest_root_cleanup": [],
+  "forest_dir_removed": false,
+  "errors": [
+    "foo-api: worktree has uncommitted changes",
+    "hint: commit or stash changes, then retry — or use `git forest rm --force`"
+  ]
+}
+--- stderr ---

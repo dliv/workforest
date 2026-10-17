@@ -1,0 +1,20 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &failing_json)"
+---
+exit: 1
+--- stdout ---
+out
+out
+{
+  "forest_name": "feat",
+  "failures": [
+    "foo-api",
+    "foo-web"
+  ]
+}
+--- stderr ---
+=== foo-api ===
+err
+=== foo-web ===
+err

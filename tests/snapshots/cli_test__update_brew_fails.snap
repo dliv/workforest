@@ -1,0 +1,8 @@
+---
+source: tests/cli_test.rs
+expression: "golden_transcript(&output, t)"
+---
+exit: 3
+--- stdout ---
+Updating via Homebrew...
+--- stderr ---

@@ -1,0 +1,8 @@
+---
+source: tests/cli_test.rs
+expression: "golden(tmp.path(), &[\"--version\"])"
+---
+exit: 0
+--- stdout ---
+git-forest [VERSION]
+--- stderr ---

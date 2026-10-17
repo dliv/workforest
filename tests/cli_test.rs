@@ -1837,7 +1837,7 @@ printf '%s\n' "$*" >> "$GIT_FOREST_FAKE_BREW_LOG"
 case "$*" in
     "--prefix {app_name}") exit "${{GIT_FOREST_FAKE_BREW_PREFIX_STATUS:-0}}" ;;
     "update --quiet") exit 0 ;;
-    "upgrade {app_name}") exit 0 ;;
+    "upgrade {app_name}") exit "${{GIT_FOREST_FAKE_BREW_UPGRADE_STATUS:-0}}" ;;
     *) echo "unexpected brew args: $*" >&2; exit 42 ;;
 esac
 "#,
@@ -1899,4 +1899,349 @@ fn update_command_prints_download_link_when_homebrew_package_is_absent() {
         std::fs::read_to_string(brew_log).unwrap(),
         format!("--prefix {}\n", bin_name())
     );
+}
+
+// --- Golden transcripts ---
+//
+// Each golden records one run of the built binary: its exit code, stdout and stderr, with the
+// temp directory and the package version redacted. They pin the failure output, exit codes and
+// help text, so a change to any of them shows up as a snapshot diff. They run in the stable
+// channel only; the beta binary differs only in its name. The golden environment disables the
+// version check before the first command, so no golden prints its notice, writes its state file,
+// starts its background process or reaches the network.
+
+/// Renders one run as `exit: <code>`, `--- stdout ---`, the stdout text, `--- stderr ---` and the
+/// stderr text, with the temp directory replaced by `[TMP]` (canonical form first, then the raw
+/// form) and the package version by `[VERSION]`.
+#[cfg(feature = "stable")]
+fn golden_transcript(output: &std::process::Output, tmp: &std::path::Path) -> String {
+    let exit = match output.status.code() {
+        Some(code) => code.to_string(),
+        None => "signal".to_owned(),
+    };
+    let section = |bytes: &[u8]| {
+        let mut text = String::from_utf8_lossy(bytes).into_owned();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text
+    };
+    let transcript = format!(
+        "exit: {exit}\n--- stdout ---\n{}--- stderr ---\n{}",
+        section(&output.stdout),
+        section(&output.stderr)
+    );
+    let canonical = std::fs::canonicalize(tmp).unwrap();
+    transcript
+        .replace(canonical.to_str().unwrap(), "[TMP]")
+        .replace(tmp.to_str().unwrap(), "[TMP]")
+        .replace(env!("CARGO_PKG_VERSION"), "[VERSION]")
+}
+
+/// The built binary with its home, configuration and state directories inside `tmp`. Nothing may
+/// create `<tmp>/golden-state`: only the version check writes there.
+#[cfg(feature = "stable")]
+fn golden_cmd(tmp: &std::path::Path) -> assert_cmd::Command {
+    let home = tmp.join("home");
+    let mut cmd = bin_cmd();
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", tmp.join("golden-state"));
+    cmd
+}
+
+/// Runs the built binary through `golden_cmd` and returns its output.
+#[cfg(feature = "stable")]
+fn golden_run(tmp: &std::path::Path, args: &[&str]) -> std::process::Output {
+    golden_cmd(tmp).args(args).output().unwrap()
+}
+
+/// Runs `args` and returns the golden transcript of the run.
+#[cfg(feature = "stable")]
+fn golden(tmp: &std::path::Path, args: &[&str]) -> String {
+    golden_transcript(&golden_run(tmp, args), tmp)
+}
+
+/// A config with a placeholder template and the version check disabled, written before the first
+/// command. The parser refuses a `default_template` that names no template; `init --force`
+/// replaces the placeholder and keeps `[version_check]`.
+#[cfg(feature = "stable")]
+const GOLDEN_PRESEED_CONFIG: &str = r#"default_template = "default"
+
+[template.default]
+worktree_base = "/placeholder"
+base_branch = "main"
+feature_branch_template = "placeholder/{name}"
+repos = [{ path = "/placeholder/repo" }]
+
+[version_check]
+enabled = false
+"#;
+
+/// The golden environment: repositories `foo-api` and `foo-web` with remotes, a template with
+/// the version check disabled, and the forest `feat`. Returns the temp dir and the worktree base.
+#[cfg(feature = "stable")]
+fn golden_env() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_a = create_repo_with_remote(tmp.path(), "foo-api");
+    let repo_b = create_repo_with_remote(tmp.path(), "foo-web");
+    let worktree_base = tmp.path().join("worktrees");
+
+    let config_dir = tmp.path().join("home").join(".config").join("git-forest");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), GOLDEN_PRESEED_CONFIG).unwrap();
+
+    let init = [
+        "init",
+        "--feature-branch-template",
+        "testuser/{name}",
+        "--repo",
+        repo_a.to_str().unwrap(),
+        "--repo",
+        repo_b.to_str().unwrap(),
+        "--base-branch",
+        "main",
+        "--worktree-base",
+        worktree_base.to_str().unwrap(),
+        "--disposable-root-entry",
+        ".idea",
+        "--force",
+    ];
+    let new = ["new", "feat", "--mode", "feature", "--no-fetch"];
+    for args in [&init[..], &new[..]] {
+        let output = golden_run(tmp.path(), args);
+        assert!(
+            output.status.success(),
+            "golden setup {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "golden setup {args:?} wrote to stderr (the version check may have run): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    (tmp, worktree_base)
+}
+
+/// Fails when the version check left its state directory behind in a golden run.
+#[cfg(feature = "stable")]
+fn assert_no_version_check(tmp: &std::path::Path) {
+    assert!(
+        !tmp.join("golden-state").exists(),
+        "the version check ran in a golden"
+    );
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_version_and_help() {
+    let tmp = tempfile::tempdir().unwrap();
+    insta::assert_snapshot!("version", golden(tmp.path(), &["--version"]));
+    insta::assert_snapshot!("help", golden(tmp.path(), &["--help"]));
+    assert_no_version_check(tmp.path());
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_usage_errors() {
+    let (tmp, _base) = golden_env();
+    let t = tmp.path();
+    let repo_a = t.join("src").join("foo-api");
+    let repo_a = repo_a.to_str().unwrap();
+
+    insta::assert_snapshot!("usage_clap_human", golden(t, &["new"]));
+    insta::assert_snapshot!("usage_clap_json", golden(t, &["--json", "new"]));
+    insta::assert_snapshot!(
+        "usage_init_template_human",
+        golden(t, &["init", "--repo", repo_a])
+    );
+    insta::assert_snapshot!(
+        "usage_init_template_json",
+        golden(t, &["--json", "init", "--repo", repo_a])
+    );
+    insta::assert_snapshot!(
+        "usage_repo_base_branch_json",
+        golden(
+            t,
+            &[
+                "--json",
+                "init",
+                "--feature-branch-template",
+                "t/{name}",
+                "--repo",
+                repo_a,
+                "--repo-base-branch",
+                "bad",
+            ]
+        )
+    );
+    insta::assert_snapshot!(
+        "usage_repo_branch_json",
+        golden(
+            t,
+            &[
+                "--json",
+                "new",
+                "x",
+                "--mode",
+                "feature",
+                "--no-fetch",
+                "--repo-branch",
+                "nope",
+            ]
+        )
+    );
+    insta::assert_snapshot!(
+        "init_unknown_repo_base_branch_json",
+        golden(
+            t,
+            &[
+                "--json",
+                "init",
+                "--feature-branch-template",
+                "t/{name}",
+                "--repo",
+                repo_a,
+                "--repo-base-branch",
+                "nope=main",
+            ]
+        )
+    );
+    assert_no_version_check(t);
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_command_failures() {
+    let fresh = tempfile::tempdir().unwrap();
+    let f = fresh.path();
+    insta::assert_snapshot!("ls_no_config_human", golden(f, &["ls"]));
+    insta::assert_snapshot!("ls_no_config_json", golden(f, &["--json", "ls"]));
+    insta::assert_snapshot!(
+        "reset_nothing_json",
+        golden(f, &["--json", "reset", "--dry-run"])
+    );
+    assert_no_version_check(f);
+
+    let (tmp, _base) = golden_env();
+    let t = tmp.path();
+    insta::assert_snapshot!(
+        "status_missing_json",
+        golden(t, &["--json", "status", "nope"])
+    );
+    insta::assert_snapshot!("rm_missing_json", golden(t, &["--json", "rm", "nope"]));
+    insta::assert_snapshot!(
+        "new_exists_json",
+        golden(
+            t,
+            &["--json", "new", "feat", "--mode", "feature", "--no-fetch"]
+        )
+    );
+    insta::assert_snapshot!("exec_no_command_human", golden(t, &["exec", "feat"]));
+    insta::assert_snapshot!(
+        "exec_no_command_json",
+        golden(t, &["--json", "exec", "feat"])
+    );
+    assert_no_version_check(t);
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_rm_partial() {
+    let (tmp, base) = golden_env();
+    let t = tmp.path();
+    std::fs::write(
+        base.join("feat").join("foo-api").join("dirty.txt"),
+        "dirty\n",
+    )
+    .unwrap();
+
+    insta::assert_snapshot!(
+        "rm_dirty_dry_run_human",
+        golden(t, &["rm", "feat", "--dry-run"])
+    );
+    insta::assert_snapshot!(
+        "rm_dirty_dry_run_json",
+        golden(t, &["--json", "rm", "feat", "--dry-run"])
+    );
+    insta::assert_snapshot!("rm_dirty_human", golden(t, &["rm", "feat"]));
+    insta::assert_snapshot!("rm_dirty_json", golden(t, &["--json", "rm", "feat"]));
+    insta::assert_snapshot!(
+        "rm_all_dirty_dry_run_json",
+        golden(t, &["--json", "rm", "--all", "--dry-run"])
+    );
+    assert_no_version_check(t);
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_reset_partial() {
+    let (tmp, base) = golden_env();
+    let t = tmp.path();
+
+    insta::assert_snapshot!("reset_unconfirmed_human", golden(t, &["reset"]));
+    insta::assert_snapshot!("reset_unconfirmed_json", golden(t, &["--json", "reset"]));
+
+    let worktree = base.join("feat").join("foo-api");
+    run_git(
+        &t.join("src").join("foo-api"),
+        &["worktree", "lock", worktree.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(
+        "reset_locked_dry_run_human",
+        golden(t, &["reset", "--dry-run"])
+    );
+    insta::assert_snapshot!(
+        "reset_locked_dry_run_json",
+        golden(t, &["--json", "reset", "--dry-run"])
+    );
+    assert_no_version_check(t);
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_exec_partial() {
+    let (tmp, base) = golden_env();
+    let t = tmp.path();
+    let failing = [
+        "exec",
+        "feat",
+        "--",
+        "sh",
+        "-c",
+        "echo out; echo err >&2; exit 3",
+    ];
+
+    insta::assert_snapshot!("exec_failing_human", golden(t, &failing));
+    let mut failing_json = vec!["--json"];
+    failing_json.extend(failing);
+    insta::assert_snapshot!("exec_failing_json", golden(t, &failing_json));
+
+    let feat = base.join("feat");
+    std::fs::rename(feat.join("foo-web"), t.join("foo-web-moved")).unwrap();
+    insta::assert_snapshot!(
+        "exec_missing_worktree_json",
+        golden(t, &["--json", "exec", "feat", "--", "true"])
+    );
+    assert_no_version_check(t);
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_update_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let fake_bin = t.join("bin");
+    write_fake_brew(&fake_bin);
+
+    let output = golden_cmd(t)
+        .arg("update")
+        .env("PATH", fake_brew_path(&fake_bin))
+        .env("GIT_FOREST_FAKE_BREW_LOG", t.join("brew.log"))
+        .env("GIT_FOREST_FAKE_BREW_UPGRADE_STATUS", "3")
+        .output()
+        .unwrap();
+    insta::assert_snapshot!("update_brew_fails", golden_transcript(&output, t));
+    assert_no_version_check(t);
 }

@@ -1,0 +1,8 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"exec\", \"feat\"])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: no command specified

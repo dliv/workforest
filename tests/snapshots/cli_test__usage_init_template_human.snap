@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"init\", \"--repo\", repo_a])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: --feature-branch-template is required
+  hint: git forest init --feature-branch-template "yourname/{name}" --repo <path>

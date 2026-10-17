@@ -1,0 +1,61 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"--json\", \"reset\", \"--dry-run\"])"
+---
+exit: 1
+--- stdout ---
+{
+  "dry_run": true,
+  "confirm_required": false,
+  "config_only": false,
+  "config_file": {
+    "path": "[TMP]/home/.config/git-forest/config.toml",
+    "existed": true,
+    "deleted": false,
+    "backed_up_to": null
+  },
+  "state_file": {
+    "path": "[TMP]/golden-state/git-forest/state.toml",
+    "existed": false,
+    "deleted": false,
+    "backed_up_to": null
+  },
+  "forests": [
+    {
+      "name": "feat",
+      "path": "[TMP]/worktrees/feat",
+      "removed": false,
+      "repos": [
+        {
+          "name": "foo-api",
+          "branch": "testuser/feat",
+          "branch_created": true,
+          "worktree_removed": {
+            "status": "failed",
+            "error": "foo-api: refusing removal because git worktree metadata is locked"
+          },
+          "branch_deleted": {
+            "status": "skipped",
+            "reason": "worktree not removed"
+          }
+        },
+        {
+          "name": "foo-web",
+          "branch": "testuser/feat",
+          "branch_created": true,
+          "worktree_removed": {
+            "status": "success"
+          },
+          "branch_deleted": {
+            "status": "success"
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [],
+  "errors": [
+    "foo-api: refusing removal because git worktree metadata is locked"
+  ]
+}
+--- stderr ---

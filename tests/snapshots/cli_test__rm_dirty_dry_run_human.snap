@@ -1,0 +1,17 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"rm\", \"feat\", \"--dry-run\"])"
+---
+exit: 1
+--- stdout ---
+Dry run — no changes will be made.
+
+Removal blocked for forest "feat"
+  foo-api: worktree FAILED, branch skipped (worktree not removed)
+  foo-web: worktree skipped (blocked by dirty repos), branch skipped (blocked by dirty repos)
+  Would not remove forest directory
+
+Errors:
+  foo-api: worktree has uncommitted changes
+  hint: commit or stash changes, then retry — or use `git forest rm --force`
+--- stderr ---

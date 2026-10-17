@@ -1,0 +1,15 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"rm\", \"feat\"])"
+---
+exit: 1
+--- stdout ---
+Removing forest "feat"
+  foo-api: removing... worktree FAILED, branch skipped (worktree not removed)
+  foo-web: removing... worktree skipped (blocked by dirty repos), branch skipped (blocked by dirty repos)
+Forest directory not removed (not empty).
+
+Errors:
+  foo-api: worktree has uncommitted changes
+  hint: commit or stash changes, then retry — or use `git forest rm --force`
+--- stderr ---

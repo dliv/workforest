@@ -1,0 +1,9 @@
+---
+source: tests/cli_test.rs
+expression: "golden(f, &[\"--json\", \"reset\", \"--dry-run\"])"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+error: nothing to reset
+  hint: no config, state, or forests found

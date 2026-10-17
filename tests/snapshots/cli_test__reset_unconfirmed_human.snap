@@ -1,0 +1,18 @@
+---
+source: tests/cli_test.rs
+expression: "golden(t, &[\"reset\"])"
+---
+exit: 1
+--- stdout ---
+The following would be deleted:
+
+Forests:
+  feat: would remove ([TMP]/worktrees/feat)
+    foo-api: would remove worktree, would delete branch testuser/feat
+    foo-web: would remove worktree, would delete branch testuser/feat
+
+Config: would back up ([TMP]/home/.config/git-forest/config.toml)
+State:  not found ([TMP]/golden-state/git-forest/state.toml)
+
+Pass --confirm to proceed.
+--- stderr ---
