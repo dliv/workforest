@@ -16,11 +16,11 @@ Status: Accepted
 
 "Incremental" means rewriting the full TOML with a growing repos vec each time — not append-only file operations. `ForestMeta::write()` (`src/meta.rs`, lines 41–45) serializes the full struct via `toml::to_string_pretty`.
 
-This pairs with `new`'s stop-on-failure error policy (ADR 0009). When a worktree cannot be created, execution stops and rolls back: it removes the worktrees and the branches this run created, then the forest directory. When the metadata itself cannot be written, execution returns without rollback, and the meta file on disk reflects the repos created before that write.
+This pairs with `new`'s stop-on-failure error policy (ADR 0009). When a worktree cannot be created, execution stops and rolls back: it removes the worktrees this run added and deletes the branches it created that still point at the commit they were created at, then removes the forest directory. When the metadata itself cannot be written, execution returns without rollback, and the meta file on disk reflects the repos created before that write.
 
 ## Consequences
 
-- **Partial forests stay valid:** A failed worktree creation rolls the forest back, so it leaves no partial forest. A failed metadata write or an interrupted run can leave one; its meta lists the repos created before the failure, and `rm` reads that meta and cleans them up.
+- **Partial forests stay valid:** A failed worktree creation rolls the forest back, so it leaves no partial forest; only a branch that gained commits during the run is kept, with those commits. A failed metadata write or an interrupted run can leave one; its meta lists the repos created before the failure, and `rm` reads that meta and cleans them up.
 - **No orphaned state:** Every successfully created worktree is recorded in meta before the next one is attempted.
 - **`rm` just works:** `plan_rm()` (`src/commands/rm.rs`) reads whatever repos are in meta and handles them — no special partial-forest logic needed. This depends on ADR 0004 (meta is self-contained).
 - **Write amplification is negligible:** Rewriting a small TOML file (typically < 1KB) per repo is insignificant compared to the git operations surrounding it.

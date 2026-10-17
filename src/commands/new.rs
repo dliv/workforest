@@ -252,12 +252,119 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     })
 }
 
-/// Whether `git worktree add` creates the local branch for this checkout (`-b`).
-fn creates_local_branch(checkout: &CheckoutKind) -> bool {
-    match checkout {
-        CheckoutKind::ExistingLocal => false,
-        CheckoutKind::TrackRemote | CheckoutKind::NewBranch => true,
+/// A worktree this run added, and the branch its add created, if any.
+struct CreatedWorktree<'a> {
+    source: &'a AbsolutePath,
+    dest: &'a AbsolutePath,
+    branch: Option<CreatedBranch<'a>>,
+}
+
+/// A branch this run's `git worktree add -b` created, with the commit it was created at.
+struct CreatedBranch<'a> {
+    name: &'a str,
+    commit: String,
+}
+
+/// The commit `start` names in `source` now.
+fn resolve_commit(source: &AbsolutePath, start: &str) -> Result<String> {
+    crate::git::git(
+        source,
+        &["rev-parse", "--verify", &format!("{}^{{commit}}", start)],
+    )
+}
+
+/// Adds one repo's worktree. A branch the add creates starts at the commit its start point
+/// names when execution resolves it, and is recorded with that commit only after the add
+/// succeeds, so rollback never touches a branch another operation created.
+fn add_worktree<'a>(repo_plan: &'a RepoPlan, created: &mut Vec<CreatedWorktree<'a>>) -> Result<()> {
+    let source = &repo_plan.source;
+    let dest_str = repo_plan.dest.to_string_lossy();
+    let branch = repo_plan.branch.as_str();
+    // Canonical arg order (options before <path> <commit-ish>) for compatibility across git
+    // versions.
+    match &repo_plan.checkout {
+        CheckoutKind::ExistingLocal => {
+            crate::git::git(source, &["worktree", "add", &dest_str, branch])?;
+            created.push(CreatedWorktree {
+                source,
+                dest: &repo_plan.dest,
+                branch: None,
+            });
+        }
+        CheckoutKind::TrackRemote => {
+            let upstream = format!("{}/{}", repo_plan.remote, branch);
+            let commit = resolve_commit(source, &upstream)?;
+            crate::git::git(
+                source,
+                &["worktree", "add", "-b", branch, &dest_str, &commit],
+            )?;
+            created.push(CreatedWorktree {
+                source,
+                dest: &repo_plan.dest,
+                branch: Some(CreatedBranch {
+                    name: branch,
+                    commit,
+                }),
+            });
+            let set_upstream = format!("--set-upstream-to={}", upstream);
+            crate::git::git(source, &["branch", &set_upstream, branch])?;
+        }
+        CheckoutKind::NewBranch => {
+            let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
+            let commit = resolve_commit(source, &start)?;
+            crate::git::git(
+                source,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    "--no-track",
+                    &dest_str,
+                    &commit,
+                ],
+            )?;
+            created.push(CreatedWorktree {
+                source,
+                dest: &repo_plan.dest,
+                branch: Some(CreatedBranch {
+                    name: branch,
+                    commit,
+                }),
+            });
+        }
     }
+    Ok(())
+}
+
+/// Undoes a failed run: removes the worktrees it added, then deletes each branch it created
+/// whose worktree was removed, only if the branch still points at the commit it was created
+/// at (`git update-ref -d <ref> <commit>` compares and deletes atomically), then removes the
+/// forest directory. Rollback errors are ignored; the caller returns the original error.
+fn roll_back(plan: &ForestPlan, created: &[CreatedWorktree]) {
+    let mut removed = Vec::new();
+    for worktree in created {
+        assert!(
+            worktree.dest.starts_with(&plan.forest_dir),
+            "rollback target {:?} is not inside forest dir {:?}",
+            worktree.dest,
+            plan.forest_dir
+        );
+        let dest = worktree.dest.to_string_lossy();
+        if crate::git::git(worktree.source, &["worktree", "remove", "--force", &dest]).is_ok() {
+            removed.push(worktree);
+        }
+    }
+    for worktree in removed {
+        if let Some(branch) = &worktree.branch {
+            let refname = format!("refs/heads/{}", branch.name);
+            let _ = crate::git::git(
+                worktree.source,
+                &["update-ref", "-d", &refname, &branch.commit],
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&plan.forest_dir);
 }
 
 fn branch_created(checkout: &CheckoutKind) -> bool {
@@ -316,87 +423,25 @@ pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> 
     let meta_path = plan.forest_dir.join(META_FILENAME);
     meta.write(&meta_path)?;
 
-    // Create worktrees incrementally, tracking successes for rollback
-    let mut created_worktrees: Vec<(&AbsolutePath, &AbsolutePath)> = Vec::new();
+    // Create worktrees incrementally, recording what this run created for rollback
+    let mut created: Vec<CreatedWorktree> = Vec::new();
 
-    for (attempted, repo_plan) in plan.repo_plans.iter().enumerate() {
-        let dest_str = repo_plan.dest.to_string_lossy();
-
-        let branch_str = repo_plan.branch.as_str();
-        let result = match &repo_plan.checkout {
-            CheckoutKind::ExistingLocal => crate::git::git(
-                &repo_plan.source,
-                &["worktree", "add", &dest_str, branch_str],
-            ),
-            CheckoutKind::TrackRemote => {
-                let start = format!("{}/{}", repo_plan.remote, branch_str);
-                crate::git::git(
-                    &repo_plan.source,
-                    &["worktree", "add", &dest_str, "-b", branch_str, &start],
-                )
-            }
-            CheckoutKind::NewBranch => {
-                let start = format!("{}/{}", repo_plan.remote, repo_plan.base_branch);
-                // Canonical arg order (options before <path> <commit-ish>) for
-                // compatibility across git versions.
-                crate::git::git(
-                    &repo_plan.source,
-                    &[
-                        "worktree",
-                        "add",
-                        "-b",
-                        branch_str,
-                        "--no-track",
-                        &dest_str,
-                        &start,
-                    ],
-                )
-            }
-        };
-
-        match result {
-            Ok(_) => {
-                created_worktrees.push((&repo_plan.source, &repo_plan.dest));
-
-                // Update meta incrementally
-                meta.repos.push(RepoMeta {
-                    name: repo_plan.name.clone(),
-                    source: repo_plan.source.clone(),
-                    branch: repo_plan.branch.to_string(),
-                    base_branch: repo_plan.base_branch.clone(),
-                    remote: Some(repo_plan.remote.clone()),
-                    branch_created: branch_created(&repo_plan.checkout),
-                });
-                meta.write(&meta_path)?;
-            }
-            Err(e) => {
-                // Rollback: remove successfully-created worktrees
-                for (source, dest) in &created_worktrees {
-                    assert!(
-                        dest.starts_with(&plan.forest_dir),
-                        "rollback target {:?} is not inside forest dir {:?}",
-                        dest,
-                        plan.forest_dir
-                    );
-                    let d = dest.to_string_lossy();
-                    let _ = crate::git::git(source, &["worktree", "remove", "--force", &d]);
-                }
-                // Delete the branches this run created, including the failed repo's: planning
-                // observed them absent, so a branch that exists now is this run's.
-                for repo_plan in &plan.repo_plans[..=attempted] {
-                    if !creates_local_branch(&repo_plan.checkout) {
-                        continue;
-                    }
-                    let branch = repo_plan.branch.as_str();
-                    let refname = format!("refs/heads/{}", branch);
-                    if let Ok(true) = ref_exists(&repo_plan.source, &refname) {
-                        let _ = crate::git::git(&repo_plan.source, &["branch", "-D", branch]);
-                    }
-                }
-                let _ = std::fs::remove_dir_all(&plan.forest_dir);
-                return Err(e);
-            }
+    for repo_plan in &plan.repo_plans {
+        if let Err(e) = add_worktree(repo_plan, &mut created) {
+            roll_back(plan, &created);
+            return Err(e);
         }
+
+        // Update meta incrementally
+        meta.repos.push(RepoMeta {
+            name: repo_plan.name.clone(),
+            source: repo_plan.source.clone(),
+            branch: repo_plan.branch.to_string(),
+            base_branch: repo_plan.base_branch.clone(),
+            remote: Some(repo_plan.remote.clone()),
+            branch_created: branch_created(&repo_plan.checkout),
+        });
+        meta.write(&meta_path)?;
     }
 
     Ok(plan_to_result(plan, false))
@@ -1296,5 +1341,131 @@ mod tests {
             !ref_exists(&good_source, &format!("refs/heads/{}", branch)).unwrap(),
             "the branch {branch} that the failed run created should be deleted"
         );
+    }
+
+    // --- Rollback preserves branches this run did not create or that moved ---
+
+    /// Creates `branch` in `source` at a new commit that no other ref contains, as another
+    /// operation would, and returns the commit.
+    fn create_branch_with_unique_commit(
+        source: &std::path::Path,
+        branch: &str,
+        subject: &str,
+    ) -> String {
+        let commit = crate::git::git(
+            source,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.invalid",
+                "commit-tree",
+                "HEAD^{tree}",
+                "-p",
+                "HEAD",
+                "-m",
+                subject,
+            ],
+        )
+        .unwrap();
+        crate::git::git(source, &["branch", branch, &commit]).unwrap();
+        commit
+    }
+
+    /// Fails unless `branch` exists in `source` and contains `commit`.
+    fn assert_branch_contains(source: &std::path::Path, branch: &str, commit: &str) {
+        let refname = format!("refs/heads/{}", branch);
+        assert!(
+            ref_exists(source, &refname).unwrap(),
+            "branch {branch} should survive the rollback"
+        );
+        assert!(
+            crate::git::git(source, &["merge-base", "--is-ancestor", commit, &refname]).is_ok(),
+            "branch {branch} should still contain {commit}"
+        );
+    }
+
+    #[test]
+    fn rollback_keeps_a_planned_new_branch_another_operation_created() {
+        let env = TestEnv::new();
+        let source = env.create_repo_with_remote("foo-api");
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+        let plan = plan_forest(&make_new_inputs("race", ForestMode::Feature), &tmpl).unwrap();
+        assert!(matches!(
+            plan.repo_plans[0].checkout,
+            CheckoutKind::NewBranch
+        ));
+        let branch = plan.repo_plans[0].branch.to_string();
+
+        // After planning, another operation creates the planned branch with its own commit.
+        let unique = create_branch_with_unique_commit(&source, &branch, "unique-concurrent-work");
+
+        assert!(execute_plan(&plan, chrono::Utc::now()).is_err());
+        assert_branch_contains(&source, &branch, &unique);
+    }
+
+    #[test]
+    fn rollback_keeps_a_planned_tracking_branch_another_operation_created() {
+        let env = TestEnv::new();
+        let source = env.create_repo_with_remote("foo-api");
+        crate::git::git(&source, &["branch", "testuser/race"]).unwrap();
+        crate::git::git(&source, &["push", "origin", "testuser/race"]).unwrap();
+        crate::git::git(&source, &["branch", "-D", "testuser/race"]).unwrap();
+        crate::git::git(&source, &["fetch", "origin"]).unwrap();
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+        let plan = plan_forest(&make_new_inputs("race", ForestMode::Feature), &tmpl).unwrap();
+        assert!(matches!(
+            plan.repo_plans[0].checkout,
+            CheckoutKind::TrackRemote
+        ));
+        let branch = plan.repo_plans[0].branch.to_string();
+
+        // After planning, another operation creates the local branch with its own commit.
+        let unique = create_branch_with_unique_commit(&source, &branch, "unique-concurrent-work");
+
+        assert!(execute_plan(&plan, chrono::Utc::now()).is_err());
+        assert_branch_contains(&source, &branch, &unique);
+    }
+
+    #[test]
+    fn rollback_keeps_a_created_branch_that_moved_during_the_run() {
+        let env = TestEnv::new();
+        let first = env.create_repo_with_remote("first-repo");
+        env.create_repo_with_remote("second-repo");
+        let tmpl = make_template_with_repos(&env, &["first-repo", "second-repo"]);
+        let plan = plan_forest(&make_new_inputs("advanced", ForestMode::Feature), &tmpl).unwrap();
+        let branch = plan.repo_plans[0].branch.to_string();
+
+        // A post-checkout hook in the first source repo commits in its new worktree, so the
+        // branch this run created moves past its start before the run fails.
+        let hooks = env.root().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-checkout");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ngit -c user.name=Hook -c user.email=hook@example.invalid commit --allow-empty -q -m unique-during-new\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        crate::git::git(
+            &first,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        )
+        .unwrap();
+
+        // The second repo's add fails.
+        std::fs::remove_dir_all(&*plan.repo_plans[1].source).unwrap();
+
+        assert!(execute_plan(&plan, chrono::Utc::now()).is_err());
+        let refname = format!("refs/heads/{}", branch);
+        assert!(
+            ref_exists(&first, &refname).unwrap(),
+            "the moved branch {branch} should survive the rollback"
+        );
+        let subject = crate::git::git(&first, &["log", "-1", "--format=%s", &refname]).unwrap();
+        assert_eq!(subject, "unique-during-new");
     }
 }
