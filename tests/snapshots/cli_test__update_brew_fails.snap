@@ -2,7 +2,8 @@
 source: tests/cli_test.rs
 expression: "golden_transcript(&output, t)"
 ---
-exit: 3
+exit: 1
 --- stdout ---
 Updating via Homebrew...
 --- stderr ---
+error: brew upgrade git-forest failed (exit code: 3)

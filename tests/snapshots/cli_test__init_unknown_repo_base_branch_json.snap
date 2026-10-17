@@ -4,6 +4,11 @@ expression: "golden(t,\n&[\"--json\", \"init\", \"--feature-branch-template\", \
 ---
 exit: 1
 --- stdout ---
+{
+  "error": {
+    "code": "command-failed",
+    "message": "unknown repo(s) in --repo-base-branch: nope",
+    "hint": "repo names are derived from the last path segment of --repo"
+  }
+}
 --- stderr ---
-error: unknown repo(s) in --repo-base-branch: nope
-  hint: repo names are derived from the last path segment of --repo

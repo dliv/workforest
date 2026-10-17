@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -397,7 +397,12 @@ pub fn cmd_new_at(
     if !inputs.no_fetch {
         for repo in &tmpl.repos {
             if repo.path.is_dir() {
-                crate::git::git(&repo.path, &["fetch", &repo.remote])?;
+                crate::git::git(&repo.path, &["fetch", &repo.remote]).map_err(|error| {
+                    anyhow!(
+                        "{:#}\n  hint: check that the remote is reachable, or pass `--no-fetch` to plan from the refs already fetched",
+                        error
+                    )
+                })?;
             }
         }
     }
@@ -1218,6 +1223,30 @@ mod tests {
             !wt_list.contains("cleanup-test"),
             "first repo's worktree registration should be cleaned up after failed execute_plan, but got: {}",
             wt_list
+        );
+    }
+
+    #[test]
+    fn cmd_new_fetch_failure_hints_at_no_fetch() {
+        let env = TestEnv::new();
+        let source = env.create_repo_with_remote("foo-api");
+        let missing = env.root().join("missing-remote.git");
+        crate::git::git(
+            &source,
+            &["remote", "set-url", "origin", missing.to_str().unwrap()],
+        )
+        .unwrap();
+        let tmpl = make_template_with_repos(&env, &["foo-api"]);
+        let mut inputs = make_new_inputs("fetch-fails", ForestMode::Feature);
+        inputs.no_fetch = false;
+
+        let text = format!("{:#}", cmd_new(inputs, &tmpl).unwrap_err());
+        assert!(text.starts_with("git fetch origin failed in"), "{text}");
+        assert!(
+            text.ends_with(
+                "\n  hint: check that the remote is reachable, or pass `--no-fetch` to plan from the refs already fetched"
+            ),
+            "{text}"
         );
     }
 }

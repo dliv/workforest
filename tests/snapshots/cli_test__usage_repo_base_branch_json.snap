@@ -2,8 +2,13 @@
 source: tests/cli_test.rs
 expression: "golden(t,\n&[\"--json\", \"init\", \"--feature-branch-template\", \"t/{name}\", \"--repo\", repo_a,\n\"--repo-base-branch\", \"bad\",])"
 ---
-exit: 1
+exit: 2
 --- stdout ---
+{
+  "error": {
+    "code": "usage",
+    "message": "invalid --repo-base-branch format: \"bad\"",
+    "hint": "use --repo-base-branch repo-name=branch"
+  }
+}
 --- stderr ---
-error: invalid --repo-base-branch format: "bad"
-  hint: use --repo-base-branch repo-name=branch

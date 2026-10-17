@@ -732,7 +732,8 @@ fn named_commands_ignore_unreadable_sibling_metadata() {
         .env("XDG_CONFIG_HOME", fake_home.join(".config"))
         .assert()
         .failure()
-        .stderr(predicates::str::contains("could not read forest metadata"));
+        .stdout(predicates::str::contains("\"command-failed\""))
+        .stdout(predicates::str::contains("could not read forest metadata"));
 
     assert!(worktree_base.join("good-one").exists());
     drop(tmp);

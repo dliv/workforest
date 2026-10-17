@@ -4,11 +4,11 @@ expression: "golden(t, &[\"--json\", \"new\"])"
 ---
 exit: 2
 --- stdout ---
+{
+  "error": {
+    "code": "usage",
+    "message": "the following required arguments were not provided:\n  --mode <MODE>\n  <NAME>",
+    "hint": "Usage: git-forest new --mode <MODE> <NAME>"
+  }
+}
 --- stderr ---
-error: the following required arguments were not provided:
-  --mode <MODE>
-  <NAME>
-
-Usage: git-forest new --mode <MODE> <NAME>
-
-For more information, try '--help'.

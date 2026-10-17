@@ -4,6 +4,11 @@ expression: "golden(f, &[\"--json\", \"reset\", \"--dry-run\"])"
 ---
 exit: 1
 --- stdout ---
+{
+  "error": {
+    "code": "command-failed",
+    "message": "nothing to reset",
+    "hint": "no config, state, or forests found"
+  }
+}
 --- stderr ---
-error: nothing to reset
-  hint: no config, state, or forests found

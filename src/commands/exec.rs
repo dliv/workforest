@@ -62,7 +62,7 @@ pub fn cmd_exec(
 ) -> Result<ExecResult> {
     debug_assert!(forest_dir.is_absolute(), "forest_dir must be absolute");
     if cmd.is_empty() {
-        bail!("no command specified");
+        bail!("no command specified\n  hint: put the command after `--`, for example `git forest exec <name> -- make test`; see `git forest exec --help`");
     }
 
     let mut failures = Vec::new();

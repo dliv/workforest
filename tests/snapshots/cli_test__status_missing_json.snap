@@ -4,6 +4,11 @@ expression: "golden(t, &[\"--json\", \"status\", \"nope\"])"
 ---
 exit: 1
 --- stdout ---
+{
+  "error": {
+    "code": "command-failed",
+    "message": "forest \"nope\" not found",
+    "hint": "run `git forest ls` to see available forests"
+  }
+}
 --- stderr ---
-error: forest "nope" not found
-  hint: run `git forest ls` to see available forests

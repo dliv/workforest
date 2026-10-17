@@ -2,8 +2,13 @@
 source: tests/cli_test.rs
 expression: "golden(t, &[\"--json\", \"init\", \"--repo\", repo_a])"
 ---
-exit: 1
+exit: 2
 --- stdout ---
+{
+  "error": {
+    "code": "usage",
+    "message": "--feature-branch-template is required",
+    "hint": "git forest init --feature-branch-template \"yourname/{name}\" --repo <path>"
+  }
+}
 --- stderr ---
-error: --feature-branch-template is required
-  hint: git forest init --feature-branch-template "yourname/{name}" --repo <path>

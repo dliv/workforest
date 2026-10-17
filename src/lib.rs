@@ -44,6 +44,63 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+/// The closed set of failure codes in the JSON failure document.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum FailureCode {
+    /// The command line was malformed: clap's errors and `run`'s own flag-format errors.
+    Usage,
+    /// Any other failure.
+    CommandFailed,
+}
+
+impl Failure {
+    fn code(&self) -> FailureCode {
+        match self {
+            Failure::Usage { .. } | Failure::Clap(_) => FailureCode::Usage,
+            Failure::Command(_) => FailureCode::CommandFailed,
+        }
+    }
+
+    /// The message and hint of the JSON failure document. A command error's text is split at
+    /// its first `\n  hint: `; a clap error gives its first paragraph and its `Usage: ` line.
+    fn message_and_hint(&self) -> (String, Option<String>) {
+        match self {
+            Failure::Usage { message, hint } => (message.clone(), hint.clone()),
+            Failure::Command(error) => {
+                let text = format!("{error:#}");
+                match text.split_once("\n  hint: ") {
+                    Some((message, hint)) => (message.to_owned(), Some(hint.to_owned())),
+                    None => (text, None),
+                }
+            }
+            Failure::Clap(error) => {
+                let rendered = error.render().to_string();
+                let text = rendered.strip_prefix("error: ").unwrap_or(&rendered);
+                let message = text.split("\n\n").next().unwrap_or(text).trim().to_owned();
+                let hint = text
+                    .lines()
+                    .find(|line| line.starts_with("Usage: "))
+                    .map(ToOwned::to_owned);
+                (message, hint)
+            }
+        }
+    }
+}
+
+/// The JSON document a failure prints under `--json`.
+#[derive(serde::Serialize)]
+struct FailureDocument {
+    error: FailureBody,
+}
+
+#[derive(serde::Serialize)]
+struct FailureBody {
+    code: FailureCode,
+    message: String,
+    hint: Option<String>,
+}
+
 /// How a command that ran to its end finished, which picks its exit code.
 enum Completion {
     /// Everything the command set out to do was done.
@@ -60,19 +117,32 @@ fn exit_code(outcome: &Result<Completion, Failure>) -> ExitCode {
     match outcome {
         Ok(Completion::Complete) => ExitCode::SUCCESS,
         Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => ExitCode::from(1),
-        Err(Failure::Usage { .. }) => ExitCode::from(1),
         Err(Failure::Command(_)) => ExitCode::from(1),
-        Err(Failure::Clap(_)) => ExitCode::from(2),
+        Err(Failure::Usage { .. }) | Err(Failure::Clap(_)) => ExitCode::from(2),
     }
 }
 
-/// The only failure renderer: clap's errors through clap, every other failure as one
-/// `error: ...` block on standard error.
+/// The only failure renderer. Under `--json`, one JSON document on standard output and
+/// nothing on standard error; otherwise clap's errors through clap and every other failure as
+/// one `error: ...` block on standard error.
 #[expect(
     clippy::print_stderr,
     reason = "composition root: the single failure renderer"
 )]
-fn report_failure(failure: &Failure) {
+fn report_failure(failure: &Failure, json: bool) {
+    if json {
+        let (message, hint) = failure.message_and_hint();
+        let document = FailureDocument {
+            error: FailureBody {
+                code: failure.code(),
+                message,
+                hint,
+            },
+        };
+        if print_json(&document).is_ok() {
+            return;
+        }
+    }
     let text = match failure {
         Failure::Clap(error) => {
             let _ = error.print();
@@ -115,14 +185,21 @@ pub fn main_entry() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(error) => {
+            // `--json` counts when it comes before any `--`, which starts a command's own args.
+            let json = args
+                .iter()
+                .skip(1)
+                .take_while(|arg| *arg != "--")
+                .any(|arg| arg == "--json");
             let outcome = Err(Failure::Clap(error));
             if let Err(failure) = &outcome {
-                report_failure(failure);
+                report_failure(failure, json);
             }
             return exit_code(&outcome);
         }
     };
     let debug = cli.debug;
+    let json = cli.json;
 
     let should_version_check = matches!(
         cli.command,
@@ -143,7 +220,7 @@ pub fn main_entry() -> ExitCode {
             }
         }
         Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => {}
-        Err(failure) => report_failure(failure),
+        Err(failure) => report_failure(failure, json),
     }
     exit_code(&outcome)
 }
@@ -190,7 +267,7 @@ fn exec_completion(result: &commands::ExecResult) -> Completion {
     clippy::disallowed_methods,
     clippy::print_stdout,
     clippy::print_stderr,
-    reason = "composition root: dispatches commands, prints results and progress, and spawns brew for update, passing Homebrew's exit code through until the closed exit-code set lands"
+    reason = "composition root: dispatches commands, prints results and progress, and spawns brew for update"
 )]
 fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failure> {
     let completion = match cli.command {
@@ -532,7 +609,15 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
                     .status()
                     .map_err(anyhow::Error::from)?;
                 if !status.success() {
-                    std::process::exit(status.code().unwrap_or(1));
+                    let code = status
+                        .code()
+                        .map_or("signal".to_string(), |code| code.to_string());
+                    return Err(anyhow!(
+                        "brew upgrade {} failed (exit code: {})",
+                        channel::APP_NAME,
+                        code
+                    )
+                    .into());
                 }
             } else {
                 println!("Download the latest release:");
@@ -553,12 +638,22 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
 )]
 fn output<T: serde::Serialize>(result: &T, json: bool, human_fn: fn(&T) -> String) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(result)?);
+        print_json(result)?;
     } else {
         let text = human_fn(result);
         if !text.is_empty() {
             println!("{}", text);
         }
     }
+    Ok(())
+}
+
+/// Prints one JSON document, pretty-printed, on standard output.
+#[expect(
+    clippy::print_stdout,
+    reason = "composition root: prints every JSON document"
+)]
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

@@ -112,9 +112,10 @@ git forest reset --config-only --confirm  # wipe config/state only, keep worktre
 - **Named operations are scoped:** `status <name>`, `exec <name>`, and `rm <name>` ignore unreadable metadata in unrelated forest directories. They still reject unreadable metadata for the requested forest and command-level base inspection failures.
 - **Inspect inventory findings:** `git forest ls --json` continues past missing or unreadable metadata and exits 0 after producing the inventory, even when no readable forests exist. A command-level failure to enumerate a configured worktree base still exits 1.
 - **JSON requires representable paths:** `rm --json` refuses non-UTF-8 forest-root names before mutation. Inspect and rename the reported entry; do not silently retry the destructive command without JSON.
-- **Error messages include hints:** All errors have `hint:` lines with recovery suggestions.
+- **Error messages include hints:** Errors carry a `hint:` line when there is a recovery step.
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
-- **Exit codes:** 0 = success, 1 = error. `exec` returns 1 if any repo's command fails. `rm` returns 1 if any cleanup step fails.
+- **Exit codes:** 0 = success. 1 = any failure, including an incomplete result (`exec` when any repo's command fails, `rm` or `reset` when any cleanup step fails), a dry-run that predicts failure, and `reset` without `--confirm`. 2 = usage errors: clap's errors and malformed flags such as a `repo=branch` value without `=` or a missing `--feature-branch-template`. A wrong value, such as an unknown repo name, is 1.
+- **JSON failures:** with `--json`, a failure prints `{"error": {"code": "usage" | "command-failed", "message": ..., "hint": ... | null}}` on stdout and nothing on stderr.
 
 ## Common Patterns
 

@@ -4,6 +4,11 @@ expression: "golden(t, &[\"--json\", \"new\", \"feat\", \"--mode\", \"feature\",
 ---
 exit: 1
 --- stdout ---
+{
+  "error": {
+    "code": "command-failed",
+    "message": "forest directory already exists: [TMP]/worktrees/feat",
+    "hint": "choose a different name, or remove the existing forest with `git forest rm`"
+  }
+}
 --- stderr ---
-error: forest directory already exists: [TMP]/worktrees/feat
-  hint: choose a different name, or remove the existing forest with `git forest rm`

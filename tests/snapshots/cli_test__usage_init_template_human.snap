@@ -2,7 +2,7 @@
 source: tests/cli_test.rs
 expression: "golden(t, &[\"init\", \"--repo\", repo_a])"
 ---
-exit: 1
+exit: 2
 --- stdout ---
 --- stderr ---
 error: --feature-branch-template is required

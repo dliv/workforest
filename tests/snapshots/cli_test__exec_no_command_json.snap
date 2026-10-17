@@ -4,5 +4,11 @@ expression: "golden(t, &[\"--json\", \"exec\", \"feat\"])"
 ---
 exit: 1
 --- stdout ---
+{
+  "error": {
+    "code": "command-failed",
+    "message": "no command specified",
+    "hint": "put the command after `--`, for example `git forest exec <name> -- make test`; see `git forest exec --help`"
+  }
+}
 --- stderr ---
-error: no command specified
