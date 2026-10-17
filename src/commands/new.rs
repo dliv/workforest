@@ -134,11 +134,6 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     // Compute forest directory
     let fdir = forest_dir(&tmpl.worktree_base, &forest_name);
 
-    // Create worktree_base if it doesn't exist (match discover_forests leniency)
-    if !tmpl.worktree_base.exists() {
-        std::fs::create_dir_all(&tmpl.worktree_base)?;
-    }
-
     // Check for directory/name collision
     if fdir.exists() {
         bail!(
@@ -257,6 +252,14 @@ pub fn plan_forest(inputs: &NewInputs, tmpl: &ResolvedTemplate) -> Result<Forest
     })
 }
 
+/// Whether `git worktree add` creates the local branch for this checkout (`-b`).
+fn creates_local_branch(checkout: &CheckoutKind) -> bool {
+    match checkout {
+        CheckoutKind::ExistingLocal => false,
+        CheckoutKind::TrackRemote | CheckoutKind::NewBranch => true,
+    }
+}
+
 fn branch_created(checkout: &CheckoutKind) -> bool {
     match checkout {
         CheckoutKind::ExistingLocal => false,
@@ -290,6 +293,12 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
 }
 
 pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> {
+    // The worktree base is created here, not while planning, so a dry-run writes nothing.
+    // A missing base plans like an empty one (match discover_forests leniency).
+    if let Some(base) = plan.forest_dir.parent() {
+        std::fs::create_dir_all(base)?;
+    }
+
     // SAFETY: create_dir (not create_dir_all) is intentional. It fails atomically
     // if the directory already exists, preventing a TOCTOU race between plan_forest
     // (which checks for collisions) and execution. Do not change to create_dir_all.
@@ -310,7 +319,7 @@ pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> 
     // Create worktrees incrementally, tracking successes for rollback
     let mut created_worktrees: Vec<(&AbsolutePath, &AbsolutePath)> = Vec::new();
 
-    for repo_plan in &plan.repo_plans {
+    for (attempted, repo_plan) in plan.repo_plans.iter().enumerate() {
         let dest_str = repo_plan.dest.to_string_lossy();
 
         let branch_str = repo_plan.branch.as_str();
@@ -371,6 +380,18 @@ pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> 
                     );
                     let d = dest.to_string_lossy();
                     let _ = crate::git::git(source, &["worktree", "remove", "--force", &d]);
+                }
+                // Delete the branches this run created, including the failed repo's: planning
+                // observed them absent, so a branch that exists now is this run's.
+                for repo_plan in &plan.repo_plans[..=attempted] {
+                    if !creates_local_branch(&repo_plan.checkout) {
+                        continue;
+                    }
+                    let branch = repo_plan.branch.as_str();
+                    let refname = format!("refs/heads/{}", branch);
+                    if let Ok(true) = ref_exists(&repo_plan.source, &refname) {
+                        let _ = crate::git::git(&repo_plan.source, &["branch", "-D", branch]);
+                    }
                 }
                 let _ = std::fs::remove_dir_all(&plan.forest_dir);
                 return Err(e);
@@ -1247,6 +1268,33 @@ mod tests {
                 "\n  hint: check that the remote is reachable, or pass `--no-fetch` to plan from the refs already fetched"
             ),
             "{text}"
+        );
+    }
+
+    /// A failed `new` deletes the branches it created, so a retry does not find a leftover
+    /// branch.
+    #[test]
+    fn execute_plan_rollback_deletes_branches_it_created() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("good-repo");
+        env.create_repo_with_remote("bad-repo");
+        let tmpl = make_template_with_repos(&env, &["good-repo", "bad-repo"]);
+
+        let inputs = make_new_inputs("rollback-branches", ForestMode::Feature);
+        let plan = plan_forest(&inputs, &tmpl).unwrap();
+        let branch = plan.repo_plans[0].branch.to_string();
+
+        // Sabotage: remove the second repo's source so git worktree add fails.
+        let bad_source = &plan.repo_plans[1].source;
+        std::fs::remove_dir_all(&**bad_source).unwrap();
+
+        let result = execute_plan(&plan, chrono::Utc::now());
+        assert!(result.is_err(), "execute_plan should fail");
+
+        let good_source = env.repo_path("good-repo");
+        assert!(
+            !ref_exists(&good_source, &format!("refs/heads/{}", branch)).unwrap(),
+            "the branch {branch} that the failed run created should be deleted"
         );
     }
 }

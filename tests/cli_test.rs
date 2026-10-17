@@ -1902,6 +1902,90 @@ fn update_command_prints_download_link_when_homebrew_package_is_absent() {
     );
 }
 
+// --- Dry-runs write nothing ---
+
+#[test]
+fn new_dry_run_leaves_a_missing_worktree_base_absent() {
+    let (_tmp, fake_home, worktree_base) = setup_new_env();
+    if worktree_base.exists() {
+        std::fs::remove_dir_all(&worktree_base).unwrap();
+    }
+
+    bin_cmd()
+        .args(["new", "t", "--mode", "feature", "--dry-run", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    assert!(
+        !worktree_base.exists(),
+        "new --dry-run created the worktree base {}",
+        worktree_base.display()
+    );
+}
+
+#[test]
+fn rm_dry_run_leaves_the_worktree_index_untouched() {
+    let (_tmp, fake_home, worktree_base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "feat", "--mode", "feature", "--no-fetch"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    // Commit a tracked file, then make its stat data stale so `git status` would refresh and
+    // rewrite the index unless optional locks are off.
+    let worktree = worktree_base.join("feat").join("foo-api");
+    let tracked = worktree.join("tracked.txt");
+    std::fs::write(&tracked, "tracked\n").unwrap();
+    run_git(&worktree, &["add", "tracked.txt"]);
+    run_git(&worktree, &["commit", "-m", "add tracked file"]);
+    let modified = std::fs::metadata(&tracked).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&tracked)
+        .unwrap()
+        .set_modified(modified + std::time::Duration::from_secs(10))
+        .unwrap();
+
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "index"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let index_path = std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let index = if index_path.is_absolute() {
+        index_path
+    } else {
+        worktree.join(index_path)
+    };
+    let pinned = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&index)
+        .unwrap()
+        .set_modified(pinned)
+        .unwrap();
+
+    // The new commit may leave the branch unmerged, so the exit status does not matter here.
+    bin_cmd()
+        .args(["rm", "feat", "--dry-run"])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&index).unwrap().modified().unwrap(),
+        pinned,
+        "rm --dry-run rewrote the worktree index {}",
+        index.display()
+    );
+}
+
 // --- Golden transcripts ---
 //
 // Each golden records one run of the built binary: its exit code, stdout and stderr, with the

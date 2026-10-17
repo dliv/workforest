@@ -11,7 +11,7 @@ Mutating commands (`new`, `rm`, `init`) touch git and the filesystem. Testing th
 
 Mutating commands use a two-phase pattern:
 
-1. **Pure planning function** — takes inputs, returns a data structure describing intended actions. No side effects.
+1. **Planning function** — takes inputs and observations and returns a data structure describing intended actions. It writes nothing; `new` fetches each source repository before planning, unless `--no-fetch`, so the plan reflects the remote, and that update of git's remote-tracking refs is the only change a dry-run makes.
 2. **Execution function** — carries out the plan (git operations, filesystem writes).
 
 Concrete implementations:

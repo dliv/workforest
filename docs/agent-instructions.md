@@ -104,7 +104,7 @@ git forest reset --config-only --confirm  # wipe config/state only, keep worktre
 ## Agent Best Practices
 
 - **Always use `--json`** for structured, parseable output on any command.
-- **Dry-run before mutating:** `new`, `rm`, and `reset` support `--dry-run --json` to preview changes. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
+- **Dry-run before mutating:** `new`, `rm`, and `reset` support `--dry-run --json` to preview changes. A dry-run changes nothing you can see; `new --dry-run` still fetches, like a real run, unless `--no-fetch`. `init` does not support `--dry-run` — it writes/updates a config file (use `--show-path` to see where).
 - **Treat disposable entries as deletion authority:** Configured entries are recursively deleted during ordinary `rm`. For older forests, inspect the entry and use repeatable `--discard-root-entry <entry>` only when its complete contents may be discarded.
 - **Dotfiles are not automatically safe:** Explicitly passing `.env` to `--discard-root-entry` deletes it. Never infer disposable entries merely because their names begin with a dot.
 - **Symlink boundary:** `rm` refuses a symlinked forest root even with `--force`. Inside a real forest, deleting an authorized symlink removes the link rather than following its target.

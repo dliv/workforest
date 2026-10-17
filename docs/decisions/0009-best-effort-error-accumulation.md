@@ -11,7 +11,7 @@ Multi-repo operations can fail partially — one repo's worktree removal might f
 
 Per-command error policies, documented and enforced:
 
-- **`new`:** Stop on first failure. The partial forest is left with a valid `.forest-meta.toml` (ADR 0011) so `rm` can clean it up.
+- **`new`:** Stop on first failure and roll back: remove the worktrees this run created, delete the branches it created (including the failed repo's), and remove the forest directory. Rollback errors are ignored, and the original error is returned. A failure to write `.forest-meta.toml` returns without rollback, leaving a partial forest whose metadata lists the repos created before it (ADR 0011), so `rm` can clean it up.
 - **`rm`:** Best-effort, continue on per-repo failures, report all errors at the end. `RmResult.errors: Vec<String>` accumulates errors (`src/commands/rm.rs`, line 33). `RmOutcome` enum has `Success`, `Skipped`, and `Failed` variants (lines 43–49).
 - **`exec`:** Continue to next repo on failure. `ExecResult.failures: Vec<String>` tracks which repos failed (`src/commands/exec.rs`, line 10).
 - **`status`:** Continue on failure. `RepoStatusKind::Missing` and `Error` variants handle per-repo problems (`src/commands/status.rs`, lines 21–25).

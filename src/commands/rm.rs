@@ -322,9 +322,12 @@ fn plan_rm_with_options(
                 let has_dirty_files = worktree_exists
                     && !worktree_is_symlink
                     && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
-                    && crate::git::git(&worktree_path, &["status", "--porcelain"])
-                        .map(|output| !output.is_empty())
-                        .unwrap_or(false);
+                    && crate::git::git(
+                        &worktree_path,
+                        &["--no-optional-locks", "status", "--porcelain"],
+                    )
+                    .map(|output| !output.is_empty())
+                    .unwrap_or(false);
                 RepoRmPlan {
                     name: repo.name.clone(),
                     worktree_path,
