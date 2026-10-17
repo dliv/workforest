@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::branch_state::ActualBranchState;
-use super::rm::{self, RepoRmPlan, RmOutcome};
+use super::rm::{self, CleanupIssue, CleanupIssueCode, RepoRmPlan, RmOutcome};
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
 use crate::paths::RepoName;
 
@@ -18,7 +18,8 @@ pub struct ResetResult {
     pub state_file: FileResetEntry,
     pub forests: Vec<ForestResetEntry>,
     pub warnings: Vec<String>,
-    pub errors: Vec<String>,
+    #[serde(serialize_with = "rm::serialize_legacy_errors")]
+    pub errors: Vec<CleanupIssue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,7 +60,7 @@ struct ForestInfo {
     name: String,
     path: PathBuf,
     repos: Vec<RepoRmPlan>,
-    root_rejection: Option<String>,
+    root_rejection: Option<CleanupIssue>,
 }
 
 struct ResetPlan {
@@ -70,7 +71,7 @@ struct ResetPlan {
     config_only: bool,
     forests: Vec<ForestInfo>,
     warnings: Vec<String>,
-    discovery_errors: Vec<String>,
+    discovery_errors: Vec<CleanupIssue>,
 }
 
 fn plan_reset(config_only: bool) -> Result<ResetPlan> {
@@ -95,11 +96,11 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                             discovered_forests.append(&mut discovered);
                         }
                         Err(e) => {
-                            discovery_errors.push(format!(
+                            discovery_errors.push(CleanupIssue::new(CleanupIssueCode::WorktreeBaseScanFailed, format!(
                                 "could not safely scan worktree base {}: {}\n  hint: config and state will be preserved until forest recovery is complete",
                                 base.display(),
                                 e
-                            ));
+                            )));
                         }
                     }
                 }
@@ -111,7 +112,7 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
                     forests.push(ForestInfo {
                         name,
                         path: forest_path,
-                        root_rejection: rm_plan.root_rejection().map(str::to_string),
+                        root_rejection: rm_plan.root_rejection(),
                         repos: rm_plan.repo_plans,
                     });
                 }
@@ -143,7 +144,11 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
 
 // --- Execution (impure) ---
 
-fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) -> ResetResult {
+fn execute_reset(
+    plan: &ResetPlan,
+    now: chrono::DateTime<chrono::Utc>,
+    on_progress: Option<&dyn Fn(ResetProgress)>,
+) -> ResetResult {
     let mut errors = plan.discovery_errors.clone();
     let mut forest_entries = Vec::new();
 
@@ -162,7 +167,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
         if let Some(error) = forest
             .root_rejection
             .clone()
-            .or_else(|| rm::current_forest_root_safety_error(path))
+            .or_else(|| rm::current_forest_root_safety_error(path).map(root_refused))
         {
             errors.push(error);
         } else {
@@ -187,7 +192,10 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
                 repos,
             }
         } else if let Some(error) = rm::current_forest_root_safety_error(path) {
-            errors.push(error);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestRootRefused,
+                error,
+            ));
             ForestResetEntry {
                 name: name.clone(),
                 path: path.clone(),
@@ -221,7 +229,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
     let cleanup_succeeded = errors.is_empty();
 
     let (config_deleted, config_backed_up_to) = if cleanup_succeeded && plan.config_exists {
-        backup_file(&plan.config_path, &mut errors)
+        backup_file(&plan.config_path, now, &mut errors)
     } else {
         (false, None)
     };
@@ -254,7 +262,7 @@ fn execute_reset(plan: &ResetPlan, on_progress: Option<&dyn Fn(ResetProgress)>) 
     }
 }
 
-fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<CleanupIssue>) -> (RmOutcome, bool) {
     if !repo.worktree_exists {
         return remove_missing_reset_worktree(repo, errors);
     }
@@ -267,15 +275,24 @@ fn remove_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutc
         }
         Err(e) => {
             let msg = format!("warning: git worktree remove failed for {}: {}", wt_str, e);
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeRemoveFailed,
+                msg.clone(),
+            ));
             (RmOutcome::Failed { error: msg }, false)
         }
     }
 }
 
-fn remove_missing_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+fn remove_missing_reset_worktree(
+    repo: &RepoRmPlan,
+    errors: &mut Vec<CleanupIssue>,
+) -> (RmOutcome, bool) {
     if let Some(msg) = rm::stale_missing_worktree_metadata_error(repo, true) {
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeMetadataStale,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
@@ -287,11 +304,17 @@ fn remove_missing_reset_worktree(repo: &RepoRmPlan, errors: &mut Vec<String>) ->
     )
 }
 
-fn plan_reset_worktree_outcome(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (RmOutcome, bool) {
+fn plan_reset_worktree_outcome(
+    repo: &RepoRmPlan,
+    errors: &mut Vec<CleanupIssue>,
+) -> (RmOutcome, bool) {
     if !repo.worktree_exists {
         if repo.source_exists {
             if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::WorktreeRefused,
+                    msg.clone(),
+                ));
                 return (RmOutcome::Failed { error: msg }, false);
             }
         }
@@ -308,12 +331,18 @@ fn plan_reset_worktree_outcome(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (
             "{}: source repo missing; dry-run cannot prove worktree removal",
             repo.name
         );
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeRefused,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
     if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeRefused,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
@@ -322,7 +351,10 @@ fn plan_reset_worktree_outcome(repo: &RepoRmPlan, errors: &mut Vec<String>) -> (
             "{}: branch lookup failed; dry-run cannot prove worktree removal",
             repo.name
         );
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeRefused,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
@@ -343,11 +375,14 @@ fn repo_reset_entry(
     }
 }
 
-fn delete_file(path: &Path, errors: &mut Vec<String>) -> bool {
+fn delete_file(path: &Path, errors: &mut Vec<CleanupIssue>) -> bool {
     match std::fs::remove_file(path) {
         Ok(()) => true,
         Err(e) => {
-            errors.push(format!("failed to delete {}: {}", path.display(), e));
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::StateDeleteFailed,
+                format!("failed to delete {}: {}", path.display(), e),
+            ));
             false
         }
     }
@@ -355,12 +390,12 @@ fn delete_file(path: &Path, errors: &mut Vec<String>) -> bool {
 
 /// Rename a file to `<name>.<timestamp>.bak` instead of deleting it.
 /// Returns `(removed_from_original_path, backup_path)`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
-)]
-fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>) {
-    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+fn backup_file(
+    path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    errors: &mut Vec<CleanupIssue>,
+) -> (bool, Option<PathBuf>) {
+    let timestamp = now.format("%Y%m%d%H%M%S");
     let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
     let backup_name = format!("{}.{}.bak", file_stem, timestamp);
     let backup_path = path.with_file_name(&backup_name);
@@ -368,11 +403,14 @@ fn backup_file(path: &Path, errors: &mut Vec<String>) -> (bool, Option<PathBuf>)
     match std::fs::rename(path, &backup_path) {
         Ok(()) => (true, Some(backup_path)),
         Err(e) => {
-            errors.push(format!(
-                "failed to back up {} to {}: {}",
-                path.display(),
-                backup_path.display(),
-                e
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ConfigBackupFailed,
+                format!(
+                    "failed to back up {} to {}: {}",
+                    path.display(),
+                    backup_path.display(),
+                    e
+                ),
             ));
             (false, None)
         }
@@ -391,7 +429,7 @@ fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
             let repos = if let Some(error) = f
                 .root_rejection
                 .clone()
-                .or_else(|| rm::current_forest_root_safety_error(&f.path))
+                .or_else(|| rm::current_forest_root_safety_error(&f.path).map(root_refused))
             {
                 errors.push(error);
                 vec![]
@@ -458,6 +496,7 @@ pub fn cmd_reset(
     confirm: bool,
     config_only: bool,
     dry_run: bool,
+    now: chrono::DateTime<chrono::Utc>,
     on_progress: Option<&dyn Fn(ResetProgress)>,
 ) -> Result<ResetResult> {
     let plan = plan_reset(config_only)?;
@@ -470,7 +509,7 @@ pub fn cmd_reset(
         return Ok(plan_to_confirm_required(&plan));
     }
 
-    Ok(execute_reset(&plan, on_progress))
+    Ok(execute_reset(&plan, now, on_progress))
 }
 
 // --- Human formatting ---
@@ -558,7 +597,7 @@ pub fn format_reset_human(result: &ResetResult) -> String {
     if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
-        for error in &result.errors {
+        for error in rm::legacy_error_lines(&result.errors) {
             lines.push(format!("  {}", error));
         }
     }
@@ -632,7 +671,7 @@ pub fn format_reset_summary(result: &ResetResult) -> String {
     if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
-        for error in &result.errors {
+        for error in rm::legacy_error_lines(&result.errors) {
             lines.push(format!("  {}", error));
         }
     }
@@ -672,7 +711,7 @@ fn format_repo_reset_status(repo: &RepoResetEntry, is_preview: bool) -> String {
 }
 
 fn reset_cleanup_blocked(result: &ResetResult) -> bool {
-    result.errors.iter().any(|error| !file_cleanup_error(error))
+    result.errors.iter().any(|issue| !file_cleanup_error(issue))
         && ((result.config_file.existed
             && !result.config_file.deleted
             && result.config_file.backed_up_to.is_none())
@@ -683,8 +722,28 @@ fn reset_cleanup_blocked(result: &ResetResult) -> bool {
                 .any(|forest| !forest.removed && forest.path.exists()))
 }
 
-fn file_cleanup_error(error: &str) -> bool {
-    error.starts_with("failed to back up ") || error.starts_with("failed to delete ")
+/// Whether an issue comes from backing up the config or deleting the state file, the two
+/// steps that run after every forest is cleaned up.
+fn file_cleanup_error(issue: &CleanupIssue) -> bool {
+    match issue.code {
+        CleanupIssueCode::ConfigBackupFailed | CleanupIssueCode::StateDeleteFailed => true,
+        CleanupIssueCode::DirtyWorktree
+        | CleanupIssueCode::WorktreeRefused
+        | CleanupIssueCode::WorktreeRemoveFailed
+        | CleanupIssueCode::WorktreeMetadataStale
+        | CleanupIssueCode::BranchDeleteFailed
+        | CleanupIssueCode::ForestRootRefused
+        | CleanupIssueCode::RootEntryRemoveFailed
+        | CleanupIssueCode::ForestDirNotRemoved
+        | CleanupIssueCode::ForestMetadataStagingFailed
+        | CleanupIssueCode::ForestPlanRejected
+        | CleanupIssueCode::WorktreeBaseScanFailed => false,
+    }
+}
+
+/// A forest-root refusal, as an issue.
+fn root_refused(text: String) -> CleanupIssue {
+    CleanupIssue::new(CleanupIssueCode::ForestRootRefused, text)
 }
 
 fn format_file_status(entry: &FileResetEntry, is_preview: bool, cleanup_blocked: bool) -> String {
@@ -902,7 +961,10 @@ name = "{}"
             },
             forests: vec![],
             warnings: vec![],
-            errors: vec!["failed to delete config".to_string()],
+            errors: vec![CleanupIssue::new(
+                CleanupIssueCode::ConfigBackupFailed,
+                "failed to delete config".to_string(),
+            )],
         };
 
         let output = format_reset_human(&result);
@@ -1014,7 +1076,7 @@ name = "{}"
         let tmp = tempfile::tempdir().unwrap();
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None);
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nothing to reset"));
     }
@@ -1044,7 +1106,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, true, false, None).unwrap();
+        let result = cmd_reset(true, true, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!result.dry_run);
         assert!(result.config_file.deleted);
@@ -1077,7 +1139,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(false, false, false, None).unwrap();
+        let result = cmd_reset(false, false, false, chrono::Utc::now(), None).unwrap();
         assert!(result.confirm_required);
         assert!(config_dir.join("config.toml").exists());
     }
@@ -1104,7 +1166,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(false, false, true, None).unwrap();
+        let result = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(result.dry_run);
         assert!(config_dir.join("config.toml").exists());
     }
@@ -1148,7 +1210,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!result.dry_run);
         assert_eq!(result.forests.len(), 1);
@@ -1209,19 +1271,18 @@ path = "/tmp/nonexistent-repo"
             return;
         }
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         std::fs::set_permissions(&worktree_base, original_permissions).unwrap();
 
         assert!(!result.forests[0].removed);
-        assert!(result
-            .errors
+        assert!(rm::legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("failed to stage forest metadata")));
         assert!(meta_path.exists());
         assert!(forest_dir.join("residue.txt").exists());
         assert!(config_path.exists());
 
-        let retry = cmd_reset(false, false, true, None).unwrap();
+        let retry = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert_eq!(retry.forests.len(), 1);
         assert_eq!(retry.forests[0].path, forest_dir);
     }
@@ -1258,15 +1319,18 @@ path = "/tmp/nonexistent-repo"
         std::fs::write(&state_path, "").unwrap();
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
 
         assert!(!dry_run.config_file.deleted);
         assert!(!dry_run.state_file.deleted);
-        assert!(dry_run.errors.iter().any(|error| error
-            .contains("could not safely scan worktree base")
-            && error.contains("could not read forest metadata")));
+        assert!(rm::legacy_error_lines(&dry_run.errors)
+            .iter()
+            .any(
+                |error| error.contains("could not safely scan worktree base")
+                    && error.contains("could not read forest metadata")
+            ));
 
-        let actual = cmd_reset(true, false, false, None).unwrap();
+        let actual = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!actual.config_file.deleted);
         assert!(!actual.state_file.deleted);
@@ -1296,10 +1360,10 @@ path = "/tmp/nonexistent-repo"
             .join("config.toml");
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!result.config_file.deleted);
-        assert!(result.errors.iter().any(|error| {
+        assert!(rm::legacy_error_lines(&result.errors).iter().any(|error| {
             error.contains("could not safely scan worktree base")
                 && error.contains("found staged forest metadata")
         }));
@@ -1355,12 +1419,12 @@ path = "/tmp/nonexistent-repo"
             return;
         }
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         std::fs::set_permissions(&blocked_parent, original_permissions).unwrap();
 
         assert!(!result.config_file.deleted);
         assert!(!result.state_file.deleted);
-        assert!(result.errors.iter().any(|error| {
+        assert!(rm::legacy_error_lines(&result.errors).iter().any(|error| {
             error.contains("could not safely scan worktree base")
                 && error.contains("could not read worktree base")
         }));
@@ -1410,11 +1474,11 @@ path = "/tmp/nonexistent-repo"
         let offline_target = tmp.path().join("worktrees-offline");
         std::fs::rename(&worktree_target, &offline_target).unwrap();
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!result.config_file.deleted);
         assert!(!result.state_file.deleted);
-        assert!(result.errors.iter().any(|error| {
+        assert!(rm::legacy_error_lines(&result.errors).iter().any(|error| {
             error.contains("could not safely scan worktree base")
                 && error.contains("could not read worktree base")
         }));
@@ -1461,7 +1525,7 @@ path = "/tmp/nonexistent-repo"
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.forests[0].path, forest_dir);
@@ -1519,7 +1583,7 @@ path = "/tmp/nonexistent-repo"
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.forests.len(), 1);
@@ -1571,21 +1635,19 @@ path = "/tmp/nonexistent-repo"
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
         let branch_ref = "refs/heads/testuser/reset-symlink";
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(!dry_run.forests[0].removed);
         assert!(dry_run.forests[0].repos.is_empty());
-        assert!(dry_run
-            .errors
+        assert!(rm::legacy_error_lines(&dry_run.errors)
             .iter()
             .any(|error| error.contains("forest removal refused") && error.contains("symlink")));
         assert!(!dry_run.config_file.deleted);
         assert!(!dry_run.state_file.deleted);
 
-        let actual = cmd_reset(true, false, false, None).unwrap();
+        let actual = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(!actual.forests[0].removed);
         assert!(actual.forests[0].repos.is_empty());
-        assert!(actual
-            .errors
+        assert!(rm::legacy_error_lines(&actual.errors)
             .iter()
             .any(|error| error.contains("forest removal refused") && error.contains("symlink")));
         assert!(forest_alias
@@ -1639,7 +1701,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, true, false, None).unwrap();
+        let result = cmd_reset(true, true, false, chrono::Utc::now(), None).unwrap();
 
         assert!(result.config_only);
         assert!(result.forests.is_empty());
@@ -1658,7 +1720,7 @@ path = "/tmp/nonexistent-repo"
 
         let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
 
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("could not be parsed"));
@@ -1730,7 +1792,7 @@ name = "repo-a"
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         // 3. Reset — should delete forest directory AND clean up worktree registrations
-        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        let reset_result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert_eq!(reset_result.forests.len(), 1);
         assert!(reset_result.forests[0].removed);
 
@@ -1785,7 +1847,7 @@ name = "repo-a"
         write_reset_config(tmp_root, &base, &repo, "repo-reset-branch");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        let reset_result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(reset_result.errors.is_empty(), "{:?}", reset_result.errors);
         assert!(reset_result.forests[0].removed);
         assert!(matches!(
@@ -1851,10 +1913,9 @@ name = "repo-a"
             .join("config.toml");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(
-            result
-                .errors
+            rm::legacy_error_lines(&result.errors)
                 .iter()
                 .any(|error| error.contains("not fully merged")),
             "{:?}",
@@ -1906,7 +1967,7 @@ name = "repo-a"
         write_reset_config(tmp_root, &base, &repo, "repo-reset-dry-run");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let result = cmd_reset(false, false, true, None).unwrap();
+        let result = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(
             json["forests"][0]["repos"][0]["branch"],
@@ -1972,7 +2033,7 @@ name = "repo-missing-source"
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
         let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let result = cmd_reset(false, false, true, None).unwrap();
+        let result = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(!result.errors.is_empty());
         assert!(matches!(
             result.forests[0].repos[0].worktree_removed,
@@ -1985,7 +2046,7 @@ name = "repo-missing-source"
         assert!(output.contains("source-missing: blocked"), "{}", output);
         assert!(output.contains("Config: blocked"), "{}", output);
 
-        let confirm_result = cmd_reset(false, false, false, None).unwrap();
+        let confirm_result = cmd_reset(false, false, false, chrono::Utc::now(), None).unwrap();
         assert!(!confirm_result.confirm_required);
         let confirm_output = format_reset_human(&confirm_result);
         assert!(
@@ -2052,12 +2113,12 @@ name = "repo-missing-both"
         std::fs::write(&config_file, &config_content).unwrap();
         let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(dry_run.errors.is_empty(), "{:?}", dry_run.errors);
         assert!(dry_run.forests[0].removed);
         assert!(dry_run.config_file.deleted);
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(result.forests[0].removed);
         assert!(!forest_dir.exists());
@@ -2120,11 +2181,11 @@ name = "repo-dangling"
         std::fs::write(&config_file, &config_content).unwrap();
         let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(!dry_run.errors.is_empty());
         assert!(!dry_run.forests[0].removed);
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(!result.errors.is_empty());
         assert!(!result.forests[0].removed);
         assert!(forest_dir.exists());
@@ -2171,7 +2232,7 @@ name = "repo-dangling"
             .join("config.toml");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(!dry_run.errors.is_empty());
         assert!(matches!(
             dry_run.forests[0].repos[0].worktree_removed,
@@ -2179,7 +2240,7 @@ name = "repo-dangling"
         ));
         assert!(!dry_run.config_file.deleted);
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(!result.errors.is_empty());
         assert!(!result.forests[0].removed);
         assert!(forest_dir.exists());
@@ -2224,7 +2285,7 @@ name = "repo-dangling"
             .join("config.toml");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let dry_run = cmd_reset(false, false, true, None).unwrap();
+        let dry_run = cmd_reset(false, false, true, chrono::Utc::now(), None).unwrap();
         assert!(!dry_run.errors.is_empty());
         assert!(matches!(
             dry_run.forests[0].repos[0].worktree_removed,
@@ -2232,7 +2293,7 @@ name = "repo-dangling"
         ));
         assert!(!dry_run.config_file.deleted);
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(!result.errors.is_empty());
         assert!(!result.forests[0].removed);
         assert!(forest_dir.exists());
@@ -2278,9 +2339,9 @@ name = "repo-dangling"
             .join("config.toml");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(
-            result.errors.iter().any(|error| {
+            rm::legacy_error_lines(&result.errors).iter().any(|error| {
                 error.contains("metadata still lists missing worktree")
                     || error.contains("failed to prune stale missing worktree metadata")
             }),
@@ -2335,7 +2396,7 @@ name = "repo-dangling"
         write_reset_config(tmp_root, &base, &repo, "repo-missing-branch");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(result.forests[0].removed);
         assert!(matches!(
@@ -2375,7 +2436,7 @@ name = "repo-dangling"
         write_reset_config(tmp_root, &base, &repo, "repo-existing-branch");
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let result = cmd_reset(true, false, false, None).unwrap();
+        let result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(
             !result.forests[0].repos[0].branch_created,
@@ -2437,7 +2498,7 @@ name = "repo-b"
 
         let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
-        let reset_result = cmd_reset(true, false, false, None).unwrap();
+        let reset_result = cmd_reset(true, false, false, chrono::Utc::now(), None).unwrap();
         assert!(reset_result.forests[0].removed);
         assert!(reset_result.errors.is_empty());
 

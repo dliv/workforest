@@ -93,7 +93,7 @@ fn report_failure(failure: &Failure) {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "composition root: reads process arguments and owns the exit code"
+    reason = "composition root: reads process arguments and the clock once, and owns the exit code"
 )]
 pub fn main_entry() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -134,7 +134,8 @@ pub fn main_entry() -> ExitCode {
             | Command::Exec { .. }
     );
 
-    let outcome = run(cli);
+    let now = chrono::Utc::now();
+    let outcome = run(cli, now);
     match &outcome {
         Ok(Completion::Complete) => {
             if should_version_check {
@@ -191,7 +192,7 @@ fn exec_completion(result: &commands::ExecResult) -> Completion {
     clippy::print_stderr,
     reason = "composition root: dispatches commands, prints results and progress, and spawns brew for update, passing Homebrew's exit code through until the closed exit-code set lands"
 )]
-fn run(cli: Cli) -> Result<Completion, Failure> {
+fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failure> {
     let completion = match cli.command {
         Command::Init {
             template,
@@ -316,7 +317,7 @@ fn run(cli: Cli) -> Result<Completion, Failure> {
                 dry_run,
             };
 
-            let result = commands::cmd_new(inputs, tmpl)?;
+            let result = commands::cmd_new_at(inputs, tmpl, now)?;
             output(&result, cli.json, commands::format_new_human)?;
             Completion::Complete
         }
@@ -399,11 +400,11 @@ fn run(cli: Cli) -> Result<Completion, Failure> {
             dry_run,
         } => {
             let result = if cli.json {
-                let r = commands::cmd_reset(confirm, config_only, dry_run, None)?;
+                let r = commands::cmd_reset(confirm, config_only, dry_run, now, None)?;
                 output(&r, true, commands::format_reset_human)?;
                 r
             } else if dry_run || !confirm {
-                let r = commands::cmd_reset(confirm, config_only, dry_run, None)?;
+                let r = commands::cmd_reset(confirm, config_only, dry_run, now, None)?;
                 let text = commands::format_reset_human(&r);
                 if !text.is_empty() {
                     println!("{}", text);
@@ -418,6 +419,7 @@ fn run(cli: Cli) -> Result<Completion, Failure> {
                     confirm,
                     config_only,
                     dry_run,
+                    now,
                     Some(&|progress| match progress {
                         commands::ResetProgress::ForestStarting { name, path } => {
                             print!("  Removing {} ({})...", name, path.display());
@@ -440,7 +442,7 @@ fn run(cli: Cli) -> Result<Completion, Failure> {
         Command::Ls => {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
-            let result = commands::cmd_ls(&bases)?;
+            let result = commands::cmd_ls(&bases, now)?;
             output(&result, cli.json, commands::format_ls_human)?;
             Completion::Complete
         }
@@ -456,7 +458,26 @@ fn run(cli: Cli) -> Result<Completion, Failure> {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
-            let result = commands::cmd_exec(&dir, &meta, &cmd)?;
+            let result = commands::cmd_exec(
+                &dir,
+                &meta,
+                &cmd,
+                &std::process::Stdio::inherit,
+                Some(&|progress| match progress {
+                    commands::ExecProgress::RepoStarting { name } => {
+                        eprintln!("=== {} ===", name);
+                    }
+                    commands::ExecProgress::RepoFailed(failure) => match failure.code {
+                        commands::ExecFailureCode::WorktreeMissing => {
+                            eprintln!("  warning: {}", failure.message);
+                        }
+                        commands::ExecFailureCode::SpawnFailed => {
+                            eprintln!("  error: {}", failure.message);
+                        }
+                        commands::ExecFailureCode::CommandExited => {}
+                    },
+                }),
+            )?;
             output(&result, cli.json, commands::format_exec_human)?;
             exec_completion(&result)
         }

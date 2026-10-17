@@ -1,16 +1,13 @@
-3	src/commands/exec.rs	use of `eprintln!`
 1	src/commands/exec.rs	use of a disallowed method `std::process::Command::new`
 1	src/commands/init.rs	use of a disallowed method `std::process::Command::new`
-1	src/commands/ls.rs	use of a disallowed method `chrono::Utc::now`
-1	src/commands/new.rs	use of a disallowed method `chrono::Utc::now`
-1	src/commands/reset.rs	use of a disallowed method `chrono::Utc::now`
 1	src/config.rs	use of a disallowed method `std::env::var`
 1	src/forest.rs	use of a disallowed method `std::env::current_dir`
 1	src/forest.rs	use of a disallowed method `std::env::var_os`
 2	src/git.rs	use of a disallowed method `std::process::Command::new`
-5	src/lib.rs	use of `eprintln!`
+8	src/lib.rs	use of `eprintln!`
 3	src/lib.rs	use of `print!`
 19	src/lib.rs	use of `println!`
+1	src/lib.rs	use of a disallowed method `chrono::Utc::now`
 1	src/lib.rs	use of a disallowed method `std::env::args_os`
 2	src/lib.rs	use of a disallowed method `std::io::stdout`
 3	src/lib.rs	use of a disallowed method `std::process::Command::new`

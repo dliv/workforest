@@ -89,7 +89,112 @@ pub struct RmResult {
     pub repos: Vec<RepoRmResult>,
     pub forest_root_cleanup: Vec<ForestRootCleanupResult>,
     pub forest_dir_removed: bool,
-    pub errors: Vec<String>,
+    #[serde(serialize_with = "serialize_legacy_errors")]
+    pub errors: Vec<CleanupIssue>,
+}
+
+/// One error that a cleanup step of `rm`, `rm --all` or `reset` reported: the step's code,
+/// the message, and the recovery hint when the message carries one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupIssue {
+    pub code: CleanupIssueCode,
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+/// The cleanup step that failed, named for what an agent can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupIssueCode {
+    /// Uncommitted changes block removal.
+    DirtyWorktree,
+    /// A safety check refused removal: an unverified or unreachable detached HEAD, a missing
+    /// source repo, a failed branch lookup, a symlinked or locked worktree, or a dry-run that
+    /// cannot prove removal.
+    WorktreeRefused,
+    /// Git or filesystem removal of a worktree, or of a corrupt worktree directory, failed.
+    WorktreeRemoveFailed,
+    /// Git worktree metadata is stale, could not be inspected, or was not pruned or verified.
+    WorktreeMetadataStale,
+    /// Branch deletion failed, or the branch is checked out elsewhere or could not be checked.
+    BranchDeleteFailed,
+    /// The forest root is a symlink, not a directory, uninspectable or ambiguous.
+    ForestRootRefused,
+    /// A disposable or forced forest-root entry could not be inspected or removed.
+    RootEntryRemoveFailed,
+    /// The forest directory stayed.
+    ForestDirNotRemoved,
+    /// Staging or restoring the forest metadata around removal failed.
+    ForestMetadataStagingFailed,
+    /// `rm --all`: one forest's removal plan was refused.
+    ForestPlanRejected,
+    /// `reset`: a worktree base could not be scanned safely.
+    WorktreeBaseScanFailed,
+    /// `reset`: the config file could not be backed up.
+    ConfigBackupFailed,
+    /// `reset`: the state file could not be deleted.
+    StateDeleteFailed,
+}
+
+/// Where a cleanup message carries its recovery hint.
+const HINT_SEPARATOR: &str = "\n  hint: ";
+
+/// The recovery step for uncommitted changes, shared by every dirty worktree of one result.
+const DIRTY_WORKTREE_HINT: &str =
+    "commit or stash changes, then retry — or use `git forest rm --force`";
+
+impl CleanupIssue {
+    /// An issue from a cleanup message, split at its first `\n  hint: ` into message and hint.
+    pub(super) fn new(code: CleanupIssueCode, text: String) -> Self {
+        match text.split_once(HINT_SEPARATOR) {
+            Some((message, hint)) => Self {
+                code,
+                message: message.to_owned(),
+                hint: Some(hint.to_owned()),
+            },
+            None => Self {
+                code,
+                message: text,
+                hint: None,
+            },
+        }
+    }
+
+    /// A dirty worktree, whose hint is the shared recovery step.
+    fn dirty_worktree(message: String) -> Self {
+        Self {
+            code: CleanupIssueCode::DirtyWorktree,
+            message,
+            hint: Some(DIRTY_WORKTREE_HINT.to_owned()),
+        }
+    }
+}
+
+/// Today's error lines for a result's issues, as human output prints them: each message, with
+/// `\n  hint: ` and its hint when it has one, except that dirty worktrees share one trailing
+/// `hint: ` entry after all the issues.
+pub fn legacy_error_lines(issues: &[CleanupIssue]) -> Vec<String> {
+    let mut lines: Vec<String> = issues
+        .iter()
+        .map(|issue| match (&issue.code, &issue.hint) {
+            (CleanupIssueCode::DirtyWorktree, _) | (_, None) => issue.message.clone(),
+            (_, Some(hint)) => format!("{}{}{}", issue.message, HINT_SEPARATOR, hint),
+        })
+        .collect();
+    if issues
+        .iter()
+        .any(|issue| issue.code == CleanupIssueCode::DirtyWorktree)
+    {
+        lines.push(format!("hint: {}", DIRTY_WORKTREE_HINT));
+    }
+    lines
+}
+
+/// Serializes issues as today's error strings.
+pub(super) fn serialize_legacy_errors<S: serde::Serializer>(
+    issues: &[CleanupIssue],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_seq(legacy_error_lines(issues))
 }
 
 #[derive(Debug, Serialize)]
@@ -150,9 +255,12 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
 }
 
 impl RmPlan {
-    pub(crate) fn root_rejection(&self) -> Option<&str> {
+    pub(crate) fn root_rejection(&self) -> Option<CleanupIssue> {
         match &self.root_plan {
-            ForestRootPlan::Rejected { error } => Some(error),
+            ForestRootPlan::Rejected { error } => Some(CleanupIssue::new(
+                CleanupIssueCode::ForestRootRefused,
+                error.clone(),
+            )),
             ForestRootPlan::Missing | ForestRootPlan::Ready { .. } => None,
         }
     }
@@ -567,7 +675,7 @@ pub fn execute_rm(
 
                 let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
                     let msg = format!("{}: worktree has uncommitted changes", rp.name);
-                    errors.push(msg.clone());
+                    errors.push(CleanupIssue::dirty_worktree(msg.clone()));
                     (
                         RmOutcome::Failed { error: msg },
                         RmOutcome::Skipped {
@@ -596,11 +704,6 @@ pub fn execute_rm(
                 }
                 repos.push(result);
             }
-
-            errors.push(
-                "hint: commit or stash changes, then retry — or use `git forest rm --force`"
-                    .to_string(),
-            );
 
             return RmResult {
                 forest_name: plan.forest_name.clone(),
@@ -645,7 +748,10 @@ pub fn execute_rm(
     let mut forest_root_cleanup = Vec::new();
     let forest_dir_removed = if errors.is_empty() {
         if let Some(error) = current_forest_root_safety_error(&plan.forest_dir) {
-            errors.push(error);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestRootRefused,
+                error,
+            ));
             false
         } else {
             forest_root_cleanup = execute_forest_root_cleanup(plan, &mut errors);
@@ -710,7 +816,10 @@ fn rejected_rm_result(plan: &RmPlan, dry_run: bool, force: bool, error: String) 
         repos: vec![],
         forest_root_cleanup: vec![],
         forest_dir_removed: false,
-        errors: vec![error],
+        errors: vec![CleanupIssue::new(
+            CleanupIssueCode::ForestRootRefused,
+            error,
+        )],
     }
 }
 
@@ -739,7 +848,7 @@ fn root_cleanup_results(
 
 fn execute_forest_root_cleanup(
     plan: &RmPlan,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> Vec<ForestRootCleanupResult> {
     root_cleanup_results(plan, |action| {
         let (relative_path, description) = match action {
@@ -763,7 +872,10 @@ fn execute_forest_root_cleanup(
             }
             Err(error) => {
                 let error = format!("failed to inspect {}: {}", description, error);
-                errors.push(error.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::RootEntryRemoveFailed,
+                    error.clone(),
+                ));
                 return RmOutcome::Failed { error };
             }
         };
@@ -778,7 +890,10 @@ fn execute_forest_root_cleanup(
             Ok(()) => RmOutcome::Success,
             Err(error) => {
                 let error = format!("failed to remove {}: {}", description, error);
-                errors.push(error.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::RootEntryRemoveFailed,
+                    error.clone(),
+                ));
                 RmOutcome::Failed { error }
             }
         }
@@ -799,11 +914,14 @@ fn validate_rm_plan_paths(plan: &RmPlan) {
 fn remove_worktree(
     repo_plan: &RepoRmPlan,
     force: bool,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> (RmOutcome, bool) {
     if !repo_plan.worktree_exists {
         if let Some(msg) = stale_missing_worktree_metadata_error(repo_plan, force) {
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeMetadataStale,
+                msg.clone(),
+            ));
             return (RmOutcome::Failed { error: msg }, false);
         }
         return (
@@ -815,7 +933,10 @@ fn remove_worktree(
     }
 
     if let Some(msg) = worktree_removal_safety_error(repo_plan, force) {
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeRefused,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
@@ -830,7 +951,10 @@ fn remove_worktree(
                     "{}: source repo missing, failed to remove worktree directory: {}",
                     repo_plan.name, e
                 );
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::WorktreeRemoveFailed,
+                    msg.clone(),
+                ));
                 return (RmOutcome::Failed { error: msg }, false);
             }
         }
@@ -865,7 +989,10 @@ fn remove_worktree(
             }
 
             let msg = format!("{}: git worktree remove failed: {}", repo_plan.name, e);
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeRemoveFailed,
+                msg.clone(),
+            ));
             (RmOutcome::Failed { error: msg }, false)
         }
     }
@@ -926,7 +1053,7 @@ fn prune_stale_worktree_metadata(repo_plan: &RepoRmPlan) -> Result<(), String> {
 fn remove_corrupt_worktree_dir(
     repo_plan: &RepoRmPlan,
     git_error: String,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> (RmOutcome, bool) {
     let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
     match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
@@ -936,7 +1063,10 @@ fn remove_corrupt_worktree_dir(
                 repo_plan.name,
                 compact_git_error(&git_error)
             );
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeRefused,
+                msg.clone(),
+            ));
             return (RmOutcome::Failed { error: msg }, false);
         }
         Ok(_) => {}
@@ -947,7 +1077,10 @@ fn remove_corrupt_worktree_dir(
                 compact_git_error(&git_error),
                 compact_git_error(&e)
             );
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeMetadataStale,
+                msg.clone(),
+            ));
             return (RmOutcome::Failed { error: msg }, false);
         }
     }
@@ -959,7 +1092,10 @@ fn remove_corrupt_worktree_dir(
             compact_git_error(&git_error),
             e
         );
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::WorktreeRemoveFailed,
+            msg.clone(),
+        ));
         return (RmOutcome::Failed { error: msg }, false);
     }
 
@@ -971,7 +1107,10 @@ fn remove_corrupt_worktree_dir(
                         "{}: removed corrupt worktree directory but git worktree metadata still lists it",
                         repo_plan.name
                     );
-                    errors.push(msg.clone());
+                    errors.push(CleanupIssue::new(
+                        CleanupIssueCode::WorktreeMetadataStale,
+                        msg.clone(),
+                    ));
                     return (RmOutcome::Failed { error: msg }, false);
                 }
                 Ok(None) => {}
@@ -981,7 +1120,10 @@ fn remove_corrupt_worktree_dir(
                         repo_plan.name,
                         compact_git_error(&e)
                     );
-                    errors.push(msg.clone());
+                    errors.push(CleanupIssue::new(
+                        CleanupIssueCode::WorktreeMetadataStale,
+                        msg.clone(),
+                    ));
                     return (RmOutcome::Failed { error: msg }, false);
                 }
             }
@@ -993,7 +1135,10 @@ fn remove_corrupt_worktree_dir(
                 repo_plan.name,
                 compact_git_error(&e.to_string())
             );
-            errors.push(msg.clone());
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::WorktreeMetadataStale,
+                msg.clone(),
+            ));
             (RmOutcome::Failed { error: msg }, false)
         }
     }
@@ -1158,7 +1303,7 @@ pub(super) fn delete_branch(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> RmOutcome {
     if !wt_succeeded {
         return RmOutcome::Skipped {
@@ -1197,7 +1342,10 @@ pub(super) fn delete_branch(
                     };
                 }
                 let msg = format!("{}: git branch -D failed: {}", repo_plan.name, e);
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::BranchDeleteFailed,
+                    msg.clone(),
+                ));
                 RmOutcome::Failed { error: msg }
             }
         };
@@ -1225,13 +1373,19 @@ pub(super) fn delete_branch(
                     Ok(_) => RmOutcome::Success,
                     Err(e) => {
                         let msg = format!("{}: git branch -D failed: {}", repo_plan.name, e);
-                        errors.push(msg.clone());
+                        errors.push(CleanupIssue::new(
+                            CleanupIssueCode::BranchDeleteFailed,
+                            msg.clone(),
+                        ));
                         RmOutcome::Failed { error: msg }
                     }
                 }
             } else {
                 let msg = branch_not_fully_merged_error(repo_plan, Some(&original_err.to_string()));
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::BranchDeleteFailed,
+                    msg.clone(),
+                ));
                 RmOutcome::Failed { error: msg }
             }
         }
@@ -1242,7 +1396,7 @@ pub(super) fn plan_branch_delete_outcome(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> RmOutcome {
     if !wt_succeeded {
         return RmOutcome::Skipped {
@@ -1270,7 +1424,10 @@ pub(super) fn plan_branch_delete_outcome(
     }
 
     if let Some(msg) = branch_checkout_conflict_error(repo_plan) {
-        errors.push(msg.clone());
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::BranchDeleteFailed,
+            msg.clone(),
+        ));
         return RmOutcome::Failed { error: msg };
     }
 
@@ -1293,7 +1450,10 @@ pub(super) fn plan_branch_delete_outcome(
              the base remote-tracking ref, or its upstream",
         ),
     );
-    errors.push(msg.clone());
+    errors.push(CleanupIssue::new(
+        CleanupIssueCode::BranchDeleteFailed,
+        msg.clone(),
+    ));
     RmOutcome::Failed { error: msg }
 }
 
@@ -1461,23 +1621,26 @@ fn base_branch_remote_ref(
     None
 }
 
-fn remove_forest_dir(forest_dir: &std::path::Path, errors: &mut Vec<String>) -> bool {
+fn remove_forest_dir(forest_dir: &std::path::Path, errors: &mut Vec<CleanupIssue>) -> bool {
     if !forest_dir.exists() {
         return true;
     }
 
     if path_is_symlink(forest_dir) {
-        errors.push(format!(
+        errors.push(CleanupIssue::new(CleanupIssueCode::ForestRootRefused, format!(
             "forest directory not removed: {} is a symlink\n  hint: inspect and unlink the forest alias manually",
             forest_dir.display()
-        ));
+        )));
         return false;
     }
 
     let metadata_path = match inspect_forest_dir_for_removal(forest_dir) {
         Ok(metadata_path) => metadata_path,
         Err(error) => {
-            errors.push(error);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestDirNotRemoved,
+                error,
+            ));
             return false;
         }
     };
@@ -1488,7 +1651,10 @@ fn remove_forest_dir(forest_dir: &std::path::Path, errors: &mut Vec<String>) -> 
         Some(metadata_path) => match stage_forest_meta(forest_dir, &metadata_path) {
             Ok(staged_meta) => staged_meta,
             Err(error) => {
-                errors.push(error);
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::ForestMetadataStagingFailed,
+                    error,
+                ));
                 return false;
             }
         },
@@ -1500,10 +1666,13 @@ fn remove_forest_dir(forest_dir: &std::path::Path, errors: &mut Vec<String>) -> 
 
 pub(super) fn remove_forest_dir_recursively_preserving_meta(
     forest_dir: &Path,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> bool {
     if let Some(error) = current_forest_root_safety_error(forest_dir) {
-        errors.push(error);
+        errors.push(CleanupIssue::new(
+            CleanupIssueCode::ForestRootRefused,
+            error,
+        ));
         return false;
     }
     if !forest_dir.exists() {
@@ -1513,21 +1682,27 @@ pub(super) fn remove_forest_dir_recursively_preserving_meta(
     let inspection = match inspect_forest_dir(forest_dir) {
         Ok(inspection) => inspection,
         Err(error) => {
-            errors.push(error);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestDirNotRemoved,
+                error,
+            ));
             return false;
         }
     };
     let Some(metadata_path) = inspection.metadata_path else {
-        errors.push(format!(
+        errors.push(CleanupIssue::new(CleanupIssueCode::ForestDirNotRemoved, format!(
             "forest directory not removed: metadata is missing from {}\n  hint: inspect the directory and restore its metadata before retrying",
             forest_dir.display()
-        ));
+        )));
         return false;
     };
     let staged_meta = match stage_forest_meta(forest_dir, &metadata_path) {
         Ok(staged_meta) => staged_meta,
         Err(error) => {
-            errors.push(error);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestMetadataStagingFailed,
+                error,
+            ));
             return false;
         }
     };
@@ -1551,7 +1726,7 @@ fn remove_staged_forest_dir(
     forest_dir: &Path,
     meta_path: &Path,
     staged_meta: Option<PathBuf>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
 ) -> bool {
     finish_staged_forest_removal(
         meta_path,
@@ -1571,17 +1746,20 @@ fn finish_staged_forest_removal(
     meta_path: &Path,
     staged_meta: Option<PathBuf>,
     removal: std::io::Result<()>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<CleanupIssue>,
     removal_error: impl FnOnce(&std::io::Error) -> String,
 ) -> bool {
     match removal {
         Ok(()) => {
             if let Some(staged_meta) = staged_meta {
                 if let Err(error) = std::fs::remove_file(&staged_meta) {
-                    errors.push(format!(
-                        "forest directory removed, but failed to remove staged metadata {}: {}",
-                        staged_meta.display(),
-                        error
+                    errors.push(CleanupIssue::new(
+                        CleanupIssueCode::ForestMetadataStagingFailed,
+                        format!(
+                            "forest directory removed, but failed to remove staged metadata {}: {}",
+                            staged_meta.display(),
+                            error
+                        ),
                     ));
                 }
             }
@@ -1590,15 +1768,18 @@ fn finish_staged_forest_removal(
         Err(e) => {
             if let Some(staged_meta) = staged_meta {
                 if let Err(restore_error) = std::fs::rename(&staged_meta, meta_path) {
-                    errors.push(format!(
+                    errors.push(CleanupIssue::new(CleanupIssueCode::ForestMetadataStagingFailed, format!(
                         "failed to restore forest metadata from {} to {}: {}\n  hint: preserve the staged file and restore it before retrying",
                         staged_meta.display(),
                         meta_path.display(),
                         restore_error
-                    ));
+                    )));
                 }
             }
-            errors.push(removal_error(&e));
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestDirNotRemoved,
+                removal_error(&e),
+            ));
             false
         }
     }
@@ -1742,7 +1923,7 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
                 // Dirty preflight would block all removal
                 let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
                     let msg = format!("{}: worktree has uncommitted changes", rp.name);
-                    errors.push(msg.clone());
+                    errors.push(CleanupIssue::dirty_worktree(msg.clone()));
                     (
                         RmOutcome::Failed { error: msg },
                         RmOutcome::Skipped {
@@ -1770,7 +1951,10 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
             let worktree_removed = if path_is_symlink(&rp.worktree_path) {
                 if force {
                     if let Some(msg) = symlink_worktree_dry_run_error(rp) {
-                        errors.push(msg.clone());
+                        errors.push(CleanupIssue::new(
+                            CleanupIssueCode::WorktreeRefused,
+                            msg.clone(),
+                        ));
                         RmOutcome::Failed { error: msg }
                     } else {
                         RmOutcome::Success
@@ -1778,18 +1962,27 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
                 } else {
                     let msg = worktree_removal_safety_error(rp, force)
                         .expect("non-force symlink worktree should have a safety error");
-                    errors.push(msg.clone());
+                    errors.push(CleanupIssue::new(
+                        CleanupIssueCode::WorktreeRefused,
+                        msg.clone(),
+                    ));
                     RmOutcome::Failed { error: msg }
                 }
             } else if let Some(msg) = worktree_metadata_dry_run_error(rp, force) {
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::WorktreeRefused,
+                    msg.clone(),
+                ));
                 RmOutcome::Failed { error: msg }
             } else if !rp.worktree_exists {
                 RmOutcome::Skipped {
                     reason: "worktree already missing".to_string(),
                 }
             } else if let Some(msg) = worktree_removal_safety_error(rp, force) {
-                errors.push(msg.clone());
+                errors.push(CleanupIssue::new(
+                    CleanupIssueCode::WorktreeRefused,
+                    msg.clone(),
+                ));
                 RmOutcome::Failed { error: msg }
             } else {
                 RmOutcome::Success
@@ -1807,18 +2000,14 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         })
         .collect();
 
-    if has_dirty {
-        errors.push(
-            "hint: commit or stash changes, then retry — or use `git forest rm --force`"
-                .to_string(),
-        );
-    }
-
     let mut forest_root_cleanup = Vec::new();
     if errors.is_empty() {
         forest_root_cleanup = root_cleanup_results(plan, |_| RmOutcome::Success);
         if let Some(msg) = forest_dir_dry_run_cleanup_error(plan, &repos, force) {
-            errors.push(msg);
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestDirNotRemoved,
+                msg,
+            ));
         }
     }
 
@@ -2097,8 +2286,8 @@ pub fn format_rm_human(result: &RmResult) -> String {
     if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
-        for error in &result.errors {
-            lines.push(format!("  {}", format_error_single_line(error)));
+        for error in legacy_error_lines(&result.errors) {
+            lines.push(format!("  {}", format_error_single_line(&error)));
         }
     }
 
@@ -2146,8 +2335,8 @@ pub fn format_rm_summary(result: &RmResult) -> String {
     if !result.errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
-        for error in &result.errors {
-            lines.push(format!("  {}", format_error_single_line(error)));
+        for error in legacy_error_lines(&result.errors) {
+            lines.push(format!("  {}", format_error_single_line(&error)));
         }
     }
 
@@ -2220,7 +2409,7 @@ enum RmAllForestPlan {
     Rejected {
         forest_name: ForestName,
         forest_dir: PathBuf,
-        error: String,
+        issue: CleanupIssue,
     },
 }
 
@@ -2239,7 +2428,7 @@ impl RmAllForestPlan {
             Self::Rejected {
                 forest_name,
                 forest_dir,
-                error,
+                issue,
             } => RmResult {
                 forest_name: forest_name.clone(),
                 forest_dir: forest_dir.clone(),
@@ -2248,7 +2437,7 @@ impl RmAllForestPlan {
                 repos: vec![],
                 forest_root_cleanup: vec![],
                 forest_dir_removed: false,
-                errors: vec![error.clone()],
+                errors: vec![issue.clone()],
             },
         }
     }
@@ -2275,7 +2464,10 @@ fn plan_rm_all(worktree_bases: &[&Path], options: &RmOptions) -> Result<RmAllPla
                 Err(error) => RmAllForestPlan::Rejected {
                     forest_name: forest.meta.name,
                     forest_dir: forest.dir,
-                    error: error.to_string(),
+                    issue: CleanupIssue::new(
+                        CleanupIssueCode::ForestPlanRejected,
+                        error.to_string(),
+                    ),
                 },
             },
         )
@@ -2398,11 +2590,15 @@ pub fn format_rm_all_summary(result: &RmAllResult) -> String {
         result.succeeded, result.total_forests
     ));
 
-    let all_errors: Vec<&String> = result.results.iter().flat_map(|r| &r.errors).collect();
+    let all_errors: Vec<String> = result
+        .results
+        .iter()
+        .flat_map(|r| legacy_error_lines(&r.errors))
+        .collect();
     if !all_errors.is_empty() {
         lines.push(String::new());
         lines.push("Errors:".to_string());
-        for error in all_errors {
+        for error in &all_errors {
             lines.push(format!("  {}", format_error_single_line(error)));
         }
     }
@@ -2834,8 +3030,7 @@ mod tests {
             rm_result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(rm_result
-            .errors
+        assert!(legacy_error_lines(&rm_result.errors)
             .iter()
             .any(|error| error.contains("source repo missing")));
         assert!(forest_dir.join("foo-api").exists());
@@ -2889,8 +3084,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("source repo missing")));
         assert!(forest_dir.join("foo-api").exists());
@@ -2955,8 +3149,7 @@ mod tests {
 
         assert!(rm_result.dry_run);
         assert!(!rm_result.forest_dir_removed);
-        assert!(rm_result
-            .errors
+        assert!(legacy_error_lines(&rm_result.errors)
             .iter()
             .any(|error| error.contains("would still contain notes.txt")));
         assert!(forest_dir.join("notes.txt").exists());
@@ -2981,8 +3174,7 @@ mod tests {
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!result.errors.is_empty());
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("would still contain notes.txt")));
         assert!(!result.forest_dir_removed);
@@ -3169,8 +3361,7 @@ mod tests {
         let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
         assert!(!result.forest_dir_removed);
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("would still contain .env")));
         assert!(forest_dir.join(".env").exists());
@@ -3339,8 +3530,7 @@ mod tests {
         let result = cmd_rm_with_options(&forest_dir, &meta, options, None).unwrap();
 
         assert!(!result.forest_dir_removed);
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("forest-root entry is not valid UTF-8")));
         assert!(forest_dir.exists());
@@ -3377,8 +3567,7 @@ mod tests {
         let result = cmd_rm_with_options(&forest_dir, &meta, options, None).unwrap();
 
         assert!(!result.forest_dir_removed);
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("forest-root entry is not valid UTF-8")));
         assert!(forest_dir.exists());
@@ -3437,8 +3626,7 @@ mod tests {
 
         assert!(!result.forest_dir_removed);
         assert!(result.forest_root_cleanup.is_empty());
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("multiple root entries equivalent to .idea")));
     }
@@ -3469,8 +3657,7 @@ mod tests {
 
         assert!(!result.forest_dir_removed);
         assert!(result.forest_root_cleanup.is_empty());
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("multiple root entries equivalent to .forest-meta.toml")));
     }
@@ -3663,9 +3850,9 @@ mod tests {
         assert!(result.dry_run);
         assert!(result.repos.is_empty());
         assert!(!result.forest_dir_removed);
-        assert!(result.errors.iter().any(
-            |error| error.contains("forest removal refused") && error.contains("is a symlink")
-        ));
+        assert!(legacy_error_lines(&result.errors).iter().any(|error| error
+            .contains("forest removal refused")
+            && error.contains("is a symlink")));
         let human = format_rm_human(&result);
         assert!(human.contains("Removal blocked for forest"));
         assert!(!human.contains("Would remove forest"));
@@ -3700,9 +3887,9 @@ mod tests {
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!result.forest_dir_removed);
-        assert!(result.errors.iter().any(
-            |error| error.contains("forest removal refused") && error.contains("is a symlink")
-        ));
+        assert!(legacy_error_lines(&result.errors).iter().any(|error| error
+            .contains("forest removal refused")
+            && error.contains("is a symlink")));
         assert!(forest_dir.symlink_metadata().is_ok());
         assert!(target_dir.join("foo-api").exists());
         assert!(
@@ -3719,8 +3906,7 @@ mod tests {
 
         assert!(!forced.forest_dir_removed);
         assert!(forced.repos.is_empty());
-        assert!(forced
-            .errors
+        assert!(legacy_error_lines(&forced.errors)
             .iter()
             .any(|error| error.contains("forest removal refused")));
         assert!(forest_dir.symlink_metadata().is_ok());
@@ -3750,8 +3936,7 @@ mod tests {
 
         assert!(rm_result.dry_run);
         assert!(!rm_result.forest_dir_removed);
-        assert!(rm_result
-            .errors
+        assert!(legacy_error_lines(&rm_result.errors)
             .iter()
             .any(|error| error.contains("branch lookup failed")));
         let human = format_rm_human(&rm_result);
@@ -3792,8 +3977,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("branch lookup failed")));
         assert!(worktree.symlink_metadata().is_ok());
@@ -3831,8 +4015,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("worktree path is a symlink")));
         assert!(worktree.symlink_metadata().is_ok());
@@ -3907,8 +4090,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         assert!(worktree.symlink_metadata().is_ok());
@@ -3946,8 +4128,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         assert!(worktree.symlink_metadata().is_ok());
@@ -4026,8 +4207,8 @@ mod tests {
             dry_run.repos[0].branch_deleted
         );
         assert!(!dry_run.errors.is_empty());
-        assert!(dry_run.errors[0].contains("not fully merged"));
-        assert!(dry_run.errors[0].contains("dry-run could not prove"));
+        assert!(legacy_error_lines(&dry_run.errors)[0].contains("not fully merged"));
+        assert!(legacy_error_lines(&dry_run.errors)[0].contains("dry-run could not prove"));
         assert!(!dry_run.forest_dir_removed);
 
         assert!(forest_dir.join("foo-api").exists());
@@ -4135,8 +4316,7 @@ mod tests {
             dry_run.repos[0].branch_deleted,
             RmOutcome::Failed { .. }
         ));
-        assert!(dry_run
-            .errors
+        assert!(legacy_error_lines(&dry_run.errors)
             .iter()
             .any(|error| error.contains("checked out")));
         assert!(!dry_run.forest_dir_removed);
@@ -4231,9 +4411,9 @@ mod tests {
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
         assert!(!dry_run.errors.is_empty());
-        assert!(dry_run.errors[0].contains("detached HEAD"));
-        assert!(dry_run.errors[0].contains(&head));
-        assert!(dry_run.errors[0].contains("not reachable"));
+        assert!(legacy_error_lines(&dry_run.errors)[0].contains("detached HEAD"));
+        assert!(legacy_error_lines(&dry_run.errors)[0].contains(&head));
+        assert!(legacy_error_lines(&dry_run.errors)[0].contains("not reachable"));
         assert!(!dry_run.forest_dir_removed);
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join(META_FILENAME).exists());
@@ -4340,8 +4520,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("source repo missing")));
         assert!(forest_dir.join("foo-api").exists());
@@ -4485,8 +4664,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("branch lookup failed")));
         assert!(forest_dir.join("foo-api").exists());
@@ -4578,8 +4756,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         let human = format_rm_human(&result);
@@ -4629,8 +4806,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         assert!(worktree.exists());
@@ -4717,8 +4893,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         assert!(worktree.exists());
@@ -4759,8 +4934,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("metadata is locked")));
         assert!(worktree.exists());
@@ -4803,8 +4977,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("could not inspect git worktree metadata")));
         assert!(repo_dir.exists());
@@ -4840,8 +5013,7 @@ mod tests {
             result.repos[0].worktree_removed,
             RmOutcome::Failed { .. }
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("could not inspect git worktree metadata")));
         assert!(repo_dir.exists());
@@ -4877,8 +5049,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("not a git repository")));
         assert!(forest_dir.join(META_FILENAME).exists());
@@ -4920,8 +5091,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("still lists missing worktree metadata")));
         assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
@@ -4996,8 +5166,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Failed { .. }
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("checked out")));
         assert!(!result.forest_dir_removed);
@@ -5025,8 +5194,7 @@ mod tests {
             dry_run.repos[0].worktree_removed,
             RmOutcome::Failed { .. }
         ));
-        assert!(dry_run
-            .errors
+        assert!(legacy_error_lines(&dry_run.errors)
             .iter()
             .any(|error| error.contains("still lists missing worktree metadata")));
 
@@ -5039,8 +5207,7 @@ mod tests {
             result.repos[0].branch_deleted,
             RmOutcome::Skipped { ref reason } if reason == "worktree not removed"
         ));
-        assert!(result
-            .errors
+        assert!(legacy_error_lines(&result.errors)
             .iter()
             .any(|error| error.contains("still lists missing worktree metadata")));
         assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
@@ -5263,7 +5430,10 @@ mod tests {
             }],
             forest_root_cleanup: vec![],
             forest_dir_removed: false,
-            errors: vec!["foo-api: git worktree remove failed".to_string()],
+            errors: vec![CleanupIssue::new(
+                CleanupIssueCode::WorktreeRemoveFailed,
+                "foo-api: git worktree remove failed".to_string(),
+            )],
         };
 
         let output = format_rm_human(&result);
@@ -5284,7 +5454,7 @@ mod tests {
         let inputs = make_new_inputs("roundtrip", ForestMode::Feature);
         cmd_new(inputs, &tmpl).unwrap();
 
-        let ls1 = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls1 = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls1.forests.len(), 1);
 
         // Remove
@@ -5294,7 +5464,7 @@ mod tests {
         assert!(rm_result.errors.is_empty());
 
         // ls should show empty
-        let ls2 = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls2 = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls2.forests.len(), 0);
     }
 
@@ -5674,8 +5844,8 @@ mod tests {
         // Branch should still exist
         assert!(crate::git::ref_exists(source, &format!("refs/heads/{}", branch)).unwrap());
         // Error message should hint about squash-merge and include original git error
-        assert!(rm_result.errors[0].contains("squash-merge"));
-        assert!(rm_result.errors[0].contains("not fully merged"));
+        assert!(legacy_error_lines(&rm_result.errors)[0].contains("squash-merge"));
+        assert!(legacy_error_lines(&rm_result.errors)[0].contains("not fully merged"));
         let human = format_rm_human(&rm_result);
         assert!(human.contains("git forest rm --force"));
     }
@@ -6080,7 +6250,7 @@ mod tests {
         cmd_new(inputs_b, &tmpl).unwrap();
 
         // Verify both exist
-        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls.forests.len(), 2);
 
         // rm --all
@@ -6091,7 +6261,7 @@ mod tests {
         assert!(!result.dry_run);
 
         // Verify all gone
-        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls.forests.len(), 0);
     }
 
@@ -6243,7 +6413,11 @@ mod tests {
         assert_eq!(result.succeeded, 1);
         assert_eq!(result.failed, 0);
         assert!(result.results.iter().all(|result| result.errors.is_empty()));
-        let ls = cmd_ls(&[tmpl.worktree_base.as_ref(), base_link.as_path()]).unwrap();
+        let ls = cmd_ls(
+            &[tmpl.worktree_base.as_ref(), base_link.as_path()],
+            chrono::Utc::now(),
+        )
+        .unwrap();
         assert_eq!(ls.forests.len(), 0);
     }
 
@@ -6320,7 +6494,7 @@ mod tests {
         assert_eq!(result.total_forests, 1);
 
         // Forest should still exist
-        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls.forests.len(), 1);
     }
 
@@ -6374,7 +6548,7 @@ mod tests {
         assert_eq!(result.succeeded, 1);
         assert_eq!(result.failed, 0);
 
-        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls.forests.len(), 0);
     }
 }

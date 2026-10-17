@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ pub struct RepoBranchLookupError {
     pub branch_state: WorktreeBranchState,
 }
 
-pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
+pub fn cmd_ls(worktree_bases: &[&Path], now: DateTime<Utc>) -> Result<LsResult> {
     let mut forests = Vec::new();
     let mut findings = Vec::new();
     for base in worktree_bases {
@@ -126,7 +126,7 @@ pub fn cmd_ls(worktree_bases: &[&Path]) -> Result<LsResult> {
 
     let summaries = forests
         .iter()
-        .map(|forest| summarize_forest(&forest.dir, &forest.meta))
+        .map(|forest| summarize_forest(&forest.dir, &forest.meta, now))
         .collect();
     Ok(LsResult {
         forests: summaries,
@@ -147,12 +147,8 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
-)]
-fn summarize_forest(forest_dir: &Path, forest: &ForestMeta) -> ForestSummary {
-    let age_seconds = (Utc::now() - forest.created_at).num_seconds();
+fn summarize_forest(forest_dir: &Path, forest: &ForestMeta, now: DateTime<Utc>) -> ForestSummary {
+    let age_seconds = (now - forest.created_at).num_seconds();
     let branch_summary = branch_counts(&forest.repos);
     let branch_states = branch_states(forest_dir, &forest.repos);
     let missing_worktrees = missing_worktrees(&branch_states);
@@ -466,14 +462,14 @@ mod tests {
     #[test]
     fn cmd_ls_empty_worktree_base() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = cmd_ls(&[tmp.path()]).unwrap();
+        let result = cmd_ls(&[tmp.path()], chrono::Utc::now()).unwrap();
         assert!(result.forests.is_empty());
         assert!(result.findings.is_empty());
     }
 
     #[test]
     fn cmd_ls_nonexistent_dir() {
-        let result = cmd_ls(&[Path::new("/nonexistent/path")]).unwrap();
+        let result = cmd_ls(&[Path::new("/nonexistent/path")], chrono::Utc::now()).unwrap();
         assert!(result.forests.is_empty());
         assert!(result.findings.is_empty());
     }
@@ -509,7 +505,7 @@ mod tests {
         meta_a.write(&dir_a.join(".forest-meta.toml")).unwrap();
         meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
 
-        let result = cmd_ls(&[base]).unwrap();
+        let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         assert_eq!(result.forests.len(), 2);
 
         let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
@@ -556,7 +552,7 @@ mod tests {
         std::fs::write(unreadable_dir.join(META_FILENAME), "not valid metadata").unwrap();
         std::fs::create_dir_all(&missing_dir).unwrap();
 
-        let result = cmd_ls(&[base]).unwrap();
+        let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
 
         assert_eq!(result.forests.len(), 1);
         assert_eq!(result.forests[0].name.as_str(), "readable");
@@ -625,7 +621,7 @@ mod tests {
         std::fs::create_dir_all(&hidden_missing_dir).unwrap();
         std::fs::create_dir_all(&visible_missing_dir).unwrap();
 
-        let result = cmd_ls(&[base]).unwrap();
+        let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
 
         assert!(result
             .forests
@@ -698,7 +694,7 @@ mod tests {
         meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
 
         // Scanning both bases should find both forests
-        let result = cmd_ls(&[base_a.as_path(), base_b.as_path()]).unwrap();
+        let result = cmd_ls(&[base_a.as_path(), base_b.as_path()], chrono::Utc::now()).unwrap();
         assert_eq!(result.forests.len(), 2);
         let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"forest-alpha"));
@@ -722,7 +718,7 @@ mod tests {
         meta.write(&dir.join(".forest-meta.toml")).unwrap();
         std::os::unix::fs::symlink(&base, &base_link).unwrap();
 
-        let result = cmd_ls(&[base.as_path(), base_link.as_path()]).unwrap();
+        let result = cmd_ls(&[base.as_path(), base_link.as_path()], chrono::Utc::now()).unwrap();
 
         assert_eq!(result.forests.len(), 1);
         assert_eq!(result.forests[0].name.as_str(), "dup");
@@ -761,7 +757,11 @@ mod tests {
             .unwrap();
 
         // Scanning both bases: each finds only its direct children, no duplicates
-        let result = cmd_ls(&[base_outer.as_path(), base_inner.as_path()]).unwrap();
+        let result = cmd_ls(
+            &[base_outer.as_path(), base_inner.as_path()],
+            chrono::Utc::now(),
+        )
+        .unwrap();
         assert_eq!(result.forests.len(), 2);
         let names: Vec<&str> = result.forests.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"outer-forest"));
@@ -785,7 +785,11 @@ mod tests {
         meta.write(&forest_dir.join(META_FILENAME)).unwrap();
         std::fs::write(base_inner.join(META_FILENAME), "not valid metadata").unwrap();
 
-        let result = cmd_ls(&[base_outer.as_path(), base_inner.as_path()]).unwrap();
+        let result = cmd_ls(
+            &[base_outer.as_path(), base_inner.as_path()],
+            chrono::Utc::now(),
+        )
+        .unwrap();
 
         assert_eq!(result.forests.len(), 1);
         assert_eq!(result.forests[0].name.as_str(), "inner-forest");
@@ -806,7 +810,7 @@ mod tests {
         let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
         switch_forest_worktree_to_main(&forest_dir, &meta);
 
-        let result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let result = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(result.forests.len(), 1);
 
         let forest = &result.forests[0];
@@ -860,7 +864,7 @@ mod tests {
         let head = crate::git::git(&worktree, &["rev-parse", "HEAD"]).unwrap();
         crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
 
-        let result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let result = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(result.forests[0].branch_drift_count, 1);
         assert!(matches!(
             &result.forests[0].branch_drifts[0].branch_state.actual,
@@ -896,7 +900,7 @@ mod tests {
         );
         meta.write(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let result = cmd_ls(&[base]).unwrap();
+        let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];
         assert_eq!(forest.missing_worktree_count, 0);
         assert_eq!(forest.missing_worktrees.len(), 0);
@@ -952,7 +956,7 @@ mod tests {
         );
         meta.write(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let result = cmd_ls(&[parent.as_ref()]).unwrap();
+        let result = cmd_ls(&[parent.as_ref()], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];
         assert_eq!(forest.missing_worktree_count, 0);
         assert_eq!(forest.branch_drift_count, 0);
@@ -1002,7 +1006,7 @@ mod tests {
         );
         meta.write(&forest_dir.join(META_FILENAME)).unwrap();
 
-        let result = cmd_ls(&[base]).unwrap();
+        let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];
         assert_eq!(forest.missing_worktree_count, 1);
         assert_eq!(forest.missing_worktrees[0].name.as_str(), "missing-repo");

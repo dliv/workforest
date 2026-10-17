@@ -1,5 +1,5 @@
 use anyhow::{bail, ensure, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -289,11 +289,7 @@ fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "clock read inside a command, until one clock reading is passed in from src/lib.rs"
-)]
-pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
+pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> {
     // SAFETY: create_dir (not create_dir_all) is intentional. It fails atomically
     // if the directory already exists, preventing a TOCTOU race between plan_forest
     // (which checks for collisions) and execution. Do not change to create_dir_all.
@@ -302,7 +298,7 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     // Write initial meta with empty repos
     let mut meta = ForestMeta {
         name: plan.forest_name.clone(),
-        created_at: Utc::now(),
+        created_at: now,
         mode: plan.mode.clone(),
         disposable_root_entries: plan.disposable_root_entries.clone(),
         repos: vec![],
@@ -385,7 +381,18 @@ pub fn execute_plan(plan: &ForestPlan) -> Result<NewResult> {
     Ok(plan_to_result(plan, false))
 }
 
+/// `cmd_new_at` with the current time, for tests.
+#[cfg(test)]
 pub fn cmd_new(inputs: NewInputs, tmpl: &ResolvedTemplate) -> Result<NewResult> {
+    cmd_new_at(inputs, tmpl, Utc::now())
+}
+
+/// Creates the forest `inputs` names from `tmpl`, recording `now` as its creation time.
+pub fn cmd_new_at(
+    inputs: NewInputs,
+    tmpl: &ResolvedTemplate,
+    now: DateTime<Utc>,
+) -> Result<NewResult> {
     // Fetch unless --no-fetch
     if !inputs.no_fetch {
         for repo in &tmpl.repos {
@@ -401,7 +408,7 @@ pub fn cmd_new(inputs: NewInputs, tmpl: &ResolvedTemplate) -> Result<NewResult> 
         return Ok(plan_to_result(&plan, true));
     }
 
-    execute_plan(&plan)
+    execute_plan(&plan, now)
 }
 
 pub fn format_new_human(result: &NewResult) -> String {
@@ -914,7 +921,7 @@ mod tests {
 
         let inputs = make_new_inputs("exec-test", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
-        let result = execute_plan(&plan).unwrap();
+        let result = execute_plan(&plan, chrono::Utc::now()).unwrap();
 
         assert_eq!(result.repos.len(), 2);
         assert!(!result.dry_run);
@@ -937,7 +944,7 @@ mod tests {
 
         let inputs = make_new_inputs("meta-test", ForestMode::Feature);
         let plan = plan_forest(&inputs, &tmpl).unwrap();
-        let result = execute_plan(&plan).unwrap();
+        let result = execute_plan(&plan, chrono::Utc::now()).unwrap();
 
         let meta_path = plan.forest_dir.join(META_FILENAME);
         let meta = ForestMeta::read(&meta_path).unwrap();
@@ -1141,7 +1148,7 @@ mod tests {
         let inputs = make_new_inputs("ls-test", ForestMode::Feature);
         cmd_new(inputs, &tmpl).unwrap();
 
-        let ls_result = cmd_ls(&[tmpl.worktree_base.as_ref()]).unwrap();
+        let ls_result = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls_result.forests.len(), 1);
         assert_eq!(ls_result.forests[0].name.as_str(), "ls-test");
         assert_eq!(ls_result.forests[0].mode, ForestMode::Feature);
@@ -1192,7 +1199,7 @@ mod tests {
         std::fs::remove_dir_all(&**bad_source).unwrap();
 
         // execute_plan should fail on the second repo
-        let result = execute_plan(&plan);
+        let result = execute_plan(&plan, chrono::Utc::now());
         assert!(result.is_err(), "execute_plan should fail");
 
         // The forest directory should have been cleaned up
