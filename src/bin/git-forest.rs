@@ -1,3 +1,3 @@
-fn main() {
-    git_forest::main_entry();
+fn main() -> std::process::ExitCode {
+    git_forest::main_entry()
 }

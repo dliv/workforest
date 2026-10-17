@@ -18,24 +18,110 @@ pub(crate) mod paths;
 mod testutil;
 pub(crate) mod version_check;
 
-use anyhow::{bail, Result};
+use std::ffi::OsString;
+use std::process::ExitCode;
+
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 
+/// A failure that ends a command: what `main_entry` renders and maps to an exit code.
+enum Failure {
+    /// A flag-format error that `run` raises itself, before any command runs.
+    Usage {
+        message: String,
+        hint: Option<String>,
+    },
+    /// clap's own error for the command line.
+    Clap(clap::Error),
+    /// Any other error, carried with anyhow's message chain.
+    Command(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        Failure::Command(error)
+    }
+}
+
+/// How a command that ran to its end finished, which picks its exit code.
+enum Completion {
+    /// Everything the command set out to do was done.
+    Complete,
+    /// The command ran but left part of its work undone: `rm` or `reset` errors, failed
+    /// forests of `rm --all`, or `exec` failures.
+    Incomplete,
+    /// `reset` without `--confirm`: the preview was printed and nothing was removed.
+    ConfirmRequired,
+}
+
+/// The only mapping from a command's outcome to the process exit code.
+fn exit_code(outcome: &Result<Completion, Failure>) -> ExitCode {
+    match outcome {
+        Ok(Completion::Complete) => ExitCode::SUCCESS,
+        Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => ExitCode::from(1),
+        Err(Failure::Usage { .. }) => ExitCode::from(1),
+        Err(Failure::Command(_)) => ExitCode::from(1),
+        Err(Failure::Clap(_)) => ExitCode::from(2),
+    }
+}
+
+/// The only failure renderer: clap's errors through clap, every other failure as one
+/// `error: ...` block on standard error.
+#[expect(
+    clippy::print_stderr,
+    reason = "composition root: the single failure renderer"
+)]
+fn report_failure(failure: &Failure) {
+    let text = match failure {
+        Failure::Clap(error) => {
+            let _ = error.print();
+            return;
+        }
+        Failure::Usage {
+            message,
+            hint: Some(hint),
+        } => format!("{message}\n  hint: {hint}"),
+        Failure::Usage {
+            message,
+            hint: None,
+        } => message.clone(),
+        Failure::Command(error) => format!("{error:#}"),
+    };
+    eprintln!("error: {text}");
+}
+
 #[expect(
     clippy::disallowed_methods,
-    clippy::print_stderr,
-    reason = "composition root: reads process arguments, prints the final error and owns the exit code"
+    reason = "composition root: reads process arguments and owns the exit code"
 )]
-pub fn main_entry() {
+pub fn main_entry() -> ExitCode {
+    let args: Vec<OsString> = std::env::args_os().collect();
+
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
-    if std::env::args().any(|a| a == channel::INTERNAL_VERSION_CHECK_ARG) {
+    if args
+        .iter()
+        .any(|arg| arg == channel::INTERNAL_VERSION_CHECK_ARG)
+    {
         version_check::run_background_version_check();
-        return;
+        return ExitCode::SUCCESS;
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) if error.exit_code() == 0 => {
+            let _ = error.print();
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            let outcome = Err(Failure::Clap(error));
+            if let Err(failure) = &outcome {
+                report_failure(failure);
+            }
+            return exit_code(&outcome);
+        }
+    };
     let debug = cli.debug;
 
     let should_version_check = matches!(
@@ -48,13 +134,54 @@ pub fn main_entry() {
             | Command::Exec { .. }
     );
 
-    if let Err(e) = run(cli) {
-        eprintln!("error: {:#}", e);
-        std::process::exit(1);
+    let outcome = run(cli);
+    match &outcome {
+        Ok(Completion::Complete) => {
+            if should_version_check {
+                version_check::check_cache_and_notify(debug);
+            }
+        }
+        Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => {}
+        Err(failure) => report_failure(failure),
     }
+    exit_code(&outcome)
+}
 
-    if should_version_check {
-        version_check::check_cache_and_notify(debug);
+/// `rm` of one forest is incomplete when any cleanup step reported an error.
+fn rm_completion(result: &commands::RmResult) -> Completion {
+    if result.errors.is_empty() {
+        Completion::Complete
+    } else {
+        Completion::Incomplete
+    }
+}
+
+/// `rm --all` is incomplete when any forest failed.
+fn rm_all_completion(result: &commands::RmAllResult) -> Completion {
+    if result.failed > 0 {
+        Completion::Incomplete
+    } else {
+        Completion::Complete
+    }
+}
+
+/// `reset` needs `--confirm` before it removes anything, and is incomplete when a step failed.
+fn reset_completion(result: &commands::ResetResult) -> Completion {
+    if result.confirm_required {
+        Completion::ConfirmRequired
+    } else if !result.errors.is_empty() {
+        Completion::Incomplete
+    } else {
+        Completion::Complete
+    }
+}
+
+/// `exec` is incomplete when the command failed or could not run in any repo.
+fn exec_completion(result: &commands::ExecResult) -> Completion {
+    if result.failures.is_empty() {
+        Completion::Complete
+    } else {
+        Completion::Incomplete
     }
 }
 
@@ -62,10 +189,10 @@ pub fn main_entry() {
     clippy::disallowed_methods,
     clippy::print_stdout,
     clippy::print_stderr,
-    reason = "composition root: dispatches commands, prints progress, spawns brew for update and decides per-command exit codes until typed failures move exit codes into main_entry"
+    reason = "composition root: dispatches commands, prints results and progress, and spawns brew for update, passing Homebrew's exit code through until the closed exit-code set lands"
 )]
-fn run(cli: Cli) -> Result<()> {
-    match cli.command {
+fn run(cli: Cli) -> Result<Completion, Failure> {
+    let completion = match cli.command {
         Command::Init {
             template,
             worktree_base,
@@ -80,13 +207,19 @@ fn run(cli: Cli) -> Result<()> {
             let config_path = config::default_config_path()?;
             if show_path {
                 println!("{}", config_path.display());
-                return Ok(());
+                return Ok(Completion::Complete);
             }
 
             let feature_branch_template = match feature_branch_template {
                 Some(t) => t,
                 None => {
-                    bail!("--feature-branch-template is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
+                    return Err(Failure::Usage {
+                        message: "--feature-branch-template is required".to_owned(),
+                        hint: Some(
+                            "git forest init --feature-branch-template \"yourname/{name}\" --repo <path>"
+                                .to_owned(),
+                        ),
+                    });
                 }
             };
 
@@ -98,10 +231,10 @@ fn run(cli: Cli) -> Result<()> {
                         base_branch_overrides.insert(repo.to_string(), branch.to_string());
                     }
                     None => {
-                        bail!(
-                            "invalid --repo-base-branch format: {:?}\n  hint: use --repo-base-branch repo-name=branch",
-                            rbb
-                        );
+                        return Err(Failure::Usage {
+                            message: format!("invalid --repo-base-branch format: {:?}", rbb),
+                            hint: Some("use --repo-base-branch repo-name=branch".to_owned()),
+                        });
                     }
                 }
             }
@@ -126,10 +259,11 @@ fn run(cli: Cli) -> Result<()> {
             // Warn about unmatched --repo-base-branch keys
             if !base_branch_overrides.is_empty() {
                 let unknown: Vec<&str> = base_branch_overrides.keys().map(|k| k.as_str()).collect();
-                bail!(
+                return Err(anyhow!(
                     "unknown repo(s) in --repo-base-branch: {}\n  hint: repo names are derived from the last path segment of --repo",
                     unknown.join(", ")
-                );
+                )
+                .into());
             }
 
             let inputs = commands::InitInputs {
@@ -143,6 +277,7 @@ fn run(cli: Cli) -> Result<()> {
 
             let result = commands::cmd_init(inputs, &config_path, force)?;
             output(&result, cli.json, commands::format_init_human)?;
+            Completion::Complete
         }
         Command::New {
             name,
@@ -164,10 +299,10 @@ fn run(cli: Cli) -> Result<()> {
                         parsed_repo_branches.push((repo.to_string(), br.to_string()));
                     }
                     None => {
-                        bail!(
-                            "invalid --repo-branch format: {:?}\n  hint: use --repo-branch repo-name=branch-name",
-                            rb
-                        );
+                        return Err(Failure::Usage {
+                            message: format!("invalid --repo-branch format: {:?}", rb),
+                            hint: Some("use --repo-branch repo-name=branch-name".to_owned()),
+                        });
                     }
                 }
             }
@@ -183,6 +318,7 @@ fn run(cli: Cli) -> Result<()> {
 
             let result = commands::cmd_new(inputs, tmpl)?;
             output(&result, cli.json, commands::format_new_human)?;
+            Completion::Complete
         }
         Command::Rm {
             name,
@@ -227,9 +363,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{}", commands::format_rm_all_summary(&r));
                     r
                 };
-                if result.failed > 0 {
-                    std::process::exit(1);
-                }
+                rm_all_completion(&result)
             } else {
                 let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
                 let result = if cli.json || dry_run {
@@ -256,9 +390,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{}", commands::format_rm_summary(&r));
                     r
                 };
-                if !result.errors.is_empty() {
-                    std::process::exit(1);
-                }
+                rm_completion(&result)
             }
         }
         Command::Reset {
@@ -303,15 +435,14 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", commands::format_reset_summary(&r));
                 r
             };
-            if !result.errors.is_empty() || result.confirm_required {
-                std::process::exit(1);
-            }
+            reset_completion(&result)
         }
         Command::Ls => {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
             let result = commands::cmd_ls(&bases)?;
             output(&result, cli.json, commands::format_ls_human)?;
+            Completion::Complete
         }
         Command::Status { name } => {
             let config = config::load_default_config()?;
@@ -319,17 +450,15 @@ fn run(cli: Cli) -> Result<()> {
             let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
             let result = commands::cmd_status(&dir, &meta)?;
             output(&result, cli.json, commands::format_status_human)?;
+            Completion::Complete
         }
         Command::Exec { name, cmd } => {
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
             let result = commands::cmd_exec(&dir, &meta, &cmd)?;
-            let has_failures = !result.failures.is_empty();
             output(&result, cli.json, commands::format_exec_human)?;
-            if has_failures {
-                std::process::exit(1);
-            }
+            exec_completion(&result)
         }
         Command::AgentInstructions => {
             let instructions = include_str!("../docs/agent-instructions.md");
@@ -338,6 +467,7 @@ fn run(cli: Cli) -> Result<()> {
                 .replace("git-forest", "git-forest-beta")
                 .replace("git forest", "git forest-beta");
             print!("{}", instructions);
+            Completion::Complete
         }
         Command::Version { check } => {
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
@@ -363,6 +493,7 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
+            Completion::Complete
         }
         Command::Update => {
             let brew_check = std::process::Command::new("brew")
@@ -377,7 +508,8 @@ fn run(cli: Cli) -> Result<()> {
                     .status();
                 let status = std::process::Command::new("brew")
                     .args(["upgrade", channel::APP_NAME])
-                    .status()?;
+                    .status()
+                    .map_err(anyhow::Error::from)?;
                 if !status.success() {
                     std::process::exit(status.code().unwrap_or(1));
                 }
@@ -388,9 +520,10 @@ fn run(cli: Cli) -> Result<()> {
                 #[cfg(feature = "beta")]
                 println!("  https://github.com/dliv/workforest/releases");
             }
+            Completion::Complete
         }
-    }
-    Ok(())
+    };
+    Ok(completion)
 }
 
 #[expect(
