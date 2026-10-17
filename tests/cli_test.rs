@@ -2056,7 +2056,8 @@ fn dry_runs_skip_the_version_check() {
 
 /// Renders one run as `exit: <code>`, `--- stdout ---`, the stdout text, `--- stderr ---` and the
 /// stderr text, with the temp directory replaced by `[TMP]` (canonical form first, then the raw
-/// form) and the package version by `[VERSION]`.
+/// form) and the package version by `[VERSION]`. A stream that does not end with a newline gets
+/// a final `[no final newline]` line, so losing a final newline changes the transcript.
 #[cfg(feature = "stable")]
 fn golden_transcript(output: &std::process::Output, tmp: &std::path::Path) -> String {
     let exit = match output.status.code() {
@@ -2066,7 +2067,7 @@ fn golden_transcript(output: &std::process::Output, tmp: &std::path::Path) -> St
     let section = |bytes: &[u8]| {
         let mut text = String::from_utf8_lossy(bytes).into_owned();
         if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
+            text.push_str("\n[no final newline]\n");
         }
         text
     };
@@ -2166,6 +2167,32 @@ fn golden_env() -> (tempfile::TempDir, std::path::PathBuf) {
         );
     }
     (tmp, worktree_base)
+}
+
+#[cfg(feature = "stable")]
+#[test]
+fn golden_transcript_marks_a_missing_final_newline() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let output = |stdout: &[u8], stderr: &[u8]| std::process::Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    };
+    let transcript =
+        |stdout: &[u8], stderr: &[u8]| golden_transcript(&output(stdout, stderr), tmp.path());
+
+    assert_ne!(transcript(b"x", b""), transcript(b"x\n", b""));
+    assert_ne!(transcript(b"", b"x"), transcript(b"", b"x\n"));
+    assert_eq!(
+        transcript(b"x", b""),
+        "exit: 0\n--- stdout ---\nx\n[no final newline]\n--- stderr ---\n"
+    );
+    assert_eq!(
+        transcript(b"x\n", b""),
+        "exit: 0\n--- stdout ---\nx\n--- stderr ---\n"
+    );
 }
 
 /// Fails when the version check left its state directory behind in a golden run.
