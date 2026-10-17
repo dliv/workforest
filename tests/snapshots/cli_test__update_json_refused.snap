@@ -1,0 +1,14 @@
+---
+source: tests/cli_test.rs
+expression: "golden_transcript(&refused, t)"
+---
+exit: 2
+--- stdout ---
+{
+  "error": {
+    "code": "usage",
+    "message": "update does not support --json; run `git forest update` without `--json`",
+    "hint": null
+  }
+}
+--- stderr ---

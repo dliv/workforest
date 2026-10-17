@@ -1986,6 +1986,65 @@ fn rm_dry_run_leaves_the_worktree_index_untouched() {
     );
 }
 
+#[test]
+fn dry_runs_skip_the_version_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    // A fresh cache that knows a newer version: the check prints its notice from the cache and
+    // neither writes state nor reaches the network, so the notice shows whether it ran.
+    write_version_state(&fake_home, "2099-01-01T00:00:00Z", Some("99.99.99"));
+    let repo = create_repo_with_remote(tmp.path(), "foo-api");
+    let worktree_base = tmp.path().join("worktrees");
+    let run = |args: &[&str]| {
+        bin_cmd()
+            .args(args)
+            .env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+            .env_remove("XDG_STATE_HOME")
+            .output()
+            .unwrap()
+    };
+    let notice = |output: &std::process::Output| {
+        assert!(
+            output.status.success(),
+            "command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr).contains("Update available")
+    };
+
+    let init = run(&[
+        "init",
+        "--feature-branch-template",
+        "testuser/{name}",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--base-branch",
+        "main",
+        "--worktree-base",
+        worktree_base.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(notice(&init), "control: the version check runs after init");
+
+    let new_preview = run(&[
+        "new",
+        "feat",
+        "--mode",
+        "feature",
+        "--dry-run",
+        "--no-fetch",
+    ]);
+    assert!(!notice(&new_preview), "new --dry-run ran the version check");
+
+    let new = run(&["new", "feat", "--mode", "feature", "--no-fetch"]);
+    assert!(notice(&new), "control: the version check runs after new");
+
+    let rm_preview = run(&["rm", "feat", "--dry-run"]);
+    assert!(!notice(&rm_preview), "rm --dry-run ran the version check");
+}
+
 // --- Golden transcripts ---
 //
 // Each golden records one run of the built binary: its exit code, stdout and stderr, with the
@@ -2319,6 +2378,17 @@ fn golden_update_failure() {
     let t = tmp.path();
     let fake_bin = t.join("bin");
     write_fake_brew(&fake_bin);
+
+    // Under --json, update is refused before it runs Homebrew or prints anything.
+    let refused = golden_cmd(t)
+        .args(["--json", "update"])
+        .env("PATH", fake_brew_path(&fake_bin))
+        .env("GIT_FOREST_FAKE_BREW_LOG", t.join("brew.log"))
+        .env("GIT_FOREST_FAKE_BREW_UPGRADE_STATUS", "3")
+        .output()
+        .unwrap();
+    insta::assert_snapshot!("update_json_refused", golden_transcript(&refused, t));
+    assert!(!t.join("brew.log").exists(), "--json update ran Homebrew");
 
     let output = golden_cmd(t)
         .arg("update")

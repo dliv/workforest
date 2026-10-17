@@ -201,15 +201,16 @@ pub fn main_entry() -> ExitCode {
     let debug = cli.debug;
     let json = cli.json;
 
-    let should_version_check = matches!(
-        cli.command,
-        Command::Init { .. }
-            | Command::New { .. }
-            | Command::Rm { .. }
-            | Command::Ls
-            | Command::Status { .. }
-            | Command::Exec { .. }
-    );
+    // The version check writes its state file, so dry-runs skip it: a dry-run's only change
+    // is `new`'s fetch.
+    let should_version_check = match &cli.command {
+        Command::New { dry_run, .. } | Command::Rm { dry_run, .. } => !*dry_run,
+        Command::Init { .. } | Command::Ls | Command::Status { .. } | Command::Exec { .. } => true,
+        Command::Reset { .. }
+        | Command::AgentInstructions
+        | Command::Version { .. }
+        | Command::Update => false,
+    };
 
     let now = chrono::Utc::now();
     let outcome = run(cli, now);
@@ -601,6 +602,15 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             Completion::Complete
         }
         Command::Update => {
+            // Homebrew's output is not JSON, so update refuses --json before printing anything.
+            if cli.json {
+                return Err(Failure::Usage {
+                    message:
+                        "update does not support --json; run `git forest update` without `--json`"
+                            .to_owned(),
+                    hint: None,
+                });
+            }
             let brew_check = std::process::Command::new("brew")
                 .args(["--prefix", channel::APP_NAME])
                 .output();

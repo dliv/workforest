@@ -116,6 +116,7 @@ git forest reset --config-only --confirm  # wipe config/state only, keep worktre
 - **Auto-detection:** `status` and `rm` auto-detect the current forest when run from inside a forest worktree. `exec` always requires a name.
 - **Exit codes:** 0 = success. 1 = any failure, including an incomplete result (`exec` when any repo's command fails, `rm` or `reset` when any cleanup step fails), a dry-run that predicts failure, and `reset` without `--confirm`. 2 = usage errors: clap's errors and malformed flags such as a `repo=branch` value without `=` or a missing `--feature-branch-template`. A wrong value, such as an unknown repo name, is 1.
 - **JSON failures:** with `--json`, a failure prints `{"error": {"code": "usage" | "command-failed", "message": ..., "hint": ... | null}}` on stdout and nothing on stderr.
+- **`update` is human-only:** `--json update` is refused with a usage error (exit 2) before anything runs; run `git forest update` without `--json`.
 - **Partial results are objects:** `rm`, `rm --all` and `reset` report each entry of `errors` as `{"code", "message", "hint"}` (`hint` is null when there is none); `exec` reports each entry of `failures` as `{"repo", "code", "message", "exit_status"}`. With `--json`, `exec` sends the command's stdout to stderr, so stdout holds only the JSON document.
 
 ## Common Patterns
