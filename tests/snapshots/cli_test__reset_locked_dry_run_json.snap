@@ -55,7 +55,11 @@ exit: 1
   ],
   "warnings": [],
   "errors": [
-    "foo-api: refusing removal because git worktree metadata is locked"
+    {
+      "code": "worktree-refused",
+      "message": "foo-api: refusing removal because git worktree metadata is locked",
+      "hint": null
+    }
   ]
 }
 --- stderr ---

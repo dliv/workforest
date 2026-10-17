@@ -9,6 +9,7 @@
 19	src/lib.rs	use of `println!`
 1	src/lib.rs	use of a disallowed method `chrono::Utc::now`
 1	src/lib.rs	use of a disallowed method `std::env::args_os`
+1	src/lib.rs	use of a disallowed method `std::io::stderr`
 2	src/lib.rs	use of a disallowed method `std::io::stdout`
 3	src/lib.rs	use of a disallowed method `std::process::Command::new`
 2	src/paths.rs	use of a disallowed method `std::env::var`

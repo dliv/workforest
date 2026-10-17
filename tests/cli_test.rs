@@ -896,7 +896,7 @@ fn json_rm_reports_detached_head_safety_outcomes() {
         rm_json["repos"][0]["branch_deleted"]["reason"],
         "worktree not removed"
     );
-    assert!(rm_json["errors"][0]
+    assert!(rm_json["errors"][0]["message"]
         .as_str()
         .unwrap()
         .contains("not reachable"));

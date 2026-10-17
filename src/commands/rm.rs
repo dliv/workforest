@@ -89,21 +89,21 @@ pub struct RmResult {
     pub repos: Vec<RepoRmResult>,
     pub forest_root_cleanup: Vec<ForestRootCleanupResult>,
     pub forest_dir_removed: bool,
-    #[serde(serialize_with = "serialize_legacy_errors")]
     pub errors: Vec<CleanupIssue>,
 }
 
 /// One error that a cleanup step of `rm`, `rm --all` or `reset` reported: the step's code,
-/// the message, and the recovery hint when the message carries one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// the message, and the recovery hint when the message carries one (`null` otherwise).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CleanupIssue {
     pub code: CleanupIssueCode,
     pub message: String,
     pub hint: Option<String>,
 }
 
-/// The cleanup step that failed, named for what an agent can act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The cleanup step that failed, named for what an agent can act on. Serialized kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CleanupIssueCode {
     /// Uncommitted changes block removal.
     DirtyWorktree,
@@ -169,7 +169,7 @@ impl CleanupIssue {
     }
 }
 
-/// Today's error lines for a result's issues, as human output prints them: each message, with
+/// The error lines human output prints for a result's issues: each message, with
 /// `\n  hint: ` and its hint when it has one, except that dirty worktrees share one trailing
 /// `hint: ` entry after all the issues.
 pub fn legacy_error_lines(issues: &[CleanupIssue]) -> Vec<String> {
@@ -187,14 +187,6 @@ pub fn legacy_error_lines(issues: &[CleanupIssue]) -> Vec<String> {
         lines.push(format!("hint: {}", DIRTY_WORKTREE_HINT));
     }
     lines
-}
-
-/// Serializes issues as today's error strings.
-pub(super) fn serialize_legacy_errors<S: serde::Serializer>(
-    issues: &[CleanupIssue],
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    serializer.collect_seq(legacy_error_lines(issues))
 }
 
 #[derive(Debug, Serialize)]

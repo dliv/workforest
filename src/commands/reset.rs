@@ -18,7 +18,6 @@ pub struct ResetResult {
     pub state_file: FileResetEntry,
     pub forests: Vec<ForestResetEntry>,
     pub warnings: Vec<String>,
-    #[serde(serialize_with = "rm::serialize_legacy_errors")]
     pub errors: Vec<CleanupIssue>,
 }
 

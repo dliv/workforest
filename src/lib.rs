@@ -535,11 +535,18 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             let config = config::load_default_config()?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
+            // Under --json the child's stdout goes to stderr, so stdout holds only the document.
+            let child_stdout_to_stderr = || std::process::Stdio::from(std::io::stderr());
+            let child_stdout: &dyn Fn() -> std::process::Stdio = if cli.json {
+                &child_stdout_to_stderr
+            } else {
+                &std::process::Stdio::inherit
+            };
             let result = commands::cmd_exec(
                 &dir,
                 &meta,
                 &cmd,
-                &std::process::Stdio::inherit,
+                child_stdout,
                 Some(&|progress| match progress {
                     commands::ExecProgress::RepoStarting { name } => {
                         eprintln!("=== {} ===", name);

@@ -12,14 +12,14 @@ Multi-repo operations can fail partially — one repo's worktree removal might f
 Per-command error policies, documented and enforced:
 
 - **`new`:** Stop on first failure and roll back: remove the worktrees this run created, delete the branches it created (including the failed repo's), and remove the forest directory. Rollback errors are ignored, and the original error is returned. A failure to write `.forest-meta.toml` returns without rollback, leaving a partial forest whose metadata lists the repos created before it (ADR 0011), so `rm` can clean it up.
-- **`rm`:** Best-effort, continue on per-repo failures, report all errors at the end. `RmResult.errors: Vec<String>` accumulates errors (`src/commands/rm.rs`, line 33). `RmOutcome` enum has `Success`, `Skipped`, and `Failed` variants (lines 43–49).
-- **`exec`:** Continue to next repo on failure. `ExecResult.failures: Vec<String>` tracks which repos failed (`src/commands/exec.rs`, line 10).
+- **`rm`:** Best-effort, continue on per-repo failures, report all errors at the end. `RmResult.errors` accumulates `{code, message, hint}` objects (`CleanupIssue` in `src/commands/rm.rs`, with a closed `CleanupIssueCode` per cleanup step), and so does `ResetResult.errors`. `RmOutcome` enum has `Success`, `Skipped`, and `Failed` variants.
+- **`exec`:** Continue to next repo on failure. `ExecResult.failures` holds one `{repo, code, message, exit_status}` object per failed repo (`ExecRepoFailure` in `src/commands/exec.rs`).
 - **`status`:** Continue on failure. `RepoStatusKind::Missing` and `Error` variants handle per-repo problems (`src/commands/status.rs`, lines 21–25).
 - **`ls`:** Continue past individual forest directories with missing or unreadable metadata. Return readable forests and structured findings together; failure to enumerate a configured worktree base remains a command error. A dot-prefixed directory without metadata is treated as worktree-base tool or administrative state and omitted from findings; valid or unreadable metadata inside one remains observable.
 - **Named forest resolution:** `status <name>`, `exec <name>`, and `rm <name>` continue past unreadable metadata in unrelated directories. Unreadable metadata in a directory matching the requested name remains an error, as do failures to enumerate or inspect the configured base and staged metadata from an interrupted removal.
 - **Whole-base mutations:** `rm --all` and `reset` retain strict discovery because incomplete enumeration cannot authorize an all-forests mutation.
 
-Exit codes reflect accumulated state: `src/lib.rs` exits 1 when `rm` has errors or `exec` has failures.
+Exit codes reflect accumulated state: `main_entry` in `src/lib.rs` exits 1 when a result is incomplete (`rm`, `rm --all` or `reset` errors, `exec` failures) or `reset` needs `--confirm`.
 
 `--force` escalates behavior within a command (e.g., `git branch -d` → `-D` in `rm`) but does not change the accumulation model.
 

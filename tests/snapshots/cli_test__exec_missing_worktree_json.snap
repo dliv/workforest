@@ -7,7 +7,12 @@ exit: 1
 {
   "forest_name": "feat",
   "failures": [
-    "foo-web"
+    {
+      "repo": "foo-web",
+      "code": "worktree-missing",
+      "message": "worktree missing at [TMP]/worktrees/feat/foo-web",
+      "exit_status": null
+    }
   ]
 }
 --- stderr ---

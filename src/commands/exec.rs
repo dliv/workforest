@@ -8,12 +8,11 @@ use crate::paths::{ForestName, RepoName};
 #[derive(Debug, Serialize)]
 pub struct ExecResult {
     pub forest_name: ForestName,
-    #[serde(serialize_with = "serialize_failed_repo_names")]
     pub failures: Vec<ExecRepoFailure>,
 }
 
 /// One repo where the command did not succeed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecRepoFailure {
     pub repo: RepoName,
     pub code: ExecFailureCode,
@@ -22,8 +21,9 @@ pub struct ExecRepoFailure {
     pub exit_status: Option<i32>,
 }
 
-/// Why the command did not succeed in a repo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the command did not succeed in a repo. Serialized kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ExecFailureCode {
     /// The repo's worktree is missing, so the command did not run there.
     WorktreeMissing,
@@ -37,14 +37,6 @@ pub enum ExecFailureCode {
 pub enum ExecProgress<'a> {
     RepoStarting { name: &'a RepoName },
     RepoFailed(&'a ExecRepoFailure),
-}
-
-/// Serializes failures as the names of their repos.
-fn serialize_failed_repo_names<S: serde::Serializer>(
-    failures: &[ExecRepoFailure],
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    serializer.collect_seq(failures.iter().map(|failure| failure.repo.to_string()))
 }
 
 /// Runs `cmd` in each repo's worktree, in order. `child_stdout` gives the command's standard

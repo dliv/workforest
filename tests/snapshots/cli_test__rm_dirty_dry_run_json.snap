@@ -48,8 +48,11 @@ exit: 1
   "forest_root_cleanup": [],
   "forest_dir_removed": false,
   "errors": [
-    "foo-api: worktree has uncommitted changes",
-    "hint: commit or stash changes, then retry — or use `git forest rm --force`"
+    {
+      "code": "dirty-worktree",
+      "message": "foo-api: worktree has uncommitted changes",
+      "hint": "commit or stash changes, then retry — or use `git forest rm --force`"
+    }
   ]
 }
 --- stderr ---

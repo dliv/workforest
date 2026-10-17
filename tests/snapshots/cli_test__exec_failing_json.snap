@@ -4,17 +4,27 @@ expression: "golden(t, &failing_json)"
 ---
 exit: 1
 --- stdout ---
-out
-out
 {
   "forest_name": "feat",
   "failures": [
-    "foo-api",
-    "foo-web"
+    {
+      "repo": "foo-api",
+      "code": "command-exited",
+      "message": "command exited with status 3",
+      "exit_status": 3
+    },
+    {
+      "repo": "foo-web",
+      "code": "command-exited",
+      "message": "command exited with status 3",
+      "exit_status": 3
+    }
   ]
 }
 --- stderr ---
 === foo-api ===
+out
 err
 === foo-web ===
+out
 err
