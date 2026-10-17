@@ -605,10 +605,8 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             // Homebrew's output is not JSON, so update refuses --json before printing anything.
             if cli.json {
                 return Err(Failure::Usage {
-                    message:
-                        "update does not support --json; run `git forest update` without `--json`"
-                            .to_owned(),
-                    hint: None,
+                    message: "update does not support --json".to_owned(),
+                    hint: Some("run `git forest update` without `--json`".to_owned()),
                 });
             }
             let brew_check = std::process::Command::new("brew")
