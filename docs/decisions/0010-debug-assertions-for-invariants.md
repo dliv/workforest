@@ -39,3 +39,5 @@ After Contracts 1 (AbsolutePath) and Contracts 2 (RepoName, ForestName, BranchNa
 - Three-tier error model: newtypes (compile-time) > `debug_assert!` (dev-time) > `bail!` (runtime, user-facing). See ADR 0008.
 - Net: 7 original assertions reduced to 4 (2 postconditions kept, 2 preconditions added). The type system now carries most of the weight.
 - Rust's `debug_assert!` fires by default in debug/test builds — no special flags needed (unlike Java's `-ea`). This makes the dev-time tier practical rather than opt-in. See ADR 0013.
+
+Revisit if: a release build is found to break an invariant that a `debug_assert!` checks only in debug and test builds.

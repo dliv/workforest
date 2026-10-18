@@ -25,3 +25,5 @@ This pairs with `new`'s stop-on-failure error policy (ADR 0009). When a worktree
 - **`rm` just works:** `plan_rm()` (`src/commands/rm.rs`) reads whatever repos are in meta and handles them — no special partial-forest logic needed. This depends on ADR 0004 (meta is self-contained).
 - **Write amplification is negligible:** Rewriting a small TOML file (typically < 1KB) per repo is insignificant compared to the git operations surrounding it.
 - If `new` is interrupted (kill signal), the meta may be one repo behind. Acceptable: the extra worktree is discoverable via `git worktree list` on the source repo.
+
+Revisit if: `new` creates worktrees in parallel, or an interrupted run's unrecorded worktree is found to block `rm` or a rerun of `new`.

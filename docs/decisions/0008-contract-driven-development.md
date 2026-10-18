@@ -28,3 +28,5 @@ The development cycle is: plan → review → implement → archive. Plans becom
   2. **Compile-time contracts** — newtypes (`AbsolutePath`, `RepoName`, `ForestName`, `BranchName`) make illegal states unrepresentable. Validate once at construction; the type system enforces invariants everywhere else.
   3. **Runtime contracts** (ADR 0010) — `debug_assert!` for invariants that types cannot express (collection-level properties, `&Path` boundary preconditions).
 - Rust's type system, exhaustive match, and `Result`-based error handling make all three tiers practical. See ADR 0013.
+
+Revisit if: changes land without a plan that specified their types and tests first, or contributors join who do not work from plans.

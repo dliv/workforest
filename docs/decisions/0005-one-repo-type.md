@@ -25,3 +25,5 @@ Whether you modify a repo is your runtime choice, not something encoded in confi
 - **Original `readonly` use case still works:** A coworker's repo as a worktree on `forest/{name}` serves the same purpose without a dedicated type.
 - **Simplifies ADR 0004:** Meta format has no type field to track or migrate.
 - If a genuine need for type-specific behavior emerges (e.g., sparse checkout for large repos), it can be added as a new per-repo flag without redesigning the type system.
+
+Revisit if: shallow, sparse or read-only checkouts become a requirement, or per-repo flags accumulate into combinations that are always set together, as a type would be.

@@ -29,3 +29,5 @@ The call graph is shallow: `main → command → helpers`. IO lives at the edges
 - **Clean boundary:** Command logic is pure-ish; all IO is in `src/lib.rs`.
 - **Future-proof:** Library or MCP consumers call the same `cmd_*` functions and get typed data back.
 - Plan structs (ADR 0003) follow the same pattern — plans are data too.
+
+Revisit if: a command must stream its results while it runs instead of returning them whole, or production code needs two real implementations of one dependency.

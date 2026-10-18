@@ -32,3 +32,5 @@ Test examples:
 - **`TestEnv` absorbs setup complexity:** Tests focus on assertions, not git plumbing.
 - **Supports ADR 0003:** Plan tests assert on data; execution tests verify real side effects. Both use the same `TestEnv`.
 - **Enabled by ADR 0008:** Contract-driven plans define what to test; `TestEnv` makes it practical.
+
+Revisit if: the real-repository tests make `just check` too slow to run before every commit, or a behavior local repositories cannot reproduce, such as a failed network fetch, needs a test.

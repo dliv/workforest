@@ -32,3 +32,5 @@ Exit codes reflect accumulated state: `main_entry` in `src/lib.rs` exits 1 when 
 - `RmOutcome` enum makes per-repo results explicit and machine-parseable.
 - Partial failure in `new` is recoverable via `rm` because meta is written incrementally (ADR 0011).
 - `--force` is an escalation knob, orthogonal to error policy.
+
+Revisit if: a command runs its per-repo steps in parallel, so its first failure no longer has an order, or a caller needs `rm` to stop at its first failure instead of reporting every one.

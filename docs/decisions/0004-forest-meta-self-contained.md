@@ -28,3 +28,5 @@ Config is loaded in `src/lib.rs` only to resolve `worktree_base` for forest disc
 - **No config migration concerns.** Each forest is a snapshot of creation-time state. Config schema can evolve freely.
 - **Config is only used by `init` (writes it) and `new` (reads it for defaults).** All other commands are config-independent.
 - Reinforced by ADR 0005 (no type field to track) and ADR 0012 (no template name in meta). Meta stores resolved `base_branch` and `remote` per repo, enabling ADR 0011 (incremental writes make partial forests self-describing).
+
+Revisit if: users need a configuration change, such as a moved source repository, to reach forests that already exist, or a post-creation command needs a value the metadata does not record.

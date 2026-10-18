@@ -39,3 +39,5 @@ No legacy migration logic. The project is pre-1.0 with no external users.
 - **No space in path.** `~/.config/git-forest/` doesn't require quoting in shell commands.
 - **ADR 0006 unchanged.** Still a single config file — only the directory location changes.
 - **`directories` crate retained.** Still used for Windows defaults.
+
+Revisit if: a macOS packaging or sandboxing requirement demands the platform's application directories, or the developer CLI tools listed above move off XDG paths on macOS.

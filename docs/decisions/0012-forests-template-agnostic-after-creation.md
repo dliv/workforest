@@ -23,3 +23,5 @@ Don't store the template name in `.forest-meta.toml`. The template is a creation
 - **`ls` is simple:** Shows all forests regardless of which template created them — no filtering/grouping by template needed.
 - **Config deletion is safe:** If config is deleted or changed, existing forests still work.
 - If template provenance becomes useful later (e.g., "recreate this forest with updated template"), it can be added as an optional field without breaking existing meta files.
+
+Revisit if: a command needs to know which template created a forest, such as recreating a forest from its updated template, or `ls` gains filtering or grouping by template.

@@ -24,3 +24,5 @@ Design the CLI so that every operation is fully automatable without interactive 
 - Error messages are verbose by design — they carry hints where a recovery step exists, not just status codes.
 - An agent reads one JSON document on stdout under `--json` whether the command succeeds or fails, and tells usage errors (exit 2) from other failures (exit 1) without parsing text.
 - This decision drives ADR 0002 (commands return data, enabling `--json`) and ADR 0003 (`--dry-run` via plan/execute).
+
+Revisit if: a command needs input that cannot be given as a flag, or agents come to drive the tool through another interface, such as a library or an MCP server.

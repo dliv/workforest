@@ -38,3 +38,5 @@ The supported threat model is ordinary local, non-adversarial use on modern macO
 - Top-level-only authority is less expressive than an ignore-pattern file, but it is simpler to audit and avoids intermediate symlink traversal.
 - Symlinked forest aliases that were previously discoverable are no longer removable through `git forest rm`; the alias must be inspected and unlinked manually.
 - No filesystem or glob-matching dependency is added.
+
+Revisit if: disposable entries need nested paths or glob patterns, or removal must hold against hostile concurrent changes to a forest root.

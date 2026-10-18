@@ -71,3 +71,5 @@ Since performance isn't our bottleneck, the correct response to borrow checker f
 - **Ecosystem fit.** `clap`, `serde`, `anyhow`, and `toml` are best-in-class for CLI tools. `--json` output (ADR 0001) and config parsing (ADR 0006) are nearly free.
 - **Concurrency-ready.** Parallel git operations can be added without thread-safety retrofitting.
 - **Trade-off: learning curve.** Rust's ownership model and trait system have a steeper learning curve than Go or Python. Accepted because the compile-time guarantees are worth it for a tool that orchestrates destructive git operations (branch deletion, worktree removal).
+
+Revisit if: the tool must run somewhere a single native binary cannot, or a library it needs has no maintained Rust equivalent.
