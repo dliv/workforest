@@ -6,15 +6,14 @@ use std::path::{Path, PathBuf};
 pub(crate) use crate::plan::branch_state::compact_git_error;
 pub use crate::plan::branch_state::{ActualBranchState, WorktreeBranchState};
 
-impl WorktreeBranchState {
-    pub fn read(worktree: &Path, expected_branch: &str) -> Self {
-        let actual = if path_exists_or_symlink(worktree) {
-            read_actual_branch(worktree)
-        } else {
-            ActualBranchState::MissingWorktree
-        };
-        Self::new(expected_branch.to_string(), actual)
-    }
+/// Reads the branch state of the worktree at `worktree`, expected on `expected_branch`.
+pub fn read_branch_state(worktree: &Path, expected_branch: &str) -> WorktreeBranchState {
+    let actual = if path_exists_or_symlink(worktree) {
+        read_actual_branch(worktree)
+    } else {
+        ActualBranchState::MissingWorktree
+    };
+    WorktreeBranchState::new(expected_branch.to_string(), actual)
 }
 
 pub(crate) fn path_exists_or_symlink(path: &Path) -> bool {

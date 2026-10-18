@@ -356,6 +356,7 @@ pub fn cmd_reset(
 mod tests {
     use super::*;
     use crate::channel;
+    use crate::forest::write_meta;
     use crate::paths::RepoName;
     use crate::plan::reset::RepoResetEntry;
     use serial_test::serial;
@@ -776,8 +777,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -820,8 +820,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
         write_reset_config(
             tmp.path(),
             &worktree_base,
@@ -867,7 +866,7 @@ path = "/tmp/nonexistent-repo"
             repos: vec![],
         };
         let meta_path = forest_dir.join(crate::meta::META_FILENAME);
-        meta.write(&meta_path).unwrap();
+        write_meta(&meta, &meta_path).unwrap();
         std::fs::write(forest_dir.join("residue.txt"), "discard during reset").unwrap();
 
         let config_content = format!(
@@ -1016,8 +1015,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
         write_reset_config(
             tmp.path(),
             &worktree_base,
@@ -1075,8 +1073,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
         std::os::unix::fs::symlink(&worktree_target, &worktree_base).unwrap();
         write_reset_config(
             tmp.path(),
@@ -1131,8 +1128,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1180,8 +1176,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1306,8 +1301,7 @@ path = "/tmp/nonexistent-repo"
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
-            .unwrap();
+        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1638,7 +1632,7 @@ name = "repo-a"
                 branch_created: true,
             }],
         };
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1717,7 +1711,7 @@ name = "repo-missing-source"
                 branch_created: true,
             }],
         };
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1785,7 +1779,7 @@ name = "repo-missing-both"
                 branch_created: true,
             }],
         };
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let config_content = format!(
             r#"
@@ -1848,7 +1842,7 @@ name = "repo-dangling"
                 branch_created: true,
             }],
         };
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-source-present-dangling");
@@ -1901,7 +1895,7 @@ name = "repo-dangling"
                 branch_created: true,
             }],
         };
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-source-present-corrupt");

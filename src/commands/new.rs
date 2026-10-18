@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 
 use crate::config::ResolvedTemplate;
+use crate::forest::write_meta;
 use crate::git::ref_exists;
 use crate::meta::{ForestMeta, RepoMeta, META_FILENAME};
 use crate::paths::{forest_dir, AbsolutePath, ForestName};
@@ -200,7 +201,7 @@ pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> 
     };
     // RepoMeta.branch is String, not BranchName, so we use to_string() below
     let meta_path = plan.forest_dir.join(META_FILENAME);
-    meta.write(&meta_path)?;
+    write_meta(&meta, &meta_path)?;
 
     // Create worktrees incrementally, recording what this run created for rollback
     let mut created: Vec<CreatedWorktree> = Vec::new();
@@ -220,7 +221,7 @@ pub fn execute_plan(plan: &ForestPlan, now: DateTime<Utc>) -> Result<NewResult> 
             remote: Some(repo_plan.remote.clone()),
             branch_created: branch_created(&repo_plan.checkout),
         });
-        meta.write(&meta_path)?;
+        write_meta(&meta, &meta_path)?;
     }
 
     Ok(plan_to_result(plan, false))
@@ -266,6 +267,7 @@ mod tests {
     use super::*;
     use crate::commands::cmd_ls;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
+    use crate::forest::read_meta;
     use crate::meta::ForestMode;
     use crate::paths::{AbsolutePath, DisposableRootEntry, RepoName};
     use crate::plan::new::compute_target_branch;
@@ -760,7 +762,7 @@ mod tests {
         let result = execute_plan(&plan, chrono::Utc::now()).unwrap();
 
         let meta_path = plan.forest_dir.join(META_FILENAME);
-        let meta = ForestMeta::read(&meta_path).unwrap();
+        let meta = read_meta(&meta_path).unwrap();
 
         assert_eq!(meta.name.as_str(), "meta-test");
         assert_eq!(meta.mode, ForestMode::Feature);

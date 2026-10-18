@@ -1,5 +1,5 @@
 //! The branch state of a forest's worktree: which branch it was created for and what it has
-//! checked out now. Pure: reading the state from git is `WorktreeBranchState::read` in
+//! checked out now. Pure: reading the state from git is `read_branch_state` in
 //! `commands::branch_state`.
 
 use serde::Serialize;

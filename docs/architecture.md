@@ -43,7 +43,7 @@ Nothing except Root imports Root.
 
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason:
 
-- `commands::ls` and `commands::status` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
+- `commands::ls`, `commands::rm` and `commands::status` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
 - `commands::reset` imports `commands::rm`, because reset observes and executes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal); the removal plan and its decisions live in `src/plan/rm.rs`. Whether those helpers become a shared module is an open question (temporary).
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.
@@ -61,7 +61,7 @@ A Pure module's production code may not contain any of the effects listed below.
 
 `Path` and `PathBuf` are allowed as data; only the effectful path names above are reported. `include_str!`, `include_bytes!`, `env!` and `option_env!` are allowed: they are compile-time inputs, fixed when the binary is built, not effects at run time. (The qualified spelling `std::env!` is still refused, because the scan bans the `std::env` path.)
 
-When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `src/paths.rs` is Pure because `expand_tilde`, which reads `HOME`, lives in `src/config.rs`; likewise the metadata file's I/O (`ForestMeta::read` and `write`) lives in `src/forest.rs`, beside the Pure types in `src/meta.rs`. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
+When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `src/paths.rs` is Pure because `expand_tilde`, which reads `HOME`, lives in `src/config.rs`; likewise the metadata file's I/O (`read_meta` and `write_meta`) lives in `src/forest.rs`, beside the Pure types in `src/meta.rs`. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
 
 ## No production traits
 

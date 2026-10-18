@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use std::path::{Component, Path, PathBuf};
 
+use super::branch_state::read_branch_state;
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
 use crate::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
 use crate::paths::{AbsolutePath, ForestName};
@@ -140,7 +141,7 @@ fn observe_repo(forest_dir: &Path, repo: &RepoMeta) -> RepoObservation {
     let worktree_path = forest_dir.join(repo.name.as_str());
     let worktree_exists = path_exists_or_symlink(&worktree_path);
     let worktree_is_symlink = path_is_symlink(&worktree_path);
-    let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
+    let branch_state = read_branch_state(&worktree_path, &repo.branch);
     let source_exists = repo.source.is_dir();
     let detached_head_safety = detached_head_safety(&branch_state, &repo.source, source_exists);
     let has_dirty_files = worktree_exists
@@ -1597,6 +1598,7 @@ mod tests {
     use crate::commands::cmd_new;
     use crate::commands::NewInputs;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
+    use crate::forest::{read_meta, write_meta};
     use crate::meta::ForestMode;
     use crate::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
     use crate::plan::rm::{validate_json_output_paths, ForestRootCleanupKind};
@@ -1653,7 +1655,7 @@ mod tests {
         let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let plan = plan_rm(&forest_dir, &meta);
 
         assert_eq!(plan.forest_name.as_str(), "plan-basic");
@@ -1673,7 +1675,7 @@ mod tests {
         let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let plan = plan_rm(&forest_dir, &meta);
 
         assert!(plan.repo_plans[0].worktree_exists);
@@ -1689,7 +1691,7 @@ mod tests {
         let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Manually delete the worktree directory
         std::fs::remove_dir_all(forest_dir.join("foo-api")).unwrap();
@@ -1714,7 +1716,7 @@ mod tests {
         let result = cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = result.forest_dir;
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let plan = plan_rm(&forest_dir, &meta);
 
         assert!(plan.repo_plans[0].branch_created); // foo-api: new branch
@@ -1737,7 +1739,7 @@ mod tests {
         assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join("foo-web").exists());
 
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!forest_dir.join("foo-api").exists());
@@ -1755,7 +1757,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-branch");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Verify branch exists before rm
         let source = &meta.repos[0].source;
@@ -1788,7 +1790,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-skip-branch");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -1816,7 +1818,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dir");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         assert!(forest_dir.exists());
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
@@ -1838,7 +1840,7 @@ mod tests {
         let meta_path = forest_dir.join(META_FILENAME);
         assert!(meta_path.exists());
 
-        let meta = ForestMeta::read(&meta_path).unwrap();
+        let meta = read_meta(&meta_path).unwrap();
         cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
         assert!(!meta_path.exists());
@@ -1855,7 +1857,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dirty-block");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make foo-api dirty so preflight blocks removal
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
@@ -1899,7 +1901,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-force-dirty");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make it dirty
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
@@ -1925,7 +1927,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-force-unmerged");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Add a commit to the worktree branch to make it unmerged
         let wt_dir = forest_dir.join("foo-api");
@@ -1957,7 +1959,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-missing-wt");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Prune the worktree from git's perspective and delete the directory
         let source = &meta.repos[0].source;
@@ -1999,7 +2001,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-src-missing");
-        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let mut meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Point source to a nonexistent path
         meta.repos[0].source = AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap();
@@ -2050,7 +2052,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-src-missing-unknown");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = meta.repos[0].source.clone();
         std::fs::remove_dir_all(source.as_ref()).unwrap();
 
@@ -2105,7 +2107,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dry");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
@@ -2126,7 +2128,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dry-extra-file");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         std::fs::write(forest_dir.join("notes.txt"), "keep me").unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
@@ -2152,7 +2154,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-extra-file");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         std::fs::write(forest_dir.join("notes.txt"), "keep me").unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
@@ -2185,7 +2187,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-disposable-entry");
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
@@ -2221,7 +2223,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-one-off-entry");
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::fs::write(forest_dir.join(".idea/workspace.xml"), "incidental").unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         assert!(meta.disposable_root_entries.is_empty());
 
         let ordinary = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
@@ -2253,7 +2255,7 @@ mod tests {
         )
         .unwrap();
         let forest_dir = tmpl.worktree_base.join("rm-force-entry-conflict");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let options = RmOptions {
             additional_disposable_root_entries: vec![
                 DisposableRootEntry::new(".idea".to_string()).unwrap()
@@ -2282,7 +2284,7 @@ mod tests {
         )
         .unwrap();
         let forest_dir = tmpl.worktree_base.join("rm-duplicate-entry");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let duplicate = DisposableRootEntry::new(".idea".to_string()).unwrap();
 
         for additional_disposable_root_entries in [
@@ -2314,7 +2316,7 @@ mod tests {
         )
         .unwrap();
         let forest_dir = tmpl.worktree_base.join("rm-metadata-alias");
-        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let mut meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         meta.disposable_root_entries =
             vec![DisposableRootEntry::new(".FOREST-META.TOML".to_string()).unwrap()];
 
@@ -2340,7 +2342,7 @@ mod tests {
         .unwrap();
         let forest_dir = tmpl.worktree_base.join("rm-preserve-dotenv");
         std::fs::write(forest_dir.join(".env"), "LOCAL_ONLY=true").unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
@@ -2366,7 +2368,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-force-preview-root");
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::fs::write(forest_dir.join("notes.txt"), "keep").unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
 
@@ -2402,7 +2404,7 @@ mod tests {
         let forest_dir = tmpl.worktree_base.join("rm-force-entry-results");
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::fs::write(forest_dir.join("notes.txt"), "discard").unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let plan = plan_rm_with_options(&forest_dir, &meta, &RmOptions::new(true, false)).unwrap();
         std::fs::remove_dir(forest_dir.join(".idea")).unwrap();
 
@@ -2453,7 +2455,7 @@ mod tests {
         if forest_dir.join("repo-a").symlink_metadata().is_ok() {
             return;
         }
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let dry_run = cmd_rm(&forest_dir, &meta, true, true, None).unwrap();
 
@@ -2505,7 +2507,7 @@ mod tests {
         if std::fs::write(&invalid_entry, "preserve until JSON can represent it").is_err() {
             return;
         }
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let options = RmOptions {
             require_utf8_json_paths: true,
             ..RmOptions::new(true, false)
@@ -2542,7 +2544,7 @@ mod tests {
         if std::fs::write(&invalid_entry, "unauthorized residue").is_err() {
             return;
         }
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let options = RmOptions {
             require_utf8_json_paths: true,
             ..RmOptions::new(false, false)
@@ -2742,7 +2744,7 @@ mod tests {
         std::fs::create_dir(&external).unwrap();
         std::fs::write(external.join("sentinel"), "keep").unwrap();
         std::os::unix::fs::symlink(&external, forest_dir.join(".idea")).unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -2773,7 +2775,7 @@ mod tests {
         std::fs::write(external.join("sentinel"), "keep").unwrap();
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::os::unix::fs::symlink(&external, forest_dir.join(".idea/external")).unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -2798,7 +2800,7 @@ mod tests {
         std::fs::write(&external, "keep").unwrap();
         std::fs::create_dir(forest_dir.join(".idea")).unwrap();
         std::fs::hard_link(&external, forest_dir.join(".idea/shared-file")).unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -2828,7 +2830,7 @@ mod tests {
         std::fs::create_dir_all(&target_parent).unwrap();
         std::fs::rename(&forest_dir, &target_dir).unwrap();
         std::os::unix::fs::symlink(&target_dir, &forest_dir).unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
@@ -2867,7 +2869,7 @@ mod tests {
         std::fs::create_dir_all(&target_parent).unwrap();
         std::fs::rename(&forest_dir, &target_dir).unwrap();
         std::os::unix::fs::symlink(&target_dir, &forest_dir).unwrap();
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -2910,7 +2912,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dry-dangling-symlink");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let worktree = forest_dir.join("foo-api");
         std::fs::remove_dir_all(&worktree).unwrap();
@@ -2940,7 +2942,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dangling-symlink");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -2982,7 +2984,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-symlink-non-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3021,7 +3023,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-symlink-force-dry-run");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let worktree = forest_dir.join("foo-api");
         let worktree_arg = worktree.to_string_lossy().into_owned();
@@ -3056,7 +3058,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-locked-symlink-force-dry-run");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3095,7 +3097,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-locked-symlink-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3133,7 +3135,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-symlink-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3169,7 +3171,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dry-unmerged");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let branch_ref = format!("refs/heads/{}", branch);
@@ -3222,7 +3224,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-drift");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let branch_ref = format!("refs/heads/{}", branch);
@@ -3282,7 +3284,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-branch-checked-out");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let worktree = forest_dir.join("foo-api");
@@ -3317,7 +3319,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-detached");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let worktree = forest_dir.join("foo-api");
         let head = crate::git::git(&worktree, &["rev-parse", "HEAD"]).unwrap();
         crate::git::git(&worktree, &["checkout", "--detach", "HEAD"]).unwrap();
@@ -3369,7 +3371,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-detached-unique");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let branch_ref = format!("refs/heads/{}", branch);
@@ -3430,7 +3432,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-detached-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let branch_ref = format!("refs/heads/{}", branch);
@@ -3473,7 +3475,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-detached-missing-source");
-        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let mut meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let real_source = meta.repos[0].source.clone();
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3542,7 +3544,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-src-missing-file");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = meta.repos[0].source.clone();
         let worktree = forest_dir.join("foo-api");
         std::fs::remove_dir_all(source.as_ref()).unwrap();
@@ -3630,7 +3632,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-corrupt-non-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = meta.repos[0].source.clone();
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         replace_worktree_with_plain_dir(&forest_dir.join("foo-api"));
@@ -3668,7 +3670,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-corrupt-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         replace_worktree_with_plain_dir(&forest_dir.join("foo-api"));
@@ -3681,7 +3683,7 @@ mod tests {
         assert!(forest_dir.join(META_FILENAME).exists());
         assert!(forest_dir.join("foo-api").exists());
 
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
 
         assert!(
@@ -3719,7 +3721,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-corrupt-locked");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3768,7 +3770,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-corrupt-locked-dry-run");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3810,7 +3812,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-newline-base");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let dry_run = cmd_rm(&forest_dir, &meta, false, true, None).unwrap();
 
@@ -3856,7 +3858,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-newline-locked-corrupt");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -3897,7 +3899,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-locked-valid-dry-run");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -4022,7 +4024,7 @@ mod tests {
             ForestMode::Feature,
             vec![repo],
         );
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_rm(&forest_dir, &meta, true, false, None).unwrap();
 
@@ -4051,7 +4053,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-stale-missing-dry-run");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -4094,7 +4096,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-stale-missing-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -4133,7 +4135,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-missing-checked-out");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
         let worktree = forest_dir.join("foo-api");
@@ -4167,7 +4169,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-stale-uncreated");
-        let mut meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let mut meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         meta.repos[0].branch_created = false;
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
@@ -4210,7 +4212,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-corrupt-file-force");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch_ref = format!("refs/heads/{}", meta.repos[0].branch);
         let worktree = forest_dir.join("foo-api");
@@ -4259,7 +4261,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-dirty-lookup");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
         crate::git::git(&forest_dir.join("foo-api"), &["add", "dirty.txt"]).unwrap();
@@ -4322,7 +4324,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-result");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
 
@@ -4444,7 +4446,7 @@ mod tests {
 
         // Remove
         let forest_dir = tmpl.worktree_base.join("roundtrip");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let rm_result = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
         assert!(rm_result.errors.is_empty());
 
@@ -4483,7 +4485,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-pushed");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4517,7 +4519,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-ancestor");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4553,7 +4555,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-stale-base");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4625,7 +4627,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-upstream-base");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let branch = &meta.repos[0].branch;
 
         let wt_dir = forest_dir.join("foo-api");
@@ -4691,7 +4693,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-wrong-origin");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let branch = &meta.repos[0].branch;
 
         let wt_dir = forest_dir.join("foo-api");
@@ -4745,7 +4747,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-ambiguous-origin");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4809,7 +4811,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-unpushed");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4845,7 +4847,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-no-remote");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4879,7 +4881,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-force-direct");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let source = &meta.repos[0].source;
         let branch = &meta.repos[0].branch;
 
@@ -4910,7 +4912,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-force-dirty2");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make foo-api dirty
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
@@ -4942,7 +4944,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-retry");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make dirty
         let dirty_file = forest_dir.join("foo-api").join("dirty.txt");
@@ -4960,7 +4962,7 @@ mod tests {
         std::fs::remove_file(&dirty_file).unwrap();
 
         // Re-read meta (still there) and retry — re-plan to pick up clean state
-        let meta2 = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta2 = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let rm2 = cmd_rm(&forest_dir, &meta2, false, false, None).unwrap();
         assert!(rm2.errors.is_empty());
         assert!(rm2.forest_dir_removed);
@@ -4978,7 +4980,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("plan-dirty");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make foo-api dirty
         std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
@@ -5000,7 +5002,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("dry-dirty");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         // Make foo-api dirty
         std::fs::write(forest_dir.join("foo-api").join("dirty.txt"), "dirty").unwrap();
@@ -5040,7 +5042,7 @@ mod tests {
         cmd_new(inputs, &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("rm-idempotent");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
 
         let api_source = &meta.repos[0].source;
         let api_branch = &meta.repos[0].branch;
@@ -5070,7 +5072,7 @@ mod tests {
         assert!(forest_dir.join(META_FILENAME).exists());
 
         // Second rm (--force): should skip foo-api (already deleted), force-delete foo-web
-        let meta2 = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta2 = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let rm2 = cmd_rm(&forest_dir, &meta2, true, false, None).unwrap();
 
         // foo-api branch should be skipped (already deleted), not failed
@@ -5301,9 +5303,7 @@ mod tests {
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        hidden_meta
-            .write(&hidden_forest.join(META_FILENAME))
-            .unwrap();
+        write_meta(&hidden_meta, &hidden_forest.join(META_FILENAME)).unwrap();
         let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read_dir(&hidden_base).is_ok() {
@@ -5351,9 +5351,7 @@ mod tests {
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        hidden_meta
-            .write(&hidden_forest.join(META_FILENAME))
-            .unwrap();
+        write_meta(&hidden_meta, &hidden_forest.join(META_FILENAME)).unwrap();
         std::os::unix::fs::symlink(&offline_target, &offline_base).unwrap();
         let moved_target = env.root().join("offline-worktrees-moved");
         std::fs::rename(&offline_target, &moved_target).unwrap();

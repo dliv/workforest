@@ -69,6 +69,11 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
         reason: BRANCH_STATE_HELPER,
     },
     AllowedEdge {
+        from: "commands::rm",
+        to: "commands::branch_state",
+        reason: BRANCH_STATE_HELPER,
+    },
+    AllowedEdge {
         from: "commands::status",
         to: "commands::branch_state",
         reason: BRANCH_STATE_HELPER,

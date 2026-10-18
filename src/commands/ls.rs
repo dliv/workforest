@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::branch_state::{ActualBranchState, WorktreeBranchState};
+use super::branch_state::{read_branch_state, ActualBranchState, WorktreeBranchState};
 use crate::forest::{dedupe_discovered_forests, scan_forest_inventory, ForestInventoryEntry};
 use crate::meta::{ForestMeta, ForestMode, RepoMeta};
 use crate::paths::{ForestName, RepoName};
@@ -191,7 +191,7 @@ fn branch_states(forest_dir: &Path, repos: &[RepoMeta]) -> Vec<(RepoName, Worktr
         .iter()
         .map(|repo| {
             let worktree = forest_dir.join(repo.name.as_str());
-            let branch_state = WorktreeBranchState::read(&worktree, &repo.branch);
+            let branch_state = read_branch_state(&worktree, &repo.branch);
             (repo.name.clone(), branch_state)
         })
         .collect()
@@ -369,6 +369,7 @@ mod tests {
     use super::super::branch_state::ActualBranchState;
     use super::*;
     use crate::commands::{cmd_new, NewInputs};
+    use crate::forest::{read_meta, write_meta};
     use crate::meta::META_FILENAME;
     use crate::paths::ForestName;
     use crate::testutil::{make_meta, make_repo, TestEnv};
@@ -502,8 +503,8 @@ mod tests {
         let dir_b = base.join("review-pr");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
-        meta_a.write(&dir_a.join(".forest-meta.toml")).unwrap();
-        meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
+        write_meta(&meta_a, &dir_a.join(".forest-meta.toml")).unwrap();
+        write_meta(&meta_b, &dir_b.join(".forest-meta.toml")).unwrap();
 
         let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         assert_eq!(result.forests.len(), 2);
@@ -547,7 +548,7 @@ mod tests {
             vec![make_repo("api", "dliv/readable")],
         );
         std::fs::create_dir_all(&readable_dir).unwrap();
-        readable.write(&readable_dir.join(META_FILENAME)).unwrap();
+        write_meta(&readable, &readable_dir.join(META_FILENAME)).unwrap();
         std::fs::create_dir_all(&unreadable_dir).unwrap();
         std::fs::write(unreadable_dir.join(META_FILENAME), "not valid metadata").unwrap();
         std::fs::create_dir_all(&missing_dir).unwrap();
@@ -609,9 +610,7 @@ mod tests {
             vec![make_repo("api", "dliv/hidden-readable")],
         );
         std::fs::create_dir_all(&hidden_readable_dir).unwrap();
-        hidden_readable
-            .write(&hidden_readable_dir.join(META_FILENAME))
-            .unwrap();
+        write_meta(&hidden_readable, &hidden_readable_dir.join(META_FILENAME)).unwrap();
         std::fs::create_dir_all(&hidden_unreadable_dir).unwrap();
         std::fs::write(
             hidden_unreadable_dir.join(META_FILENAME),
@@ -690,8 +689,8 @@ mod tests {
         let dir_b = base_b.join("forest-beta");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
-        meta_a.write(&dir_a.join(".forest-meta.toml")).unwrap();
-        meta_b.write(&dir_b.join(".forest-meta.toml")).unwrap();
+        write_meta(&meta_a, &dir_a.join(".forest-meta.toml")).unwrap();
+        write_meta(&meta_b, &dir_b.join(".forest-meta.toml")).unwrap();
 
         // Scanning both bases should find both forests
         let result = cmd_ls(&[base_a.as_path(), base_b.as_path()], chrono::Utc::now()).unwrap();
@@ -715,7 +714,7 @@ mod tests {
         );
         let dir = base.join("dup");
         std::fs::create_dir_all(&dir).unwrap();
-        meta.write(&dir.join(".forest-meta.toml")).unwrap();
+        write_meta(&meta, &dir.join(".forest-meta.toml")).unwrap();
         std::os::unix::fs::symlink(&base, &base_link).unwrap();
 
         let result = cmd_ls(&[base.as_path(), base_link.as_path()], chrono::Utc::now()).unwrap();
@@ -739,9 +738,7 @@ mod tests {
         );
         let dir_outer = base_outer.join("outer-forest");
         std::fs::create_dir_all(&dir_outer).unwrap();
-        meta_outer
-            .write(&dir_outer.join(".forest-meta.toml"))
-            .unwrap();
+        write_meta(&meta_outer, &dir_outer.join(".forest-meta.toml")).unwrap();
 
         // Forest in inner (nested) base
         let meta_inner = make_meta(
@@ -752,9 +749,7 @@ mod tests {
         );
         let dir_inner = base_inner.join("inner-forest");
         std::fs::create_dir_all(&dir_inner).unwrap();
-        meta_inner
-            .write(&dir_inner.join(".forest-meta.toml"))
-            .unwrap();
+        write_meta(&meta_inner, &dir_inner.join(".forest-meta.toml")).unwrap();
 
         // Scanning both bases: each finds only its direct children, no duplicates
         let result = cmd_ls(
@@ -782,7 +777,7 @@ mod tests {
             vec![make_repo("api", "dliv/inner")],
         );
         std::fs::create_dir_all(&forest_dir).unwrap();
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
         std::fs::write(base_inner.join(META_FILENAME), "not valid metadata").unwrap();
 
         let result = cmd_ls(
@@ -807,7 +802,7 @@ mod tests {
         cmd_new(make_new_inputs("ls-drift"), &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join("ls-drift");
-        let meta = ForestMeta::read(&forest_dir.join(META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         switch_forest_worktree_to_main(&forest_dir, &meta);
 
         let result = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
@@ -898,7 +893,7 @@ mod tests {
             ForestMode::Feature,
             vec![make_repo("not-git", "dliv/lookup-error")],
         );
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];
@@ -954,7 +949,7 @@ mod tests {
             ForestMode::Feature,
             vec![make_repo("not-git", "dliv/lookup-parent")],
         );
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_ls(&[parent.as_ref()], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];
@@ -1004,7 +999,7 @@ mod tests {
             ForestMode::Feature,
             vec![make_repo("missing-repo", "dliv/missing-worktree")],
         );
-        meta.write(&forest_dir.join(META_FILENAME)).unwrap();
+        write_meta(&meta, &forest_dir.join(META_FILENAME)).unwrap();
 
         let result = cmd_ls(&[base], chrono::Utc::now()).unwrap();
         let forest = &result.forests[0];

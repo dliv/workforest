@@ -3,7 +3,8 @@ use serde::Serialize;
 use std::path::Path;
 
 use super::branch_state::{
-    compact_git_error, path_exists_or_symlink, ActualBranchState, WorktreeBranchState,
+    compact_git_error, path_exists_or_symlink, read_branch_state, ActualBranchState,
+    WorktreeBranchState,
 };
 use crate::meta::ForestMeta;
 use crate::paths::{ForestName, RepoName};
@@ -35,7 +36,7 @@ pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> 
 
     for repo in &meta.repos {
         let worktree = forest_dir.join(repo.name.as_str());
-        let branch_state = WorktreeBranchState::read(&worktree, &repo.branch);
+        let branch_state = read_branch_state(&worktree, &repo.branch);
 
         let status = if !path_exists_or_symlink(&worktree) {
             RepoStatusKind::Missing {
@@ -107,6 +108,7 @@ fn branch_lookup_error_matches(actual: &ActualBranchState, message: &str) -> boo
 mod tests {
     use super::*;
     use crate::commands::{cmd_new, NewInputs};
+    use crate::forest::read_meta;
     use crate::meta::ForestMode;
     use crate::testutil::{make_meta, make_repo, setup_forest_with_git_repos, TestEnv};
     use chrono::Utc;
@@ -131,7 +133,7 @@ mod tests {
         cmd_new(make_new_inputs(name), &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join(name);
-        let meta = ForestMeta::read(&forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(crate::meta::META_FILENAME)).unwrap();
         (env, forest_dir.to_path_buf(), meta)
     }
 

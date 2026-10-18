@@ -14,7 +14,7 @@ Status: Accepted
 1. **Write initial meta** with header fields (`name`, `created_at`, `mode`) and an empty `repos` vec (lines 312–320).
 2. **After each successful worktree creation**, push the new `RepoMeta` onto `meta.repos` and rewrite the file (lines 363–371).
 
-"Incremental" means rewriting the full TOML with a growing repos vec each time — not append-only file operations. `ForestMeta::write()` (`src/meta.rs`, lines 41–45) serializes the full struct via `toml::to_string_pretty`.
+"Incremental" means rewriting the full TOML with a growing repos vec each time — not append-only file operations. `write_meta()` (`src/forest.rs`) serializes the full struct via `toml::to_string_pretty`.
 
 This pairs with `new`'s stop-on-failure error policy (ADR 0009). When a worktree cannot be created, execution stops and rolls back: it removes the worktrees this run added and deletes the branches it created that still point at the commit they were created at, then removes the forest directory. When the metadata itself cannot be written, execution returns without rollback, and the meta file on disk reflects the repos created before that write.
 
