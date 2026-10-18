@@ -1,29 +1,65 @@
 //! Crate-internal imports follow the class rules, or a sanctioned allowlist
-//! entry that is still in use.
+//! entry that is still in use. Edges are computed within each crate.
 
 use std::collections::BTreeSet;
 
 use git_forest_policy::classification::{
-    class_allows, module_path, ModuleClass, ALLOWED_EDGES, MODULES,
+    class_allows, crate_modules, module_id, ModuleClass, ModuleId, ALLOWED_EDGES, MODULES,
 };
 use git_forest_policy::repo_root;
 use git_forest_policy::scan::crate_edges;
 
 const SECTION: &str = "see docs/architecture.md, section \"Import direction\"";
 
+/// A fixed module list for the scanner tests, so that they do not depend on which crate holds
+/// which module.
+const SCANNER_MODULES: &[&str] = &[
+    "crate",
+    "channel",
+    "cli",
+    "commands",
+    "commands::branch_state",
+    "commands::reset",
+    "commands::rm",
+    "config",
+    "forest",
+    "git",
+    "meta",
+    "paths",
+    "plan",
+    "plan::rm",
+    "version_check",
+];
+
 fn known_modules() -> Vec<String> {
-    MODULES
+    SCANNER_MODULES
         .iter()
-        .filter_map(|(file, _)| module_path(file))
+        .map(|module| (*module).to_owned())
         .collect()
 }
 
-fn class_of(module: &str) -> ModuleClass {
+fn class_of(crate_dir: &str, module: &str) -> ModuleClass {
     MODULES
         .iter()
-        .find(|(file, _)| module_path(file).as_deref() == Some(module))
+        .find(|(file, _)| {
+            module_id(file).is_some_and(|id| id.crate_dir == crate_dir && id.path == module)
+        })
         .map(|(_, class)| *class)
-        .unwrap_or_else(|| panic!("{module} is not a classified module ({SECTION})"))
+        .unwrap_or_else(|| {
+            panic!(
+                "{} is not a classified module ({SECTION})",
+                label(crate_dir, module)
+            )
+        })
+}
+
+/// A module as messages name it: its path, and its crate's directory outside the root package.
+fn label(crate_dir: &str, module: &str) -> String {
+    if crate_dir.is_empty() {
+        module.to_owned()
+    } else {
+        format!("{module} (in {crate_dir})")
+    }
 }
 
 fn class_rule(class: ModuleClass) -> &'static str {
@@ -39,44 +75,47 @@ fn class_rule(class: ModuleClass) -> &'static str {
     }
 }
 
-/// Every crate-internal import edge of every scanned module, as (from, to).
-fn production_edges() -> BTreeSet<(String, String)> {
-    let known = known_modules();
+/// Every crate-internal import edge of every scanned module, as (crate directory, from, to).
+fn production_edges() -> BTreeSet<(String, String, String)> {
     let mut edges = BTreeSet::new();
     for (file, class) in MODULES {
         if *class == ModuleClass::TestSupport {
             continue;
         }
-        let module = module_path(file).expect("every MODULES entry has a module path");
+        let ModuleId { crate_dir, path } =
+            module_id(file).expect("every MODULES entry has a module identity");
+        let known = crate_modules(MODULES, &crate_dir);
         let source = std::fs::read_to_string(repo_root().join(file))
             .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
-        for target in crate_edges(&module, &source, &known) {
-            edges.insert((module.clone(), target));
+        for target in crate_edges(&path, &source, &known) {
+            edges.insert((crate_dir.clone(), path.clone(), target));
         }
     }
     edges
 }
 
-fn is_allowlisted(from: &str, to: &str) -> bool {
+fn is_allowlisted(crate_dir: &str, from: &str, to: &str) -> bool {
     ALLOWED_EDGES
         .iter()
-        .any(|edge| edge.from == from && edge.to == to)
+        .any(|edge| edge.crate_dir == crate_dir && edge.from == from && edge.to == to)
 }
 
 #[test]
 fn every_import_follows_the_class_rules_or_the_allowlist() {
     let violations: Vec<String> = production_edges()
         .iter()
-        .filter(|(from, to)| {
-            !class_allows(class_of(from), class_of(to)) && !is_allowlisted(from, to)
+        .filter(|(crate_dir, from, to)| {
+            !class_allows(class_of(crate_dir, from), class_of(crate_dir, to))
+                && !is_allowlisted(crate_dir, from, to)
         })
-        .map(|(from, to)| {
-            let from_class = class_of(from);
-            let to_class = class_of(to);
+        .map(|(crate_dir, from, to)| {
+            let from_class = class_of(crate_dir, from);
+            let to_class = class_of(crate_dir, to);
             format!(
-                "{from} -> {to}: a {from_class:?} module imports a {to_class:?} module, but {}. \
+                "{} -> {to}: a {from_class:?} module imports a {to_class:?} module, but {}. \
                  Fix: move the import, or add an ALLOWED_EDGES entry with a reason in \
                  crates/policy/src/classification.rs; {SECTION}.",
+                label(crate_dir, from),
                 class_rule(from_class)
             )
         })
@@ -93,11 +132,18 @@ fn every_allowlisted_edge_is_still_imported() {
     let edges = production_edges();
     let stale: Vec<String> = ALLOWED_EDGES
         .iter()
-        .filter(|edge| !edges.contains(&(edge.from.to_owned(), edge.to.to_owned())))
+        .filter(|edge| {
+            !edges.contains(&(
+                edge.crate_dir.to_owned(),
+                edge.from.to_owned(),
+                edge.to.to_owned(),
+            ))
+        })
         .map(|edge| {
             format!(
                 "{} -> {} is allowlisted but no longer imported; remove its ALLOWED_EDGES entry ({SECTION})",
-                edge.from, edge.to
+                label(edge.crate_dir, edge.from),
+                edge.to
             )
         })
         .collect();
@@ -115,6 +161,29 @@ fn the_scan_sees_the_crate_internal_imports() {
         count >= 10,
         "only {count} crate-internal import edges found; the direction scan is not seeing the imports ({SECTION})"
     );
+}
+
+#[test]
+fn paths_resolve_within_their_own_crate() {
+    let modules: &[(&str, ModuleClass)] = &[
+        ("src/forest.rs", ModuleClass::Shared),
+        ("src/lib.rs", ModuleClass::Root),
+        ("src/meta.rs", ModuleClass::Shared),
+        ("crates/widgets/core/src/draw/mod.rs", ModuleClass::Pure),
+        ("crates/widgets/core/src/lib.rs", ModuleClass::Pure),
+        ("crates/widgets/core/src/meta.rs", ModuleClass::Pure),
+    ];
+    let known = crate_modules(modules, "crates/widgets/core");
+    assert_eq!(known, vec!["draw", "crate", "meta"]);
+    assert_eq!(
+        crate_edges(
+            "draw",
+            "use crate::meta::Widget;\nfn f() { let _ = crate::forest::find(); }",
+            &known
+        ),
+        module_set(&["crate", "meta"])
+    );
+    assert_eq!(crate_modules(modules, ""), vec!["forest", "crate", "meta"]);
 }
 
 #[test]

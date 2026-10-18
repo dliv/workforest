@@ -1,9 +1,12 @@
 //! Pure modules contain none of the effects the purity scan lists and use only allowlisted
-//! dependency crates.
+//! dependency crates of their own package.
 
 use std::collections::BTreeSet;
 
-use git_forest_policy::classification::{ModuleClass, MODULES, PURE_ALLOWED_CRATES};
+use git_forest_policy::classification::{
+    crates_allowed_in_pure_modules, module_id, ModuleClass, MODULES, PURE_ALLOWED_CRATES,
+};
+use git_forest_policy::edges::{CrateClass, CRATES};
 use git_forest_policy::manifest::dependency_crate_names;
 use git_forest_policy::repo_root;
 use git_forest_policy::scan::{ambient_violations, external_crate_references};
@@ -51,11 +54,29 @@ fn planted_effects_are_all_reported() {
     );
 }
 
-/// The dependency names of the root package, read from the root `Cargo.toml`.
-fn root_dependencies() -> BTreeSet<String> {
-    let manifest = std::fs::read_to_string(repo_root().join("Cargo.toml"))
-        .unwrap_or_else(|error| panic!("cannot read the root Cargo.toml: {error}"));
+/// The dependency names of the package at `crate_dir` (empty for the root package), read from
+/// its `Cargo.toml`.
+fn package_dependencies(crate_dir: &str) -> BTreeSet<String> {
+    let path = repo_root().join(crate_dir).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     dependency_crate_names(&manifest)
+}
+
+fn root_dependencies() -> BTreeSet<String> {
+    package_dependencies("")
+}
+
+/// The dependency crates `source` names that are not in `allowed`.
+fn disallowed_crates(
+    source: &str,
+    dependencies: &BTreeSet<String>,
+    allowed: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    external_crate_references(source, dependencies)
+        .difference(allowed)
+        .cloned()
+        .collect()
 }
 
 fn names(list: &[&str]) -> BTreeSet<String> {
@@ -64,24 +85,23 @@ fn names(list: &[&str]) -> BTreeSet<String> {
 
 #[test]
 fn pure_modules_use_only_allowed_crates() {
-    let dependencies = root_dependencies();
+    let allowed = crates_allowed_in_pure_modules(CRATES);
     let mut used = BTreeSet::new();
     let mut problems = Vec::new();
     for (file, class) in MODULES {
         if *class != ModuleClass::Pure {
             continue;
         }
+        let crate_dir = module_id(file)
+            .expect("every MODULES entry has a module identity")
+            .crate_dir;
+        let dependencies = package_dependencies(&crate_dir);
         let source = std::fs::read_to_string(repo_root().join(file))
             .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
-        for name in external_crate_references(&source, &dependencies) {
-            if !PURE_ALLOWED_CRATES
-                .iter()
-                .any(|(allowed, _)| *allowed == name.as_str())
-            {
-                problems.push(format!("{file}: crate {name}"));
-            }
-            used.insert(name);
+        for name in disallowed_crates(&source, &dependencies, &allowed) {
+            problems.push(format!("{file}: crate {name}"));
         }
+        used.extend(external_crate_references(&source, &dependencies));
     }
     for (name, _) in PURE_ALLOWED_CRATES {
         if !used.contains(*name) {
@@ -93,10 +113,33 @@ fn pure_modules_use_only_allowed_crates() {
     assert!(
         problems.is_empty(),
         "Pure modules may use only the dependency crates in PURE_ALLOWED_CRATES \
-         (crates/policy/src/classification.rs); move the call into a Shared or Root module, \
-         or allow the crate there with a reason ({SECTION}):\n  {}",
+         (crates/policy/src/classification.rs) and Pure workspace crates; move the call into a \
+         Shared or Root module, or allow the crate there with a reason ({SECTION}):\n  {}",
         problems.join("\n  ")
     );
+}
+
+#[test]
+fn pure_member_crates_are_allowed_in_pure_modules() {
+    let crates: &[(&str, CrateClass)] = &[
+        ("app", CrateClass::Binary),
+        ("tools", CrateClass::Tooling),
+        ("widgets-core", CrateClass::Pure { feature: "widgets" }),
+    ];
+    let allowed = crates_allowed_in_pure_modules(crates);
+    let dependencies = names(&["anyhow", "ureq", "widgets_core"]);
+    let source = r#"use widgets_core::Widget;
+fn f() -> anyhow::Result<()> {
+    let _ = ureq::get("x");
+    Ok(())
+}
+"#;
+    assert_eq!(
+        disallowed_crates(source, &dependencies, &allowed),
+        names(&["ureq"])
+    );
+    assert!(allowed.contains("widgets_core"));
+    assert!(!allowed.contains("app") && !allowed.contains("tools"));
 }
 
 #[test]

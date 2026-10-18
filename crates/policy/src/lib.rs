@@ -1,9 +1,9 @@
 //! Architecture policy checks for git-forest.
 //!
 //! This crate is test-only: it never builds or runs the product. Its tests read
-//! the product's sources under `src/` and its manifests, and the workspace graph
-//! from `cargo metadata`, and fail when they break a mechanically checkable
-//! architecture rule. Its one dependency, `serde_json`, parses that graph. The
+//! the sources under each product crate's `src/` and the crates' manifests, and
+//! the workspace graph from `cargo metadata`, and fail when they break a
+//! mechanically checkable architecture rule. Its one dependency, `serde_json`, parses that graph. The
 //! rules and their homes are documented in `docs/architecture.md`.
 
 use std::path::{Path, PathBuf};
