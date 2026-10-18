@@ -18,9 +18,9 @@ Concrete implementations:
 
 - `plan_forest() -> ForestPlan` / `execute_plan() -> NewResult` (`src/commands/new.rs`). `ForestPlan` contains `Vec<RepoPlan>`, each with a `CheckoutKind` enum (`ExistingLocal`, `TrackRemote`, `NewBranch`; in `crates/forest/core/src/plan/new.rs`) expressing the command pattern as a Rust enum.
 - `plan_rm() -> RmPlan` / `execute_rm() -> RmResult` (`src/commands/rm.rs`). `RmPlan` contains `Vec<RepoRmPlan>` (in `crates/forest/core/src/plan/rm.rs`) with pre-checked `worktree_exists` and `source_exists` flags.
-- `validate_init_inputs() -> ResolvedConfig` / `write_config_atomic()` (`src/commands/init.rs`) — lighter-weight variant of the same pattern.
+- `validate_init_inputs() -> ResolvedTemplate` (`src/commands/init.rs`) / `write_config_atomic()` (`src/config.rs`) — lighter-weight variant of the same pattern.
 
-`--dry-run` falls out naturally: `cmd_new` calls `plan_forest`, then returns `plan_to_result(&plan, true)` without executing. Same for `cmd_rm`.
+`--dry-run` falls out naturally: `cmd_new_at` (`src/commands/new.rs`) calls `plan_forest`, then returns `plan_to_result(&plan, true)` without executing. Same for `cmd_rm_with_options` and `cmd_rm_all_with_options` (`src/commands/rm.rs`), which return the dry-run result of their plans without executing them. These are the entry points `src/lib.rs` calls; `cmd_new`, `cmd_rm` and `cmd_rm_all` are thin wrappers used by tests.
 
 ## Consequences
 
