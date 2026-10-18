@@ -4,3 +4,4 @@
 
 pub(crate) mod branch_state;
 pub(crate) mod new;
+pub(crate) mod rm;

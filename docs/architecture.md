@@ -43,7 +43,7 @@ Nothing except Root imports Root.
 
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason:
 
-- `commands::ls`, `commands::status`, `commands::rm` and `commands::reset` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
+- `commands::ls`, `commands::status` and `commands::reset` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
 - `commands::reset` imports `commands::rm`, because reset reuses rm's removal plan; whether that plan becomes a shared module is an open question (temporary).
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.

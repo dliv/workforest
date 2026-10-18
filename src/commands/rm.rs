@@ -1,243 +1,23 @@
 use anyhow::{bail, Result};
-use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 
-use super::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
-use crate::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
-use crate::paths::{
-    forest_root_entry_comparison_key, validate_disposable_root_entries, AbsolutePath,
-    DisposableRootEntry, ForestName, RepoName,
+use crate::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
+use crate::paths::{AbsolutePath, ForestName};
+use crate::plan::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
+use crate::plan::rm::{
+    branch_not_fully_merged_error, decide_rm_dry_run, decide_rm_plan, forecast_branch_delete,
+    rejected_rm_result, root_cleanup_results, root_entry_name_matches, worktree_metadata_refusal,
+    worktree_removal_refusal, BranchObservation, ForestDirListing, ForestDirObservation,
+    ForestRootCleanupAction, ForestRootPlan, RepoDryRunObservation, RepoObservation,
+    RmDryRunObservation, RmObservation, RootListing, RootObservation, WorktreeEntry,
 };
-
-// --- Types ---
-
-#[derive(Debug, Clone, Default)]
-pub struct RmOptions {
-    pub force: bool,
-    pub dry_run: bool,
-    pub require_utf8_json_paths: bool,
-    pub additional_disposable_root_entries: Vec<DisposableRootEntry>,
-}
-
-impl RmOptions {
-    pub fn new(force: bool, dry_run: bool) -> Self {
-        Self {
-            force,
-            dry_run,
-            require_utf8_json_paths: false,
-            additional_disposable_root_entries: vec![],
-        }
-    }
-}
-
-pub struct RmPlan {
-    pub forest_name: ForestName,
-    pub forest_dir: PathBuf,
-    pub repo_plans: Vec<RepoRmPlan>,
-    root_plan: ForestRootPlan,
-}
-
-enum ForestRootPlan {
-    Missing,
-    Ready {
-        cleanup_actions: Vec<ForestRootCleanupAction>,
-    },
-    Rejected {
-        error: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ForestRootCleanupAction {
-    RemoveDisposableEntry {
-        entry: DisposableRootEntry,
-        path: PathBuf,
-    },
-    RemoveForceEntry(PathBuf),
-}
-
-pub struct RepoRmPlan {
-    pub name: RepoName,
-    pub worktree_path: PathBuf,
-    pub source: AbsolutePath,
-    pub branch: String,
-    pub base_branch: String,
-    pub remote: Option<String>,
-    pub branch_created: bool,
-    pub branch_state: WorktreeBranchState,
-    pub detached_head_safety: DetachedHeadSafety,
-    pub worktree_exists: bool,
-    pub source_exists: bool,
-    pub has_dirty_files: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DetachedHeadSafety {
-    NotDetached,
-    Preserved,
-    Unpreserved { head: String },
-    Unverified { head: String, error: String },
-}
-
-#[derive(Debug, Serialize)]
-pub struct RmResult {
-    pub forest_name: ForestName,
-    pub forest_dir: PathBuf,
-    pub dry_run: bool,
-    pub force: bool,
-    pub repos: Vec<RepoRmResult>,
-    pub forest_root_cleanup: Vec<ForestRootCleanupResult>,
-    pub forest_dir_removed: bool,
-    pub errors: Vec<CleanupIssue>,
-}
-
-/// One error that a cleanup step of `rm`, `rm --all` or `reset` reported: the step's code,
-/// the message, and the recovery hint when the message carries one (`null` otherwise).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CleanupIssue {
-    pub code: CleanupIssueCode,
-    pub message: String,
-    pub hint: Option<String>,
-}
-
-/// The cleanup step that failed, named for what an agent can act on. Serialized kebab-case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CleanupIssueCode {
-    /// Uncommitted changes block removal.
-    DirtyWorktree,
-    /// A safety check refused removal: an unverified or unreachable detached HEAD, a missing
-    /// source repo, a failed branch lookup, a symlinked or locked worktree, or a dry-run that
-    /// cannot prove removal.
-    WorktreeRefused,
-    /// Git or filesystem removal of a worktree, or of a corrupt worktree directory, failed.
-    WorktreeRemoveFailed,
-    /// Git worktree metadata is stale, could not be inspected, or was not pruned or verified.
-    WorktreeMetadataStale,
-    /// Branch deletion failed, or the branch is checked out elsewhere or could not be checked.
-    BranchDeleteFailed,
-    /// The forest root is a symlink, not a directory, uninspectable or ambiguous.
-    ForestRootRefused,
-    /// A disposable or forced forest-root entry could not be inspected or removed.
-    RootEntryRemoveFailed,
-    /// The forest directory stayed.
-    ForestDirNotRemoved,
-    /// Staging or restoring the forest metadata around removal failed.
-    ForestMetadataStagingFailed,
-    /// `rm --all`: one forest's removal plan was refused.
-    ForestPlanRejected,
-    /// `reset`: a worktree base could not be scanned safely.
-    WorktreeBaseScanFailed,
-    /// `reset`: the config file could not be backed up.
-    ConfigBackupFailed,
-    /// `reset`: the state file could not be deleted.
-    StateDeleteFailed,
-}
-
-/// Where a cleanup message carries its recovery hint.
-const HINT_SEPARATOR: &str = "\n  hint: ";
-
-/// The recovery step for uncommitted changes, shared by every dirty worktree of one result.
-const DIRTY_WORKTREE_HINT: &str =
-    "commit or stash changes, then retry — or use `git forest rm --force`";
-
-impl CleanupIssue {
-    /// An issue from a cleanup message, split at its first `\n  hint: ` into message and hint.
-    pub(super) fn new(code: CleanupIssueCode, text: String) -> Self {
-        match text.split_once(HINT_SEPARATOR) {
-            Some((message, hint)) => Self {
-                code,
-                message: message.to_owned(),
-                hint: Some(hint.to_owned()),
-            },
-            None => Self {
-                code,
-                message: text,
-                hint: None,
-            },
-        }
-    }
-
-    /// A dirty worktree, whose hint is the shared recovery step.
-    fn dirty_worktree(message: String) -> Self {
-        Self {
-            code: CleanupIssueCode::DirtyWorktree,
-            message,
-            hint: Some(DIRTY_WORKTREE_HINT.to_owned()),
-        }
-    }
-}
-
-/// The error lines human output prints for a result's issues: each message, with
-/// `\n  hint: ` and its hint when it has one, except that dirty worktrees share one trailing
-/// `hint: ` entry after all the issues.
-pub fn legacy_error_lines(issues: &[CleanupIssue]) -> Vec<String> {
-    let mut lines: Vec<String> = issues
-        .iter()
-        .map(|issue| match (&issue.code, &issue.hint) {
-            (CleanupIssueCode::DirtyWorktree, _) | (_, None) => issue.message.clone(),
-            (_, Some(hint)) => format!("{}{}{}", issue.message, HINT_SEPARATOR, hint),
-        })
-        .collect();
-    if issues
-        .iter()
-        .any(|issue| issue.code == CleanupIssueCode::DirtyWorktree)
-    {
-        lines.push(format!("hint: {}", DIRTY_WORKTREE_HINT));
-    }
-    lines
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepoRmResult {
-    pub name: RepoName,
-    pub branch_state: WorktreeBranchState,
-    pub worktree_removed: RmOutcome,
-    pub branch_deleted: RmOutcome,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ForestRootCleanupKind {
-    DisposableEntry,
-    Force,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ForestRootCleanupResult {
-    pub path: PathBuf,
-    pub kind: ForestRootCleanupKind,
-    pub removal: RmOutcome,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case", tag = "status")]
-pub enum RmOutcome {
-    Success,
-    Skipped { reason: String },
-    Failed { error: String },
-}
-
-pub enum RmProgress<'a> {
-    RepoStarting { name: &'a RepoName },
-    RepoDone(&'a RepoRmResult),
-}
-
-#[derive(Debug, Serialize)]
-pub struct RmAllResult {
-    pub dry_run: bool,
-    pub force: bool,
-    pub results: Vec<RmResult>,
-    pub total_forests: usize,
-    pub succeeded: usize,
-    pub failed: usize,
-}
-
-pub enum RmAllProgress<'a> {
-    ForestStarting { name: &'a ForestName },
-    ForestDone(&'a ForestName, &'a RmResult),
-}
+pub use crate::plan::rm::{
+    format_repo_done, format_rm_all_human, format_rm_all_summary, format_rm_human,
+    format_rm_summary, legacy_error_lines, CleanupIssue, CleanupIssueCode, DetachedHeadSafety,
+    ForestRootCleanupResult, RepoRmPlan, RepoRmResult, RmAllProgress, RmAllResult, RmOptions,
+    RmOutcome, RmPlan, RmProgress, RmResult,
+};
 
 // --- Planning (read-only) ---
 
@@ -246,296 +26,195 @@ pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
         .expect("validated forest metadata should produce a removal plan")
 }
 
-impl RmPlan {
-    pub(crate) fn root_rejection(&self) -> Option<CleanupIssue> {
-        match &self.root_plan {
-            ForestRootPlan::Rejected { error } => Some(CleanupIssue::new(
-                CleanupIssueCode::ForestRootRefused,
-                error.clone(),
-            )),
-            ForestRootPlan::Missing | ForestRootPlan::Ready { .. } => None,
-        }
-    }
-}
-
+/// Plans a removal: observes the forest, then decides.
 fn plan_rm_with_options(
     forest_dir: &Path,
     meta: &ForestMeta,
     options: &RmOptions,
 ) -> Result<RmPlan> {
-    if options.force && !options.additional_disposable_root_entries.is_empty() {
-        bail!("--force cannot be combined with --discard-root-entry");
-    }
+    let observation = observe_rm(forest_dir, meta, options.dry_run);
+    decide_rm_plan(forest_dir, meta, options, observation)
+}
 
-    let reserved_entries: Vec<&str> = std::iter::once(META_FILENAME)
-        .chain(meta.repos.iter().map(|repo| repo.name.as_str()))
-        .collect();
-    let mut disposable_root_entries: Vec<DisposableRootEntry> = meta
-        .disposable_root_entries
+// --- Observation (read-only) ---
+
+/// Reads what planning a removal needs: the forest root and, for each repo of the forest, its
+/// worktree, branch state, source repo, detached-HEAD safety and dirtiness. For a dry-run it
+/// also reads what the dry-run result is decided from, so nothing is read after planning.
+fn observe_rm(forest_dir: &Path, meta: &ForestMeta, dry_run: bool) -> RmObservation {
+    let repo_names: Vec<&str> = meta.repos.iter().map(|repo| repo.name.as_str()).collect();
+    let root = observe_forest_root(forest_dir, &repo_names);
+    let repos: Vec<RepoObservation> = meta
+        .repos
         .iter()
-        .chain(&options.additional_disposable_root_entries)
-        .cloned()
+        .map(|repo| observe_repo(forest_dir, repo))
         .collect();
-    validate_disposable_root_entries(&disposable_root_entries, reserved_entries.iter().copied())?;
-    disposable_root_entries.sort();
-
-    let root_plan = plan_forest_root(
-        forest_dir,
-        &meta
+    let dry_run = dry_run.then(|| RmDryRunObservation {
+        current_root_refusal: current_forest_root_safety_error(forest_dir),
+        repos: meta
             .repos
             .iter()
-            .map(|repo| repo.name.as_str())
-            .collect::<Vec<_>>(),
-        &disposable_root_entries,
-        options.force,
-        options.require_utf8_json_paths,
-    );
-    validate_json_output_paths(forest_dir, &root_plan, options.require_utf8_json_paths)?;
-
-    let repo_plans = if matches!(root_plan, ForestRootPlan::Rejected { .. }) {
-        vec![]
-    } else {
-        meta.repos
-            .iter()
-            .map(|repo| {
-                let worktree_path = forest_dir.join(repo.name.as_str());
-                assert!(
-                    worktree_path_is_inside_forest(&worktree_path, forest_dir),
-                    "worktree path {:?} is not inside forest dir {:?}",
-                    worktree_path,
-                    forest_dir
-                );
-                let worktree_exists = path_exists_or_symlink(&worktree_path);
-                let worktree_is_symlink = path_is_symlink(&worktree_path);
-                let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
-                let source_exists = repo.source.is_dir();
-                let detached_head_safety =
-                    detached_head_safety(&branch_state, &repo.source, source_exists);
-                let has_dirty_files = worktree_exists
-                    && !worktree_is_symlink
-                    && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
-                    && crate::git::git(
-                        &worktree_path,
-                        &["--no-optional-locks", "status", "--porcelain"],
-                    )
-                    .map(|output| !output.is_empty())
-                    .unwrap_or(false);
-                RepoRmPlan {
-                    name: repo.name.clone(),
-                    worktree_path,
-                    source: repo.source.clone(),
-                    branch: repo.branch.clone(),
-                    base_branch: repo.base_branch.clone(),
-                    remote: repo.remote.clone(),
-                    branch_created: repo.branch_created,
-                    branch_state,
-                    detached_head_safety,
-                    worktree_exists,
-                    source_exists,
-                    has_dirty_files,
-                }
+            .zip(&repos)
+            .map(|(repo, observed)| {
+                observe_repo_dry_run(
+                    &forest_dir.join(repo.name.as_str()),
+                    repo,
+                    observed.source_exists,
+                )
             })
-            .collect()
-    };
-
-    Ok(RmPlan {
-        forest_name: meta.name.clone(),
-        forest_dir: forest_dir.to_path_buf(),
-        repo_plans,
-        root_plan,
-    })
+            .collect(),
+        forest_dir: observe_forest_dir(forest_dir),
+    });
+    RmObservation {
+        root,
+        repos,
+        dry_run,
+    }
 }
 
-fn validate_json_output_paths(
-    forest_dir: &Path,
-    root_plan: &ForestRootPlan,
-    require_utf8_json_paths: bool,
-) -> Result<()> {
-    if !require_utf8_json_paths {
-        return Ok(());
-    }
-    if forest_dir.to_str().is_none() {
-        bail!(
-            "--json refuses forest removal because the forest path is not valid UTF-8\n  hint: rename the forest directory or run without --json"
-        );
-    }
-    if let ForestRootPlan::Ready { cleanup_actions } = root_plan {
-        if cleanup_actions
-            .iter()
-            .any(|action| cleanup_action_path(action).to_str().is_none())
-        {
-            bail!(
-                "--json refuses forest removal because a forest-root entry is not valid UTF-8\n  hint: rename that entry or run without --json"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn plan_forest_root(
-    forest_dir: &Path,
-    repo_names: &[&str],
-    disposable_root_entries: &[DisposableRootEntry],
-    force: bool,
-    require_utf8_json_paths: bool,
-) -> ForestRootPlan {
+fn observe_forest_root(forest_dir: &Path, repo_names: &[&str]) -> RootObservation {
     let metadata = match std::fs::symlink_metadata(forest_dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ForestRootPlan::Missing;
+            return RootObservation::Missing;
         }
-        Err(error) => {
-            return ForestRootPlan::Rejected {
-                error: format!(
-                    "forest removal refused: failed to inspect forest root {}: {}",
-                    forest_dir.display(),
-                    error
-                ),
-            };
-        }
+        Err(error) => return RootObservation::Uninspectable(error.to_string()),
     };
-
     if metadata.file_type().is_symlink() {
-        return ForestRootPlan::Rejected {
-            error: format!(
-                "forest removal refused: {} is a symlink\n  hint: inspect and unlink the forest alias manually",
-                forest_dir.display()
-            ),
-        };
+        return RootObservation::Symlink;
     }
     if !metadata.is_dir() {
-        return ForestRootPlan::Rejected {
-            error: format!(
-                "forest removal refused: {} is not a directory",
-                forest_dir.display()
-            ),
-        };
+        return RootObservation::NotADirectory;
     }
 
-    let entries = match std::fs::read_dir(forest_dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return ForestRootPlan::Rejected {
-                error: format!(
-                    "forest removal refused: failed to inspect forest root {}: {}",
-                    forest_dir.display(),
-                    error
-                ),
-            };
-        }
-    };
-    let mut root_entry_names = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                return ForestRootPlan::Rejected {
-                    error: format!(
-                        "forest removal refused: failed to inspect an entry in {}: {}",
-                        forest_dir.display(),
-                        error
-                    ),
-                };
-            }
-        };
-        root_entry_names.push(entry.file_name());
-    }
-    if require_utf8_json_paths && root_entry_names.iter().any(|name| name.to_str().is_none()) {
-        return ForestRootPlan::Rejected {
-            error: "--json refuses forest removal because a forest-root entry is not valid UTF-8\n  hint: rename that entry before retrying the destructive command".to_string(),
-        };
-    }
-
-    let disposable_capacity = if force {
-        0
-    } else {
-        disposable_root_entries.len()
-    };
-    let mut protected_names = Vec::with_capacity(1 + repo_names.len() + disposable_capacity);
-    protected_names.push(META_FILENAME);
-    protected_names.extend(repo_names.iter().copied());
-    if !force {
-        protected_names.extend(disposable_root_entries.iter().map(|entry| entry.as_str()));
-    }
-    for protected_name in protected_names {
-        if root_entry_names
-            .iter()
-            .filter(|name| root_entry_name_matches(name, protected_name))
-            .count()
-            > 1
-        {
-            return ForestRootPlan::Rejected {
-                error: format!(
-                    "forest removal refused: found multiple root entries equivalent to {}\n  hint: inspect and preserve the intended entry before retrying",
-                    protected_name
-                ),
-            };
-        }
-    }
-
-    let mut present_repo_names = Vec::new();
-    for repo_name in repo_names {
-        match std::fs::symlink_metadata(forest_dir.join(repo_name)) {
-            Ok(_) => present_repo_names.push(*repo_name),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return ForestRootPlan::Rejected {
-                    error: format!(
-                        "forest removal refused: failed to inspect managed repository entry {}: {}",
-                        repo_name, error
-                    ),
-                };
-            }
-        }
-    }
-
-    let cleanup_actions = if force {
-        let mut actions = Vec::new();
-        for name in root_entry_names {
-            if root_entry_name_matches(&name, META_FILENAME)
-                || present_repo_names
-                    .iter()
-                    .any(|repo_name| root_entry_name_matches(&name, repo_name))
-            {
-                continue;
-            }
-            actions.push(ForestRootCleanupAction::RemoveForceEntry(PathBuf::from(
-                name,
-            )));
-        }
-        actions.sort_by(|left, right| cleanup_action_path(left).cmp(cleanup_action_path(right)));
-        actions
-    } else {
-        let mut actions = Vec::new();
-        for entry in disposable_root_entries {
-            if let Some(actual_name) = root_entry_names
-                .iter()
-                .find(|name| root_entry_name_matches(name, entry.as_str()))
-            {
-                actions.push(ForestRootCleanupAction::RemoveDisposableEntry {
-                    entry: entry.clone(),
-                    path: PathBuf::from(actual_name),
-                });
-            }
-        }
-        actions
-    };
-
-    ForestRootPlan::Ready { cleanup_actions }
-}
-
-fn cleanup_action_path(action: &ForestRootCleanupAction) -> &Path {
-    match action {
-        ForestRootCleanupAction::RemoveDisposableEntry { path, .. } => path,
-        ForestRootCleanupAction::RemoveForceEntry(path) => path,
-    }
-}
-
-fn root_entry_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
-    name == std::ffi::OsStr::new(expected)
-        || name.to_str().is_some_and(|name| {
-            forest_root_entry_comparison_key(name) == forest_root_entry_comparison_key(expected)
+    let entries = std::fs::read_dir(forest_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name())
+                        .map_err(|error| error.to_string())
+                })
+                .collect()
         })
+        .map_err(|error| error.to_string());
+    let repo_entries = repo_names
+        .iter()
+        .map(
+            |repo_name| match std::fs::symlink_metadata(forest_dir.join(repo_name)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.to_string()),
+            },
+        )
+        .collect();
+    RootObservation::Directory(RootListing {
+        entries,
+        repo_entries,
+    })
+}
+
+fn observe_repo(forest_dir: &Path, repo: &RepoMeta) -> RepoObservation {
+    let worktree_path = forest_dir.join(repo.name.as_str());
+    let worktree_exists = path_exists_or_symlink(&worktree_path);
+    let worktree_is_symlink = path_is_symlink(&worktree_path);
+    let branch_state = WorktreeBranchState::read(&worktree_path, &repo.branch);
+    let source_exists = repo.source.is_dir();
+    let detached_head_safety = detached_head_safety(&branch_state, &repo.source, source_exists);
+    let has_dirty_files = worktree_exists
+        && !worktree_is_symlink
+        && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
+        && crate::git::git(
+            &worktree_path,
+            &["--no-optional-locks", "status", "--porcelain"],
+        )
+        .map(|output| !output.is_empty())
+        .unwrap_or(false);
+    RepoObservation {
+        worktree_inside_forest: worktree_path_is_inside_forest(&worktree_path, forest_dir),
+        worktree_exists,
+        branch_state,
+        source_exists,
+        detached_head_safety,
+        has_dirty_files,
+    }
+}
+
+/// What a dry-run reads about one repo whose worktree is `worktree_path`: the worktree path's
+/// symlink status and canonical form, the source repo's worktree listing when the source
+/// exists, and the branch facts when the forest created the branch and the source exists.
+fn observe_repo_dry_run(
+    worktree_path: &Path,
+    repo: &RepoMeta,
+    source_exists: bool,
+) -> RepoDryRunObservation {
+    RepoDryRunObservation {
+        worktree_is_symlink: path_is_symlink(worktree_path),
+        worktree_canonical: canonicalize_existing_or_parent(worktree_path),
+        worktrees: source_exists.then(|| observed_worktrees(&repo.source)),
+        branch: (repo.branch_created && source_exists).then(|| BranchObservation {
+            exists: crate::git::ref_exists(&repo.source, &format!("refs/heads/{}", repo.branch))
+                .map_err(|error| error.to_string()),
+            deletes_without_force: branch_delete_would_succeed_without_force(
+                &repo.source,
+                &repo.branch,
+            ),
+            safe_to_force_delete: can_safely_force_delete(
+                &repo.source,
+                &repo.branch,
+                &repo.base_branch,
+                repo.remote.as_deref(),
+            ),
+        }),
+    }
+}
+
+/// `observe_repo_dry_run` for a planned repo, read now. `reset`'s dry-run uses it through the
+/// wrappers below.
+fn observe_planned_repo_dry_run(repo_plan: &RepoRmPlan) -> RepoDryRunObservation {
+    let repo = RepoMeta {
+        name: repo_plan.name.clone(),
+        source: repo_plan.source.clone(),
+        branch: repo_plan.branch.clone(),
+        base_branch: repo_plan.base_branch.clone(),
+        remote: repo_plan.remote.clone(),
+        branch_created: repo_plan.branch_created,
+    };
+    observe_repo_dry_run(&repo_plan.worktree_path, &repo, repo_plan.source_exists)
+}
+
+/// The source repo's worktree listing with each listed path's canonical form.
+fn observed_worktrees(source: &Path) -> Result<Vec<WorktreeEntry>, String> {
+    worktree_list_entries(source).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| WorktreeEntry {
+                canonical: entry.path.canonicalize().ok(),
+                path: entry.path,
+                branch: entry.branch,
+                locked: entry.locked,
+            })
+            .collect()
+    })
+}
+
+fn observe_forest_dir(forest_dir: &Path) -> ForestDirObservation {
+    ForestDirObservation {
+        exists: forest_dir.exists(),
+        is_symlink: path_is_symlink(forest_dir),
+        listing: match std::fs::read_dir(forest_dir) {
+            Ok(entries) => ForestDirListing::Entries(
+                entries
+                    .map(|entry| {
+                        entry
+                            .map(|entry| entry.file_name())
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect(),
+            ),
+            Err(error) => ForestDirListing::Unreadable(error.to_string()),
+        },
+    }
 }
 
 fn detached_head_safety(
@@ -588,54 +267,9 @@ fn detached_head_is_preserved(source: &AbsolutePath, head: &str) -> Result<bool>
     Ok(containing_refs.lines().next().is_some())
 }
 
+/// `worktree_removal_refusal` with the worktree path's symlink status read now, for execution.
 fn worktree_removal_safety_error(repo_plan: &RepoRmPlan, force: bool) -> Option<String> {
-    if force {
-        return None;
-    }
-
-    match &repo_plan.detached_head_safety {
-        DetachedHeadSafety::Unpreserved { head } => {
-            return Some(format!(
-                "{}: detached HEAD {} has commits not reachable from any branch, remote, or tag ref; use `git forest rm --force` to remove anyway",
-                repo_plan.name, head
-            ));
-        }
-        DetachedHeadSafety::Unverified { head, error } => {
-            return Some(format!(
-                "{}: detached HEAD {} reachability could not be verified: {}; use `git forest rm --force` to remove anyway",
-                repo_plan.name,
-                head,
-                compact_git_error(error)
-            ));
-        }
-        DetachedHeadSafety::NotDetached | DetachedHeadSafety::Preserved => {}
-    }
-
-    if !repo_plan.source_exists {
-        return Some(format!(
-            "{}: source repo missing; refusing to remove unverified worktree without `git forest rm --force`",
-            repo_plan.name
-        ));
-    }
-
-    if matches!(
-        repo_plan.branch_state.actual,
-        ActualBranchState::Unknown { .. }
-    ) {
-        return Some(format!(
-            "{}: branch lookup failed; refusing to remove unverified worktree without `git forest rm --force`",
-            repo_plan.name
-        ));
-    }
-
-    if path_is_symlink(&repo_plan.worktree_path) {
-        return Some(format!(
-            "{}: worktree path is a symlink; refusing to remove unverified worktree without `git forest rm --force`",
-            repo_plan.name
-        ));
-    }
-
-    None
+    worktree_removal_refusal(repo_plan, force, path_is_symlink(&repo_plan.worktree_path))
 }
 
 // --- Execution (impure) ---
@@ -800,45 +434,6 @@ pub(crate) fn current_forest_root_safety_error(forest_dir: &Path) -> Option<Stri
             error
         )),
     }
-}
-
-fn rejected_rm_result(plan: &RmPlan, dry_run: bool, force: bool, error: String) -> RmResult {
-    RmResult {
-        forest_name: plan.forest_name.clone(),
-        forest_dir: plan.forest_dir.clone(),
-        dry_run,
-        force,
-        repos: vec![],
-        forest_root_cleanup: vec![],
-        forest_dir_removed: false,
-        errors: vec![CleanupIssue::new(
-            CleanupIssueCode::ForestRootRefused,
-            error,
-        )],
-    }
-}
-
-fn root_cleanup_results(
-    plan: &RmPlan,
-    mut outcome: impl FnMut(&ForestRootCleanupAction) -> RmOutcome,
-) -> Vec<ForestRootCleanupResult> {
-    let ForestRootPlan::Ready { cleanup_actions } = &plan.root_plan else {
-        return vec![];
-    };
-
-    cleanup_actions
-        .iter()
-        .map(|action| ForestRootCleanupResult {
-            path: cleanup_action_path(action).to_path_buf(),
-            kind: match action {
-                ForestRootCleanupAction::RemoveDisposableEntry { .. } => {
-                    ForestRootCleanupKind::DisposableEntry
-                }
-                ForestRootCleanupAction::RemoveForceEntry(_) => ForestRootCleanupKind::Force,
-            },
-            removal: outcome(action),
-        })
-        .collect()
 }
 
 fn execute_forest_root_cleanup(
@@ -1387,116 +982,16 @@ pub(super) fn delete_branch(
     }
 }
 
+/// The dry-run branch-deletion forecast for one planned repo, observing its facts first.
+/// `reset`'s dry-run uses it.
 pub(super) fn plan_branch_delete_outcome(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,
     errors: &mut Vec<CleanupIssue>,
 ) -> RmOutcome {
-    if !wt_succeeded {
-        return RmOutcome::Skipped {
-            reason: "worktree not removed".to_string(),
-        };
-    }
-
-    if !repo_plan.branch_created {
-        return RmOutcome::Skipped {
-            reason: "branch not created by forest".to_string(),
-        };
-    }
-
-    if !repo_plan.source_exists {
-        return RmOutcome::Skipped {
-            reason: "source repo missing".to_string(),
-        };
-    }
-
-    let refname = format!("refs/heads/{}", repo_plan.branch);
-    if let Ok(false) = crate::git::ref_exists(&repo_plan.source, &refname) {
-        return RmOutcome::Skipped {
-            reason: "branch already deleted".to_string(),
-        };
-    }
-
-    if let Some(msg) = branch_checkout_conflict_error(repo_plan) {
-        errors.push(CleanupIssue::new(
-            CleanupIssueCode::BranchDeleteFailed,
-            msg.clone(),
-        ));
-        return RmOutcome::Failed { error: msg };
-    }
-
-    if force
-        || branch_delete_would_succeed_without_force(&repo_plan.source, &repo_plan.branch)
-        || can_safely_force_delete(
-            &repo_plan.source,
-            &repo_plan.branch,
-            &repo_plan.base_branch,
-            repo_plan.remote.as_deref(),
-        )
-    {
-        return RmOutcome::Success;
-    }
-
-    let msg = branch_not_fully_merged_error(
-        repo_plan,
-        Some(
-            "dry-run could not prove the branch is merged into HEAD, the base branch, \
-             the base remote-tracking ref, or its upstream",
-        ),
-    );
-    errors.push(CleanupIssue::new(
-        CleanupIssueCode::BranchDeleteFailed,
-        msg.clone(),
-    ));
-    RmOutcome::Failed { error: msg }
-}
-
-fn branch_checkout_conflict_error(repo_plan: &RepoRmPlan) -> Option<String> {
-    match branch_checked_out_elsewhere(repo_plan) {
-        Ok(Some(checkout_path)) => Some(format!(
-            "{}: branch {:?} is checked out at {}; dry-run cannot delete a checked-out branch",
-            repo_plan.name,
-            repo_plan.branch,
-            checkout_path.display()
-        )),
-        Ok(None) => None,
-        Err(e) => Some(format!(
-            "{}: could not inspect worktrees before branch deletion: {}",
-            repo_plan.name,
-            compact_git_error(&e)
-        )),
-    }
-}
-
-fn branch_checked_out_elsewhere(repo_plan: &RepoRmPlan) -> Result<Option<PathBuf>, String> {
-    let expected_branch_ref = format!("refs/heads/{}", repo_plan.branch);
-    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
-    for entry in worktree_list_entries(&repo_plan.source)? {
-        if entry.branch.as_deref() == Some(expected_branch_ref.as_str())
-            && !worktree_paths_match(
-                &entry.path,
-                &repo_plan.worktree_path,
-                target_canonical.as_deref(),
-            )
-        {
-            return Ok(Some(entry.path));
-        }
-    }
-
-    Ok(None)
-}
-
-fn branch_not_fully_merged_error(repo_plan: &RepoRmPlan, detail: Option<&str>) -> String {
-    let detail = detail
-        .map(|detail| format!(" ({})", detail))
-        .unwrap_or_default();
-    format!(
-        "{}: branch {:?} is not fully merged{}\n  \
-         hint: if the branch was merged (e.g. squash-merge) and the remote \
-         branch was deleted, use `git forest rm --force`",
-        repo_plan.name, repo_plan.branch, detail,
-    )
+    let observed = observe_planned_repo_dry_run(repo_plan);
+    forecast_branch_delete(repo_plan, force, wt_succeeded, &observed, errors)
 }
 
 fn branch_delete_would_succeed_without_force(source: &AbsolutePath, branch: &str) -> bool {
@@ -1900,263 +1395,24 @@ fn inspect_forest_dir(forest_dir: &Path) -> std::result::Result<ForestDirInspect
 
 // --- Orchestrator ---
 
+/// The dry-run result of a plan made for a dry-run: its paths are checked as execution checks
+/// them, then the result is decided from what planning observed.
 fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
     validate_rm_plan_paths(plan);
-
-    if let Some(error) = planned_or_current_root_safety_error(plan) {
-        return rejected_rm_result(plan, true, force, error);
-    }
-
-    let has_dirty = !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
-
-    let mut errors = Vec::new();
-    let repos: Vec<RepoRmResult> = plan
-        .repo_plans
-        .iter()
-        .map(|rp| {
-            if has_dirty {
-                // Dirty preflight would block all removal
-                let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
-                    let msg = format!("{}: worktree has uncommitted changes", rp.name);
-                    errors.push(CleanupIssue::dirty_worktree(msg.clone()));
-                    (
-                        RmOutcome::Failed { error: msg },
-                        RmOutcome::Skipped {
-                            reason: "worktree not removed".to_string(),
-                        },
-                    )
-                } else {
-                    (
-                        RmOutcome::Skipped {
-                            reason: "blocked by dirty repos".to_string(),
-                        },
-                        RmOutcome::Skipped {
-                            reason: "blocked by dirty repos".to_string(),
-                        },
-                    )
-                };
-                return RepoRmResult {
-                    name: rp.name.clone(),
-                    branch_state: rp.branch_state.clone(),
-                    worktree_removed,
-                    branch_deleted,
-                };
-            }
-
-            let worktree_removed = if path_is_symlink(&rp.worktree_path) {
-                if force {
-                    if let Some(msg) = symlink_worktree_dry_run_error(rp) {
-                        errors.push(CleanupIssue::new(
-                            CleanupIssueCode::WorktreeRefused,
-                            msg.clone(),
-                        ));
-                        RmOutcome::Failed { error: msg }
-                    } else {
-                        RmOutcome::Success
-                    }
-                } else {
-                    let msg = worktree_removal_safety_error(rp, force)
-                        .expect("non-force symlink worktree should have a safety error");
-                    errors.push(CleanupIssue::new(
-                        CleanupIssueCode::WorktreeRefused,
-                        msg.clone(),
-                    ));
-                    RmOutcome::Failed { error: msg }
-                }
-            } else if let Some(msg) = worktree_metadata_dry_run_error(rp, force) {
-                errors.push(CleanupIssue::new(
-                    CleanupIssueCode::WorktreeRefused,
-                    msg.clone(),
-                ));
-                RmOutcome::Failed { error: msg }
-            } else if !rp.worktree_exists {
-                RmOutcome::Skipped {
-                    reason: "worktree already missing".to_string(),
-                }
-            } else if let Some(msg) = worktree_removal_safety_error(rp, force) {
-                errors.push(CleanupIssue::new(
-                    CleanupIssueCode::WorktreeRefused,
-                    msg.clone(),
-                ));
-                RmOutcome::Failed { error: msg }
-            } else {
-                RmOutcome::Success
-            };
-
-            let wt_succeeded = !matches!(&worktree_removed, RmOutcome::Failed { .. });
-            let branch_deleted = plan_branch_delete_outcome(rp, force, wt_succeeded, &mut errors);
-
-            RepoRmResult {
-                name: rp.name.clone(),
-                branch_state: rp.branch_state.clone(),
-                worktree_removed,
-                branch_deleted,
-            }
-        })
-        .collect();
-
-    let mut forest_root_cleanup = Vec::new();
-    if errors.is_empty() {
-        forest_root_cleanup = root_cleanup_results(plan, |_| RmOutcome::Success);
-        if let Some(msg) = forest_dir_dry_run_cleanup_error(plan, &repos, force) {
-            errors.push(CleanupIssue::new(
-                CleanupIssueCode::ForestDirNotRemoved,
-                msg,
-            ));
-        }
-    }
-
-    let forest_dir_removed = errors.is_empty();
-
-    RmResult {
-        forest_name: plan.forest_name.clone(),
-        forest_dir: plan.forest_dir.clone(),
-        dry_run: true,
-        force,
-        repos,
-        forest_root_cleanup,
-        forest_dir_removed,
-        errors,
-    }
+    let observation = plan
+        .dry_run
+        .as_ref()
+        .expect("a plan made for a dry-run carries its dry-run observation");
+    decide_rm_dry_run(plan, observation, force)
 }
 
+/// The dry-run worktree-metadata refusal for one planned repo, observing its facts first.
+/// `reset`'s dry-run uses it.
 pub(super) fn worktree_metadata_dry_run_error(
     repo_plan: &RepoRmPlan,
     force: bool,
 ) -> Option<String> {
-    if !repo_plan.source_exists {
-        return None;
-    }
-
-    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
-    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
-        Ok(Some(metadata)) if metadata.locked => Some(format!(
-            "{}: refusing removal because git worktree metadata is locked",
-            repo_plan.name
-        )),
-        Ok(Some(_)) if !repo_plan.worktree_exists && !force => Some(format!(
-            "{}: source repo still lists missing worktree metadata for {}; dry-run cannot prove branch deletion",
-            repo_plan.name,
-            repo_plan.worktree_path.display()
-        )),
-        Ok(None)
-            if repo_plan.worktree_exists
-                && !matches!(repo_plan.branch_state.actual, ActualBranchState::Unknown { .. }) =>
-        {
-            Some(format!(
-                "{}: source repo does not list worktree metadata for {}; dry-run cannot prove removal",
-                repo_plan.name,
-                repo_plan.worktree_path.display()
-            ))
-        }
-        Ok(_) => None,
-        Err(e) => Some(format!(
-            "{}: could not inspect git worktree metadata before removal: {}",
-            repo_plan.name,
-            compact_git_error(&e)
-        )),
-    }
-}
-
-fn symlink_worktree_dry_run_error(repo_plan: &RepoRmPlan) -> Option<String> {
-    if !repo_plan.source_exists {
-        return None;
-    }
-
-    let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
-    match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
-        Ok(Some(metadata)) if metadata.locked => Some(format!(
-            "{}: refusing removal because git worktree metadata is locked",
-            repo_plan.name
-        )),
-        Ok(_) => None,
-        Err(e) => Some(format!(
-            "{}: could not inspect git worktree metadata before removal: {}",
-            repo_plan.name,
-            compact_git_error(&e)
-        )),
-    }
-}
-
-fn forest_dir_dry_run_cleanup_error(
-    plan: &RmPlan,
-    repos: &[RepoRmResult],
-    force: bool,
-) -> Option<String> {
-    if force || !plan.forest_dir.exists() {
-        return None;
-    }
-
-    if path_is_symlink(&plan.forest_dir) {
-        return Some(format!(
-            "forest directory not removed: {} is a symlink",
-            plan.forest_dir.display()
-        ));
-    }
-
-    let removable_repo_names: std::collections::BTreeSet<String> = repos
-        .iter()
-        .filter_map(|repo| match &repo.worktree_removed {
-            RmOutcome::Success => Some(forest_root_entry_comparison_key(repo.name.as_str())),
-            RmOutcome::Skipped { .. } | RmOutcome::Failed { .. } => None,
-        })
-        .collect();
-    let disposable_entry_paths: std::collections::BTreeSet<PathBuf> = match &plan.root_plan {
-        ForestRootPlan::Ready { cleanup_actions } => cleanup_actions
-            .iter()
-            .filter_map(|action| match action {
-                ForestRootCleanupAction::RemoveDisposableEntry { path, .. } => Some(path.clone()),
-                ForestRootCleanupAction::RemoveForceEntry(_) => None,
-            })
-            .collect(),
-        ForestRootPlan::Missing | ForestRootPlan::Rejected { .. } => {
-            std::collections::BTreeSet::new()
-        }
-    };
-
-    let entries = match std::fs::read_dir(&plan.forest_dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            return Some(format!(
-                "forest directory not removed (not empty): failed to inspect {}: {}",
-                plan.forest_dir.display(),
-                e
-            ));
-        }
-    };
-
-    let mut remaining = Vec::new();
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return Some(format!(
-                "forest directory not removed (not empty): failed to inspect an entry in {}",
-                plan.forest_dir.display()
-            ));
-        };
-        let file_name = entry.file_name();
-        let comparison_key = file_name.to_str().map(forest_root_entry_comparison_key);
-        if disposable_entry_paths.contains(&PathBuf::from(&file_name)) {
-            continue;
-        }
-        if root_entry_name_matches(&file_name, META_FILENAME)
-            || comparison_key
-                .as_ref()
-                .is_some_and(|key| removable_repo_names.contains(key))
-        {
-            continue;
-        }
-        remaining.push(file_name.to_string_lossy().into_owned());
-    }
-
-    if remaining.is_empty() {
-        None
-    } else {
-        remaining.sort();
-        Some(format!(
-            "forest directory not removed (not empty): would still contain {}",
-            remaining.join(", ")
-        ))
-    }
+    worktree_metadata_refusal(repo_plan, force, &observe_planned_repo_dry_run(repo_plan))
 }
 
 #[cfg(test)]
@@ -2188,209 +1444,6 @@ pub fn cmd_rm_with_options(
     }
 
     Ok(execute_rm(&plan, options.force, on_progress))
-}
-
-fn format_branch_state_warning_suffix(branch_state: &WorktreeBranchState) -> String {
-    branch_state
-        .drift_message()
-        .or_else(|| branch_state.lookup_error_message())
-        .map(|message| format!(" [{}]", message))
-        .unwrap_or_default()
-}
-
-pub fn format_rm_human(result: &RmResult) -> String {
-    let mut lines = Vec::new();
-
-    if result.dry_run {
-        lines.push("Dry run — no changes will be made.".to_string());
-        lines.push(String::new());
-        if result.errors.is_empty() && result.forest_dir_removed {
-            lines.push(format!(
-                "Would remove forest {:?}",
-                result.forest_name.as_str()
-            ));
-        } else {
-            lines.push(format!(
-                "Removal blocked for forest {:?}",
-                result.forest_name.as_str()
-            ));
-        }
-    } else if result.errors.is_empty() {
-        lines.push(format!("Removed forest {:?}", result.forest_name.as_str()));
-    } else {
-        lines.push(format!(
-            "Removed forest {:?} (with errors)",
-            result.forest_name.as_str()
-        ));
-    }
-
-    for repo in &result.repos {
-        let wt = match &repo.worktree_removed {
-            RmOutcome::Success => {
-                if result.dry_run {
-                    "remove worktree".to_string()
-                } else {
-                    "worktree removed".to_string()
-                }
-            }
-            RmOutcome::Skipped { reason } => format!("worktree skipped ({})", reason),
-            RmOutcome::Failed { .. } => "worktree FAILED".to_string(),
-        };
-
-        let br = match &repo.branch_deleted {
-            RmOutcome::Success => {
-                if result.dry_run {
-                    ", delete branch".to_string()
-                } else {
-                    ", branch deleted".to_string()
-                }
-            }
-            RmOutcome::Skipped { reason } => {
-                if reason == "branch not created by forest" {
-                    " (branch not ours)".to_string()
-                } else {
-                    format!(", branch skipped ({})", reason)
-                }
-            }
-            RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
-        };
-
-        lines.push(format!(
-            "  {}: {}{}{}",
-            repo.name,
-            wt,
-            br,
-            format_branch_state_warning_suffix(&repo.branch_state)
-        ));
-    }
-
-    lines.extend(format_forest_root_cleanup(result));
-
-    if result.dry_run {
-        if result.forest_dir_removed {
-            lines.push("  Would remove forest directory".to_string());
-        } else {
-            lines.push("  Would not remove forest directory".to_string());
-        }
-    } else if result.forest_dir_removed {
-        lines.push("Forest directory removed.".to_string());
-    } else {
-        lines.push("Forest directory not removed (not empty).".to_string());
-    }
-
-    if !result.errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Errors:".to_string());
-        for error in legacy_error_lines(&result.errors) {
-            lines.push(format!("  {}", format_error_single_line(&error)));
-        }
-    }
-
-    lines.join("\n")
-}
-
-pub fn format_repo_done(repo: &RepoRmResult) -> String {
-    let wt = match &repo.worktree_removed {
-        RmOutcome::Success => "worktree removed".to_string(),
-        RmOutcome::Skipped { reason } => format!("worktree skipped ({})", reason),
-        RmOutcome::Failed { .. } => "worktree FAILED".to_string(),
-    };
-
-    let br = match &repo.branch_deleted {
-        RmOutcome::Success => ", branch deleted".to_string(),
-        RmOutcome::Skipped { reason } => {
-            if reason == "branch not created by forest" {
-                " (branch not ours)".to_string()
-            } else {
-                format!(", branch skipped ({})", reason)
-            }
-        }
-        RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
-    };
-
-    format!(
-        "{}{}{}",
-        wt,
-        br,
-        format_branch_state_warning_suffix(&repo.branch_state)
-    )
-}
-
-pub fn format_rm_summary(result: &RmResult) -> String {
-    let mut lines = Vec::new();
-
-    lines.extend(format_forest_root_cleanup(result));
-
-    if result.forest_dir_removed {
-        lines.push("Forest directory removed.".to_string());
-    } else {
-        lines.push("Forest directory not removed (not empty).".to_string());
-    }
-
-    if !result.errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Errors:".to_string());
-        for error in legacy_error_lines(&result.errors) {
-            lines.push(format!("  {}", format_error_single_line(&error)));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn format_forest_root_cleanup(result: &RmResult) -> Vec<String> {
-    result
-        .forest_root_cleanup
-        .iter()
-        .map(|cleanup| {
-            let action = match (&cleanup.kind, &cleanup.removal, result.dry_run) {
-                (ForestRootCleanupKind::DisposableEntry, RmOutcome::Success, true) => {
-                    "Would discard forest-root entry"
-                }
-                (ForestRootCleanupKind::DisposableEntry, RmOutcome::Success, false) => {
-                    "Discarded forest-root entry"
-                }
-                (ForestRootCleanupKind::Force, RmOutcome::Success, true) => {
-                    "Would force-remove forest-root entry"
-                }
-                (ForestRootCleanupKind::Force, RmOutcome::Success, false) => {
-                    "Force-removed forest-root entry"
-                }
-                (_, RmOutcome::Skipped { .. }, true) => "Would skip missing forest-root entry",
-                (_, RmOutcome::Skipped { .. }, false) => "Skipped forest-root entry",
-                (_, RmOutcome::Failed { .. }, _) => "Failed to remove forest-root entry",
-            };
-            format!("  {} {}", action, cleanup.path.display())
-        })
-        .collect()
-}
-
-fn format_error_single_line(error: &str) -> String {
-    if error.contains("stderr:") {
-        let compact = compact_git_error(error);
-        return match compact_hint(error).filter(|hint| !compact.contains(hint)) {
-            Some(hint) => format!("{}; {}", compact, hint),
-            None => compact,
-        };
-    }
-
-    error
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn compact_hint(error: &str) -> Option<String> {
-    let hint_lines: Vec<&str> = error
-        .lines()
-        .map(str::trim)
-        .skip_while(|line| !line.starts_with("hint:"))
-        .filter(|line| !line.is_empty())
-        .collect();
-
-    (!hint_lines.is_empty()).then(|| hint_lines.join(" "))
 }
 
 // --- rm --all ---
@@ -2549,58 +1602,6 @@ pub fn cmd_rm_all_with_options(
     Ok(execute_rm_all(&all_plan, &options, on_progress))
 }
 
-pub fn format_rm_all_human(result: &RmAllResult) -> String {
-    let mut lines = Vec::new();
-
-    if result.dry_run {
-        lines.push("Dry run — no changes will be made.".to_string());
-        lines.push(String::new());
-    }
-
-    for r in &result.results {
-        lines.push(format_rm_human(r));
-        lines.push(String::new());
-    }
-
-    if result.dry_run {
-        lines.push(format!(
-            "Would remove {}/{} forest(s).",
-            result.succeeded, result.total_forests
-        ));
-    } else {
-        lines.push(format!(
-            "Removed {}/{} forest(s).",
-            result.succeeded, result.total_forests
-        ));
-    }
-
-    lines.join("\n")
-}
-
-pub fn format_rm_all_summary(result: &RmAllResult) -> String {
-    let mut lines = Vec::new();
-
-    lines.push(format!(
-        "Removed {}/{} forest(s).",
-        result.succeeded, result.total_forests
-    ));
-
-    let all_errors: Vec<String> = result
-        .results
-        .iter()
-        .flat_map(|r| legacy_error_lines(&r.errors))
-        .collect();
-    if !all_errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Errors:".to_string());
-        for error in &all_errors {
-            lines.push(format!("  {}", format_error_single_line(error)));
-        }
-    }
-
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::branch_state::ActualBranchState;
@@ -2610,7 +1611,8 @@ mod tests {
     use crate::commands::NewInputs;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
     use crate::meta::ForestMode;
-    use crate::paths::{AbsolutePath, ForestName, RepoName};
+    use crate::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
+    use crate::plan::rm::{validate_json_output_paths, ForestRootCleanupKind};
     use crate::testutil::{make_meta, make_repo, TestEnv};
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
@@ -3721,6 +2723,7 @@ mod tests {
                     ForestRootCleanupAction::RemoveForceEntry(PathBuf::from("removable")),
                 ],
             },
+            dry_run: None,
         };
         let mut errors = Vec::new();
 
@@ -6122,6 +5125,7 @@ mod tests {
                 has_dirty_files: false,
             }],
             root_plan: ForestRootPlan::Missing,
+            dry_run: None,
         };
         execute_rm(&plan, false, None);
     }
@@ -6147,6 +5151,7 @@ mod tests {
                 has_dirty_files: false,
             }],
             root_plan: ForestRootPlan::Missing,
+            dry_run: None,
         };
         execute_rm(&plan, false, None);
     }
@@ -6172,6 +5177,7 @@ mod tests {
                 has_dirty_files: true,
             }],
             root_plan: ForestRootPlan::Missing,
+            dry_run: None,
         };
         execute_rm(&plan, false, None);
     }
@@ -6197,6 +5203,7 @@ mod tests {
                 has_dirty_files: true,
             }],
             root_plan: ForestRootPlan::Missing,
+            dry_run: None,
         };
         plan_to_dry_run_result(&plan, false);
     }

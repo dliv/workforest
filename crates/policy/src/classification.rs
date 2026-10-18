@@ -44,6 +44,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/plan/branch_state.rs", ModuleClass::Pure),
     ("src/plan/mod.rs", ModuleClass::Pure),
     ("src/plan/new.rs", ModuleClass::Pure),
+    ("src/plan/rm.rs", ModuleClass::Pure),
     ("src/testutil.rs", ModuleClass::TestSupport),
     ("src/version_check.rs", ModuleClass::Shell),
 ];
@@ -68,11 +69,6 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     },
     AllowedEdge {
         from: "commands::status",
-        to: "commands::branch_state",
-        reason: BRANCH_STATE_HELPER,
-    },
-    AllowedEdge {
-        from: "commands::rm",
         to: "commands::branch_state",
         reason: BRANCH_STATE_HELPER,
     },
