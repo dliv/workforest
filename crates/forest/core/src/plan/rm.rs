@@ -39,12 +39,12 @@ pub struct RmPlan {
     pub forest_name: ForestName,
     pub forest_dir: PathBuf,
     pub repo_plans: Vec<RepoRmPlan>,
-    pub(crate) root_plan: ForestRootPlan,
+    pub root_plan: ForestRootPlan,
     /// What a dry-run observed while planning; `None` unless the plan was made for a dry-run.
-    pub(crate) dry_run: Option<RmDryRunObservation>,
+    pub dry_run: Option<RmDryRunObservation>,
 }
 
-pub(crate) enum ForestRootPlan {
+pub enum ForestRootPlan {
     Missing,
     Ready {
         cleanup_actions: Vec<ForestRootCleanupAction>,
@@ -55,7 +55,7 @@ pub(crate) enum ForestRootPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ForestRootCleanupAction {
+pub enum ForestRootCleanupAction {
     RemoveDisposableEntry {
         entry: DisposableRootEntry,
         path: PathBuf,
@@ -150,7 +150,7 @@ const DIRTY_WORKTREE_HINT: &str =
 
 impl CleanupIssue {
     /// An issue from a cleanup message, split at its first `\n  hint: ` into message and hint.
-    pub(crate) fn new(code: CleanupIssueCode, text: String) -> Self {
+    pub fn new(code: CleanupIssueCode, text: String) -> Self {
         match text.split_once(HINT_SEPARATOR) {
             Some((message, hint)) => Self {
                 code,
@@ -166,7 +166,7 @@ impl CleanupIssue {
     }
 
     /// A dirty worktree, whose hint is the shared recovery step.
-    pub(crate) fn dirty_worktree(message: String) -> Self {
+    pub fn dirty_worktree(message: String) -> Self {
         Self {
             code: CleanupIssueCode::DirtyWorktree,
             message,
@@ -246,7 +246,7 @@ pub enum RmAllProgress<'a> {
 }
 
 impl RmPlan {
-    pub(crate) fn root_rejection(&self) -> Option<CleanupIssue> {
+    pub fn root_rejection(&self) -> Option<CleanupIssue> {
         match &self.root_plan {
             ForestRootPlan::Rejected { error } => Some(CleanupIssue::new(
                 CleanupIssueCode::ForestRootRefused,
@@ -257,7 +257,7 @@ impl RmPlan {
     }
 }
 
-pub(crate) fn validate_json_output_paths(
+pub fn validate_json_output_paths(
     forest_dir: &Path,
     root_plan: &ForestRootPlan,
     require_utf8_json_paths: bool,
@@ -283,26 +283,21 @@ pub(crate) fn validate_json_output_paths(
     Ok(())
 }
 
-pub(crate) fn cleanup_action_path(action: &ForestRootCleanupAction) -> &Path {
+pub fn cleanup_action_path(action: &ForestRootCleanupAction) -> &Path {
     match action {
         ForestRootCleanupAction::RemoveDisposableEntry { path, .. } => path,
         ForestRootCleanupAction::RemoveForceEntry(path) => path,
     }
 }
 
-pub(crate) fn root_entry_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
+pub fn root_entry_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
     name == std::ffi::OsStr::new(expected)
         || name.to_str().is_some_and(|name| {
             forest_root_entry_comparison_key(name) == forest_root_entry_comparison_key(expected)
         })
 }
 
-pub(crate) fn rejected_rm_result(
-    plan: &RmPlan,
-    dry_run: bool,
-    force: bool,
-    error: String,
-) -> RmResult {
+pub fn rejected_rm_result(plan: &RmPlan, dry_run: bool, force: bool, error: String) -> RmResult {
     RmResult {
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
@@ -318,7 +313,7 @@ pub(crate) fn rejected_rm_result(
     }
 }
 
-pub(crate) fn root_cleanup_results(
+pub fn root_cleanup_results(
     plan: &RmPlan,
     mut outcome: impl FnMut(&ForestRootCleanupAction) -> RmOutcome,
 ) -> Vec<ForestRootCleanupResult> {
@@ -341,10 +336,7 @@ pub(crate) fn root_cleanup_results(
         .collect()
 }
 
-pub(crate) fn branch_not_fully_merged_error(
-    repo_plan: &RepoRmPlan,
-    detail: Option<&str>,
-) -> String {
+pub fn branch_not_fully_merged_error(repo_plan: &RepoRmPlan, detail: Option<&str>) -> String {
     let detail = detail
         .map(|detail| format!(" ({})", detail))
         .unwrap_or_default();
@@ -485,7 +477,7 @@ pub fn decide_rm_plan(
 /// listed, holds a non-UTF-8 entry under `--json` or ambiguous protected entries, or has an
 /// uninspectable repo entry; otherwise the disposable (or, with `--force`, unmanaged) entries
 /// to remove.
-pub(crate) fn decide_forest_root(
+pub fn decide_forest_root(
     forest_dir: &Path,
     repo_names: &[&str],
     disposable_root_entries: &[DisposableRootEntry],
@@ -638,7 +630,7 @@ pub(crate) fn decide_forest_root(
 /// Why removing a repo's worktree is refused without `--force`, if it is: a detached HEAD whose
 /// commits are not preserved or cannot be verified, a missing source repo, a failed branch
 /// lookup, or a symlinked worktree path (`worktree_is_symlink`, observed by the caller).
-pub(crate) fn worktree_removal_refusal(
+pub fn worktree_removal_refusal(
     repo_plan: &RepoRmPlan,
     force: bool,
     worktree_is_symlink: bool,
@@ -928,7 +920,7 @@ fn listed_worktree_lock(
 /// Why a dry-run cannot prove a worktree's removal from git's worktree metadata, if it cannot:
 /// locked metadata, metadata that still lists a missing worktree, metadata that does not list
 /// an existing one, or metadata that cannot be read. Nothing when the source repo is missing.
-pub(crate) fn worktree_metadata_refusal(
+pub fn worktree_metadata_refusal(
     repo_plan: &RepoRmPlan,
     force: bool,
     observed: &RepoDryRunObservation,
@@ -1008,7 +1000,7 @@ fn branch_checked_out_elsewhere(
 /// forest did not create the branch, the source repo is missing or the branch is already gone;
 /// refused when the branch is checked out elsewhere or cannot be proven merged; otherwise a
 /// success. Refusals are appended to `errors`.
-pub(crate) fn forecast_branch_delete(
+pub fn forecast_branch_delete(
     repo_plan: &RepoRmPlan,
     force: bool,
     wt_succeeded: bool,

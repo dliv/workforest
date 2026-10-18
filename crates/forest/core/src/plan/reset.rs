@@ -115,36 +115,33 @@ pub struct ForestObservation {
 }
 
 /// One forest of a reset plan.
-pub(crate) struct ForestInfo {
-    pub(crate) name: String,
-    pub(crate) path: PathBuf,
-    pub(crate) repos: Vec<RepoRmPlan>,
-    pub(crate) root_rejection: Option<CleanupIssue>,
+pub struct ForestInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub repos: Vec<RepoRmPlan>,
+    pub root_rejection: Option<CleanupIssue>,
     /// What a dry-run of the forest's removal read while planning; present only when the run
     /// previews.
-    pub(crate) dry_run: Option<RmDryRunObservation>,
+    pub dry_run: Option<RmDryRunObservation>,
     /// Whether the forest path existed while planning.
-    pub(crate) path_exists: bool,
+    pub path_exists: bool,
 }
 
-pub(crate) struct ResetPlan {
-    pub(crate) config_path: PathBuf,
-    pub(crate) config_exists: bool,
-    pub(crate) state_path: PathBuf,
-    pub(crate) state_exists: bool,
-    pub(crate) config_only: bool,
-    pub(crate) forests: Vec<ForestInfo>,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) discovery_errors: Vec<CleanupIssue>,
+pub struct ResetPlan {
+    pub config_path: PathBuf,
+    pub config_exists: bool,
+    pub state_path: PathBuf,
+    pub state_exists: bool,
+    pub config_only: bool,
+    pub forests: Vec<ForestInfo>,
+    pub warnings: Vec<String>,
+    pub discovery_errors: Vec<CleanupIssue>,
 }
 
 /// Plans a reset from what `commands::reset` observed: the path errors first, then the config
 /// warning or the scan failures in config order, then each forest's removal plan in discovery
 /// order, refusing when there is nothing to reset, as planning always has.
-pub(crate) fn decide_reset_plan(
-    config_only: bool,
-    observation: ResetObservation,
-) -> Result<ResetPlan> {
+pub fn decide_reset_plan(config_only: bool, observation: ResetObservation) -> Result<ResetPlan> {
     let config_path = observation.config_path?;
     let state_path = observation.state_path?;
     let files = observation
@@ -264,7 +261,7 @@ fn plan_reset_worktree_outcome(
     (RmOutcome::Success, true)
 }
 
-pub(crate) fn repo_reset_entry(
+pub fn repo_reset_entry(
     repo: &RepoRmPlan,
     worktree_removed: RmOutcome,
     branch_deleted: RmOutcome,
@@ -283,7 +280,7 @@ pub(crate) fn repo_reset_entry(
 /// The preview of a reset: each forest's removal decided from what planning observed, through
 /// `rm`'s dry-run decisions, and the config and state files kept unless every forest is clean.
 /// Only previews reach it, and a preview's plan carries each forest's dry-run observation.
-pub(crate) fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
+pub fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
     let mut errors = plan.discovery_errors.clone();
     let forests: Vec<ForestResetEntry> = plan
         .forests
@@ -365,7 +362,7 @@ pub(crate) fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
     }
 }
 
-pub(crate) fn plan_to_confirm_required(plan: &ResetPlan) -> ResetResult {
+pub fn plan_to_confirm_required(plan: &ResetPlan) -> ResetResult {
     let mut result = plan_to_dry_run(plan);
     result.dry_run = false;
     result.confirm_required = result.errors.is_empty();
@@ -602,7 +599,7 @@ fn file_cleanup_error(issue: &CleanupIssue) -> bool {
 }
 
 /// A forest-root refusal, as an issue.
-pub(crate) fn root_refused(text: String) -> CleanupIssue {
+pub fn root_refused(text: String) -> CleanupIssue {
     CleanupIssue::new(CleanupIssueCode::ForestRootRefused, text)
 }
 

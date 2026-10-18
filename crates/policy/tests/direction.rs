@@ -168,22 +168,22 @@ fn paths_resolve_within_their_own_crate() {
     let modules: &[(&str, ModuleClass)] = &[
         ("src/forest.rs", ModuleClass::Shared),
         ("src/lib.rs", ModuleClass::Root),
-        ("src/meta.rs", ModuleClass::Shared),
+        ("src/model.rs", ModuleClass::Shared),
         ("crates/widgets/core/src/draw/mod.rs", ModuleClass::Pure),
         ("crates/widgets/core/src/lib.rs", ModuleClass::Pure),
-        ("crates/widgets/core/src/meta.rs", ModuleClass::Pure),
+        ("crates/widgets/core/src/model.rs", ModuleClass::Pure),
     ];
     let known = crate_modules(modules, "crates/widgets/core");
-    assert_eq!(known, vec!["draw", "crate", "meta"]);
+    assert_eq!(known, vec!["draw", "crate", "model"]);
     assert_eq!(
         crate_edges(
             "draw",
-            "use crate::meta::Widget;\nfn f() { let _ = crate::forest::find(); }",
+            "use crate::model::Widget;\nfn f() { let _ = crate::forest::find(); }",
             &known
         ),
-        module_set(&["crate", "meta"])
+        module_set(&["crate", "model"])
     );
-    assert_eq!(crate_modules(modules, ""), vec!["forest", "crate", "meta"]);
+    assert_eq!(crate_modules(modules, ""), vec!["forest", "crate", "model"]);
 }
 
 #[test]

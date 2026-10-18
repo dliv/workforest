@@ -1,6 +1,6 @@
 //! The branch state of a forest's worktree: which branch it was created for and what it has
-//! checked out now. Pure: reading the state from git is `read_branch_state` in
-//! `commands::branch_state`.
+//! checked out now. Pure: reading the state from git is `read_branch_state` in the root
+//! package's `commands::branch_state`.
 
 use serde::Serialize;
 
@@ -22,7 +22,7 @@ pub enum ActualBranchState {
 }
 
 impl WorktreeBranchState {
-    #[cfg(test)]
+    /// The state of a missing worktree that was created for `expected_branch`.
     pub fn missing_worktree(expected_branch: &str) -> Self {
         Self::new(
             expected_branch.to_string(),
@@ -30,7 +30,7 @@ impl WorktreeBranchState {
         )
     }
 
-    pub(crate) fn new(expected_branch: String, actual: ActualBranchState) -> Self {
+    pub fn new(expected_branch: String, actual: ActualBranchState) -> Self {
         let branch_drift = match &actual {
             ActualBranchState::Branch { actual_branch } => actual_branch != &expected_branch,
             ActualBranchState::Detached { .. } => true,
@@ -80,7 +80,7 @@ impl WorktreeBranchState {
     }
 }
 
-pub(crate) fn compact_git_error(message: &str) -> String {
+pub fn compact_git_error(message: &str) -> String {
     let first = message.lines().next().unwrap_or(message);
     let stderr = message.lines().find_map(|line| {
         line.strip_prefix("stderr:")

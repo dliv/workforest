@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::branch_state::{read_branch_state, ActualBranchState, WorktreeBranchState};
 use crate::forest::{dedupe_discovered_forests, scan_forest_inventory, ForestInventoryEntry};
-use crate::meta::{ForestMeta, ForestMode, RepoMeta};
-use crate::paths::{ForestName, RepoName};
+use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta};
+use git_forest_core::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct LsResult {
@@ -370,10 +370,10 @@ mod tests {
     use super::*;
     use crate::commands::{cmd_new, NewInputs};
     use crate::forest::{read_meta, write_meta};
-    use crate::meta::META_FILENAME;
-    use crate::paths::ForestName;
     use crate::testutil::{make_meta, make_repo, TestEnv};
     use chrono::TimeZone;
+    use git_forest_core::meta::META_FILENAME;
+    use git_forest_core::paths::ForestName;
 
     fn make_new_inputs(name: &str) -> NewInputs {
         NewInputs {

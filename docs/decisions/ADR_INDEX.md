@@ -22,3 +22,4 @@ Format: `NNNN-short-title.md` with sections: Context, Decision, Consequences.
 | [0014](0014-xdg-config-paths.md) | XDG Config Paths | Accepted |
 | [0015](0015-snapshotted-disposable-root-entries.md) | Snapshotted Disposable Forest-Root Entries | Accepted |
 | [0016](0016-gated-architecture-rules.md) | Gated Architecture Rules | Accepted |
+| [0017](0017-crate-layout.md) | Crate Layout | Accepted |

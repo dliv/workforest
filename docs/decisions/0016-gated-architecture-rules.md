@@ -25,7 +25,7 @@ The rules, their kinds (gated, checkable by search, or judgment) and their homes
 - A violation of a gated rule fails `just check` locally and in CI. A policy-test failure names the rule and the `docs/architecture.md` section that explains it; a Clippy failure names its lint and, for a banned method, the reason from `clippy.toml`.
 - The temporary exceptions are a visible to-do list the build enforces; `docs/architecture.md` lists them under "Planned follow-ups", apart from the permanent boundaries.
 - The purity scan matches names, not resolved types: effects reached through an allowed crate, trait dispatch or an allowlisted import are not seen, and a same-named method or item of another type is reported; `docs/architecture.md` lists these limits under "What the gates do not prove".
-- The repository is a Cargo workspace whose root is still the `git-forest` package. Release builds name the binary target and never compile the policy crate; `just release` still bumps only the `[package]` version.
+- The repository is a Cargo workspace whose root is still the `git-forest` package. Release builds name the binary target and never compile the policy crate. The workspace also holds the pure core (ADR 0017), unpublished at version `0.0.0`, and `just release` still bumps only the root `[package]` version.
 - `just check` now includes the full test suite, so `just release`, which runs `just check` and then `just test`, runs the tests twice.
 - Adding a module, an exemption, an allowed edge, a trait, an allowed crate or a banned method is a deliberate, reviewed change to policy data (see "Changing the rules" in `docs/architecture.md`).
 - The toolchain is not pinned; a new stable Clippy can still add lints that fail `-D warnings`.

@@ -450,6 +450,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "git-forest-core",
  "insta",
  "libc",
  "predicates",
@@ -461,6 +462,17 @@ dependencies = [
  "toml",
  "ts-rs",
  "ureq",
+]
+
+[[package]]
+name = "git-forest-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 
 use super::rm::{self, CleanupIssue, CleanupIssueCode, RepoRmPlan, RmOutcome};
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
-use crate::plan::reset::{
+use git_forest_core::plan::reset::{
     decide_reset_plan, plan_to_confirm_required, plan_to_dry_run, repo_reset_entry, root_refused,
     BaseScanFailure, ConfigObservation, DiscoveryObservation, FileResetEntry, ForestObservation,
     ForestResetEntry, ResetFilesObservation, ResetObservation, ResetPlan,
 };
-pub use crate::plan::reset::{format_reset_human, format_reset_summary, ResetResult};
+pub use git_forest_core::plan::reset::{format_reset_human, format_reset_summary, ResetResult};
 
 pub enum ResetProgress<'a> {
     ForestStarting { name: &'a str, path: &'a Path },
@@ -357,8 +357,8 @@ mod tests {
     use super::*;
     use crate::channel;
     use crate::forest::write_meta;
-    use crate::paths::RepoName;
-    use crate::plan::reset::RepoResetEntry;
+    use git_forest_core::paths::RepoName;
+    use git_forest_core::plan::reset::RepoResetEntry;
     use serial_test::serial;
     use std::path::PathBuf;
 
@@ -770,14 +770,18 @@ path = "/tmp/nonexistent-repo"
 
         let forest_dir = worktree_base.join("my-feature");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("my-feature".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
 
         let config_content = format!(
             r#"
@@ -813,14 +817,18 @@ path = "/tmp/nonexistent-repo"
         let worktree_base = tmp.path().join("worktrees");
         let forest_dir = worktree_base.join("my-feature");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("my-feature".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
         write_reset_config(
             tmp.path(),
             &worktree_base,
@@ -858,14 +866,14 @@ path = "/tmp/nonexistent-repo"
 
         let forest_dir = worktree_base.join("recoverable-reset");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("recoverable-reset".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("recoverable-reset".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        let meta_path = forest_dir.join(crate::meta::META_FILENAME);
+        let meta_path = forest_dir.join(git_forest_core::meta::META_FILENAME);
         write_meta(&meta, &meta_path).unwrap();
         std::fs::write(forest_dir.join("residue.txt"), "discard during reset").unwrap();
 
@@ -920,7 +928,7 @@ path = "/tmp/nonexistent-repo"
         let forest_dir = worktree_base.join("corrupt-forest");
         std::fs::create_dir_all(&forest_dir).unwrap();
         std::fs::write(
-            forest_dir.join(crate::meta::META_FILENAME),
+            forest_dir.join(git_forest_core::meta::META_FILENAME),
             "not valid metadata",
         )
         .unwrap();
@@ -970,7 +978,10 @@ path = "/tmp/nonexistent-repo"
         let tmp = tempfile::tempdir().unwrap();
         let worktree_base = tmp.path().join("worktrees");
         std::fs::create_dir_all(worktree_base.join("interrupted-forest")).unwrap();
-        let staged_meta = worktree_base.join(format!("{}999999", crate::meta::STAGED_META_PREFIX));
+        let staged_meta = worktree_base.join(format!(
+            "{}999999",
+            git_forest_core::meta::STAGED_META_PREFIX
+        ));
         std::fs::write(&staged_meta, "recoverable metadata").unwrap();
         write_reset_config(
             tmp.path(),
@@ -1008,14 +1019,18 @@ path = "/tmp/nonexistent-repo"
         let worktree_base = blocked_parent.join("worktrees");
         let forest_dir = worktree_base.join("hidden-forest");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("hidden-forest".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("hidden-forest".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
         write_reset_config(
             tmp.path(),
             &worktree_base,
@@ -1066,14 +1081,18 @@ path = "/tmp/nonexistent-repo"
         let worktree_base = tmp.path().join("worktrees-link");
         let forest_dir = worktree_target.join("offline-forest");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("offline-forest".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("offline-forest".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
         std::os::unix::fs::symlink(&worktree_target, &worktree_base).unwrap();
         write_reset_config(
             tmp.path(),
@@ -1121,14 +1140,18 @@ path = "/tmp/nonexistent-repo"
 
         let forest_dir = worktree_base.join("actual-dir");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("metadata-name".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("metadata-name".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
 
         let config_content = format!(
             r#"
@@ -1169,14 +1192,18 @@ path = "/tmp/nonexistent-repo"
 
         let forest_dir = worktree_base.join("dedupe-me");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("dedupe-me".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("dedupe-me".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
 
         let config_content = format!(
             r#"
@@ -1218,8 +1245,8 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_refuses_symlinked_forest_before_mutation() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::{ForestMode, META_FILENAME};
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::{ForestMode, META_FILENAME};
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-reset-symlink");
@@ -1294,14 +1321,18 @@ path = "/tmp/nonexistent-repo"
 
         let forest_dir = worktree_base.join("my-feature");
         std::fs::create_dir_all(&forest_dir).unwrap();
-        let meta = crate::meta::ForestMeta {
-            name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
+        let meta = git_forest_core::meta::ForestMeta {
+            name: git_forest_core::paths::ForestName::new("my-feature".to_string()).unwrap(),
             created_at: chrono::Utc::now(),
-            mode: crate::meta::ForestMode::Feature,
+            mode: git_forest_core::meta::ForestMode::Feature,
             disposable_root_entries: vec![],
             repos: vec![],
         };
-        write_meta(&meta, &forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        write_meta(
+            &meta,
+            &forest_dir.join(git_forest_core::meta::META_FILENAME),
+        )
+        .unwrap();
 
         let config_content = format!(
             r#"
@@ -1359,8 +1390,8 @@ path = "/tmp/nonexistent-repo"
     #[serial]
     fn reset_cleans_up_git_worktree_registrations() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo_a = env.create_repo_with_remote("repo-a");
@@ -1429,8 +1460,8 @@ name = "repo-a"
     #[serial]
     fn reset_deletes_forest_created_branches() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-reset-branch");
@@ -1482,8 +1513,8 @@ name = "repo-a"
     #[serial]
     fn reset_preserves_metadata_when_branch_deletion_fails() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-unmerged-branch");
@@ -1562,8 +1593,8 @@ name = "repo-a"
     #[serial]
     fn reset_dry_run_reports_planned_branch_deletion_in_json() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-reset-dry-run");
@@ -1605,8 +1636,8 @@ name = "repo-a"
     #[test]
     #[serial]
     fn reset_dry_run_reports_source_missing_as_top_level_error() {
-        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-        use crate::paths::{AbsolutePath, ForestName};
+        use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use git_forest_core::paths::{AbsolutePath, ForestName};
 
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(channel::APP_NAME);
@@ -1684,8 +1715,8 @@ name = "repo-missing-source"
     #[test]
     #[serial]
     fn reset_source_missing_and_worktree_missing_matches_dry_run() {
-        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-        use crate::paths::{AbsolutePath, ForestName};
+        use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use git_forest_core::paths::{AbsolutePath, ForestName};
 
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(channel::APP_NAME);
@@ -1749,8 +1780,8 @@ name = "repo-missing-both"
     #[test]
     #[serial]
     fn reset_source_missing_and_dangling_symlink_worktree_blocks() {
-        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-        use crate::paths::{AbsolutePath, ForestName};
+        use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use git_forest_core::paths::{AbsolutePath, ForestName};
 
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(channel::APP_NAME);
@@ -1816,9 +1847,9 @@ name = "repo-dangling"
     #[test]
     #[serial]
     fn reset_dry_run_blocks_source_present_dangling_symlink_worktree() {
-        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-        use crate::paths::ForestName;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use git_forest_core::paths::ForestName;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-source-present-dangling");
@@ -1870,9 +1901,9 @@ name = "repo-dangling"
     #[test]
     #[serial]
     fn reset_dry_run_blocks_source_present_corrupt_worktree_dir() {
-        use crate::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
-        use crate::paths::ForestName;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
+        use git_forest_core::paths::ForestName;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-source-present-corrupt");
@@ -1924,8 +1955,8 @@ name = "repo-dangling"
     #[serial]
     fn reset_preserves_metadata_for_locked_missing_worktree_metadata() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-locked-missing");
@@ -1984,8 +2015,8 @@ name = "repo-dangling"
     #[serial]
     fn reset_reports_already_missing_branch_without_failing() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-missing-branch");
@@ -2030,8 +2061,8 @@ name = "repo-dangling"
     #[serial]
     fn reset_keeps_branches_not_created_by_forest() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         let repo = env.create_repo_with_remote("repo-existing-branch");
@@ -2075,8 +2106,8 @@ name = "repo-dangling"
     #[serial]
     fn reset_then_recreate_forest_succeeds() {
         use crate::commands::new::{cmd_new, NewInputs};
-        use crate::meta::ForestMode;
         use crate::testutil::TestEnv;
+        use git_forest_core::meta::ForestMode;
 
         let env = TestEnv::new();
         env.create_repo_with_remote("repo-b");

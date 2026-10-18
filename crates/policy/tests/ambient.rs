@@ -150,6 +150,7 @@ fn root_manifest_dependencies_are_read() {
         "chrono",
         "clap",
         "directories",
+        "git_forest_core",
         "libc",
         "semver",
         "serde",

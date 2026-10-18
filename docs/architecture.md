@@ -18,8 +18,8 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/ambient.rs`; `PURE_ALLOWED_CRATES` |
 | Production code declares no traits | Gated | `crates/policy/tests/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
-| `new`, `rm` and `reset` plan through decide functions in Pure modules before they execute (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `src/plan/` |
-| Newtypes are validated once, at construction | Checkable | Search `src/paths.rs` for `pub fn new` on each newtype |
+| `new`, `rm` and `reset` plan through decide functions in Pure modules before they execute (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `crates/forest/core/src/plan/` |
+| Newtypes are validated once, at construction | Checkable | Search `crates/forest/core/src/paths.rs` for `pub fn new` on each newtype |
 | When a module may become Pure | Judgment | Section "Pure modules" |
 | When a trait earns its place | Judgment | Section "No production traits" |
 
@@ -33,7 +33,7 @@ Every `.rs` file under the `src/` directory of every workspace member except the
 - **Shell**: `src/version_check.rs`, a self-contained update-check subsystem with its own effects (an HTTP call, a state file, a spawned background process). Shell imports Shared and Pure.
 - **Command**: every file in `src/commands/`. Commands return typed results and do not print (ADR 0002). A command imports Shared, Pure and allowlisted Command modules.
 - **Shared**: `src/config.rs`, `src/forest.rs`, `src/git.rs`. Helpers used across commands. Shared imports Shared and Pure.
-- **Pure**: `src/channel.rs`, `src/cli.rs`, `src/paths.rs`, `src/meta.rs` and the modules under `src/plan/`. None of the effects listed in "Pure modules" in their own source. Pure imports only Pure, plus allowlisted edges.
+- **Pure**: `src/channel.rs` and `src/cli.rs` in the root package, and every file of the core crate: `crates/forest/core/src/lib.rs`, `crates/forest/core/src/meta.rs`, `crates/forest/core/src/paths.rs` and the modules under `crates/forest/core/src/plan/`. None of the effects listed in "Pure modules" in their own source. Pure imports only Pure, plus allowlisted edges. `src/channel.rs` and `src/cli.rs` stay in the root package because `cli` reads the root package's version and both branch on the stable and beta features, which only the root package has.
 - **TestSupport**: `src/testutil.rs`, compiled only for tests. It is classified so that every file has a class, but it is not scanned.
 
 Nothing except Root imports Root.
@@ -42,9 +42,11 @@ Nothing except Root imports Root.
 
 Every workspace member has exactly one crate class, listed in `CRATES` in `crates/policy/src/edges.rs`:
 
-- **Pure** (`CrateClass::Pure { feature }`): a crate of Pure modules only, for one feature, living at `crates/<feature>/<role>/`.
+- **Pure** (`CrateClass::Pure { feature }`): a crate of Pure modules only, for one feature, living at `crates/<feature>/<role>/`. This is `crates/forest/core` (`git-forest-core`, feature `forest`): the forest's decisions, types and renderers.
 - **Binary**: the package that builds the binaries, whose modules may be of every module class. This is the root package, `git-forest`.
 - **Tooling**: a crate that checks the others and is never part of the product. This is `crates/policy` (`git-forest-policy`).
+
+The full layout, with the crates still to follow, is in ADR 0017; what makes a noun a feature, and why the forest is the only one, is in `docs/candidate-features.md`.
 
 `crates/policy/tests/edges.rs` runs `cargo metadata --format-version 1 --no-deps --offline`, which lists the members and the dependencies each one declares without the network and without touching `Cargo.lock`, and reads each member's `Cargo.toml` for the one fact `cargo metadata` does not report, its `[lints]` table. It fails when:
 
@@ -67,7 +69,7 @@ Together with the compiler this decides what a Pure crate's code can reach. Rust
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason:
 
 - `commands::ls`, `commands::rm` and `commands::status` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
-- `commands::reset` imports `commands::rm`, because reset observes and executes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal); the removal plan and its decisions live in `src/plan/rm.rs`. Whether those helpers become a shared module is an open question (temporary).
+- `commands::reset` imports `commands::rm`, because reset observes and executes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal); the removal plan and its decisions live in `crates/forest/core/src/plan/rm.rs`. Whether those helpers become a shared module is an open question (temporary).
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.
 
@@ -78,13 +80,13 @@ A Pure module's production code may not contain any of the effects listed below.
 - any use of `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported;
 - standard input (`std::io::stdin` or `std::io::Stdin`);
 - a `std::path` name with an effect: the `Path` methods that query the filesystem (`exists`, `try_exists`, `metadata`, `symlink_metadata`, `canonicalize`, `read_dir`, `read_link`, `is_file`, `is_dir` and `is_symlink`) and the function `absolute`, which reads the working directory. They are matched by name when called as a method, with or without a turbofish (`path.exists()`, `path.exists::<>()`), after `::` whether called or used as a value (`Path::exists(p)`, `.any(Path::exists)`, `std::path::absolute(p)`), and as the last segment of a `use` import (`use std::path::{absolute, Path};`). The scanner does not know types, so a method or item of another type with one of these names is reported too;
-- a path into a dependency crate of the module's own package, meaning any key of that package's `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs` or is a Pure workspace crate in `CRATES`. Today that list holds `anyhow`, which carries errors; `chrono`, which supplies date and time types (its clock reads are banned by `clippy.toml`); `clap`, which `src/cli.rs` and `src/meta.rs` use to derive argument types (parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`); and `serde`, which derives serialization. An allowed crate that no Pure module uses fails the test;
+- a path into a dependency crate of the module's own package, meaning any key of that package's `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs` or is a Pure workspace crate in `CRATES`. Today that list holds `anyhow`, which carries errors; `chrono`, which supplies date and time types (its clock reads are banned by `clippy.toml`); `clap`, which `src/cli.rs` and `crates/forest/core/src/meta.rs` use to derive argument types (parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`); and `serde`, which derives serialization. An allowed crate that no Pure module uses fails the test;
 - `include!` and `#[path = ...]`, which pull Rust code into the module from a file the scanner does not read;
 - `unsafe`, `extern`, `macro_rules!`, glob imports of `std` or `core`, importing or aliasing `std` itself, and non-ASCII identifiers.
 
 `Path` and `PathBuf` are allowed as data; only the effectful path names above are reported. `include_str!`, `include_bytes!`, `env!` and `option_env!` are allowed: they are compile-time inputs, fixed when the binary is built, not effects at run time. (The qualified spelling `std::env!` is still refused, because the scan bans the `std::env` path.)
 
-When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `src/paths.rs` is Pure because `expand_tilde`, which reads `HOME`, lives in `src/config.rs`; likewise the metadata file's I/O (`read_meta` and `write_meta`) lives in `src/forest.rs`, beside the Pure types in `src/meta.rs`. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
+When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `crates/forest/core/src/paths.rs` is Pure because `expand_tilde`, which reads `HOME`, lives in `src/config.rs`; likewise the metadata file's I/O (`read_meta` and `write_meta`) lives in `src/forest.rs`, while the Pure types are in `crates/forest/core/src/meta.rs`. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
 
 ## No production traits
 
@@ -98,7 +100,7 @@ The root `clippy.toml` bans, through Clippy's `disallowed-methods`, the function
 
 A sanctioned site carries `#[expect(clippy::disallowed_methods, reason = "...")]` on the enclosing function (or, for `src/version_check.rs`, one `#![expect(...)]` for the whole module). `#[expect]` is used instead of `#[allow]` because a stale `#[expect]` fails the build with "this lint expectation is unfulfilled": when the call goes away, the attribute must go too. Sanctioned sites are of two kinds. Permanent boundaries are where the rules say an effect belongs, and stay as long as the architecture does: the composition-root functions `main_entry`, `run` and `output` in `src/lib.rs`, the git wrapper functions `git` and `ref_exists` in `src/git.rs`, `exec`'s spawn of the user's command, and the policy crate's `cargo metadata` call in `crates/policy/src/metadata.rs`; their reasons name the boundary. Temporary exceptions are effects that a planned change will move; their reasons name that change, and "Planned follow-ups" lists them. Reason text is reviewed, not checked: the build enforces that every `#[expect]` still fires, not what its reason says.
 
-Tests are exempt. Unit tests inside `src/` get a crate-level `#![cfg_attr(test, allow(clippy::disallowed_methods, ...))]` in `src/lib.rs`; the integration tests get a crate-root `#![allow(...)]` in `tests/cli_test.rs`. Both build real git repositories and read the environment by design. Production code stays linted because Clippy also checks the library in its normal, non-test build, where the `cfg_attr` does not apply.
+Tests are exempt. Unit tests inside `src/` get a crate-level `#![cfg_attr(test, allow(clippy::disallowed_methods, ...))]` in `src/lib.rs`; the integration tests get a crate-root `#![allow(...)]` in `tests/cli_test.rs`. Both build real git repositories and read the environment by design. Production code stays linted because Clippy also checks the library in its normal, non-test build, where the `cfg_attr` does not apply. The exemption covers only the root package: a `cfg_attr` applies to the crate it is in. The core crate's unit tests need none, because they call no banned method and print nothing. If a member's tests ever need one, it is a crate-level `#![cfg_attr(test, allow(...))]` in that member's `src/lib.rs`, with a reason.
 
 `clippy.toml` must stay the only one in the workspace: a per-crate `clippy.toml` replaces the root file for that crate instead of extending it.
 
@@ -118,8 +120,8 @@ Temporary exceptions name the change that removes them; together they are the to
 
 - **Environment, home and working directory, passed in.** `xdg_dir` in `src/config.rs` reads XDG variables, `expand_tilde` in `src/config.rs` reads `HOME`, and `current_dir_preserving_symlinks` in `src/forest.rs` reads the working directory and `PWD`; `src/lib.rs` will read these and pass them in.
 - **`init`'s git check goes through `src/git.rs`.** `validate_init_inputs` runs `git` directly.
-- **Open question: where `version_check` belongs** in the module structure. It is classified Shell and exempted as a whole module until that is decided.
-- **Open question: whether `rm`'s observation and execution helpers become a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry. The removal plan and its decisions already live in `src/plan/rm.rs`, which `src/plan/reset.rs` reuses; the remaining edge is for those effectful helpers.
+- **`version_check` moves into the edge crate `crates/update-check`** (ADR 0017). Until then it is classified Shell and exempted as a whole module.
+- **Open question: whether `rm`'s observation and execution helpers become a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry. The removal plan and its decisions already live in `crates/forest/core/src/plan/rm.rs`, which `crates/forest/core/src/plan/reset.rs` reuses; the remaining edge is for those effectful helpers.
 
 ## Changing the rules
 
@@ -141,7 +143,7 @@ Temporary exceptions name the change that removes them; together they are the to
 - Macro-generated code and text pulled in with `include!` are not scanned outside Pure modules; the scanner reads source tokens, not expanded code. In Pure modules, `macro_rules!` and `include!` are refused outright.
 - The purity scan matches names, not resolved types or calls. It does not see an effect reached through an allowed crate (clap's `Parser::parse` reads the process's arguments, so a Pure module calling it would not be reported) or through trait dispatch.
 - Output routes other than the print macros, the stream handles and `dbg!` are not gated: panic messages reach standard error, and Shared or Command code, where filesystem access is by design, could open `/dev/stdout` or a similar device through `std::fs`, or write to descriptors 1 and 2 through `libc` or the `unsafe` raw-descriptor APIs. The `dbg_macro` lint has no sanctioned site, so the positive control cannot show it still fires; its proof is the break-once check recorded when it was added.
-- The dependency scan reads the root `Cargo.toml` line by line and takes each dependency's package key, hyphens read as underscores, as the name code uses. It does not decode TOML quoting or escapes in table names and keys (a quoted table-name segment such as `["dependencies".review_dep]`, or an escaped key such as `"review_\u0064ep"`; a plain quoted key such as `"quoted-name"` is read correctly), does not read top-level dotted keys such as `dependencies.foo = "1"`, and does not know that a dependency whose library target sets another `name` is used under that name. A dependency declared those ways escapes the crate rule in Pure modules. The guard test knows only today's ten names.
+- The dependency scan reads each package's `Cargo.toml` line by line and takes each dependency's package key, hyphens read as underscores, as the name code uses. It does not decode TOML quoting or escapes in table names and keys (a quoted table-name segment such as `["dependencies".review_dep]`, or an escaped key such as `"review_\u0064ep"`; a plain quoted key such as `"quoted-name"` is read correctly), does not read top-level dotted keys such as `dependencies.foo = "1"`, and does not know that a dependency whose library target sets another `name` is used under that name. A dependency declared those ways escapes the crate rule in Pure modules. The guard test knows only today's eleven names in the root `Cargo.toml`.
 - The edges test reads the dependencies each member declares, not transitive ones, and checks the features a Pure crate declares, not the set Cargo unifies across a workspace build.
 - Default features are not checked, so a Pure crate keeps an allowed crate's default features, `chrono`'s clock among them; `clippy.toml` bans the clock reads.
 - Dev-dependencies are exempt from the crate direction and the Pure allowlist, except toward Tooling.

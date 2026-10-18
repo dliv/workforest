@@ -6,8 +6,8 @@ use super::branch_state::{
     compact_git_error, path_exists_or_symlink, read_branch_state, ActualBranchState,
     WorktreeBranchState,
 };
-use crate::meta::ForestMeta;
-use crate::paths::{ForestName, RepoName};
+use git_forest_core::meta::ForestMeta;
+use git_forest_core::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct StatusResult {
@@ -109,9 +109,9 @@ mod tests {
     use super::*;
     use crate::commands::{cmd_new, NewInputs};
     use crate::forest::read_meta;
-    use crate::meta::ForestMode;
     use crate::testutil::{make_meta, make_repo, setup_forest_with_git_repos, TestEnv};
     use chrono::Utc;
+    use git_forest_core::meta::ForestMode;
     use std::path::PathBuf;
 
     fn make_new_inputs(name: &str) -> NewInputs {
@@ -133,7 +133,7 @@ mod tests {
         cmd_new(make_new_inputs(name), &tmpl).unwrap();
 
         let forest_dir = tmpl.worktree_base.join(name);
-        let meta = read_meta(&forest_dir.join(crate::meta::META_FILENAME)).unwrap();
+        let meta = read_meta(&forest_dir.join(git_forest_core::meta::META_FILENAME)).unwrap();
         (env, forest_dir.to_path_buf(), meta)
     }
 

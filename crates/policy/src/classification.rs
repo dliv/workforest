@@ -27,6 +27,17 @@ pub enum ModuleClass {
 /// Every .rs file under the `src/` directory of every workspace member except Tooling, by
 /// repository-relative path, with its class.
 pub const MODULES: &[(&str, ModuleClass)] = &[
+    ("crates/forest/core/src/lib.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/meta.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/paths.rs", ModuleClass::Pure),
+    (
+        "crates/forest/core/src/plan/branch_state.rs",
+        ModuleClass::Pure,
+    ),
+    ("crates/forest/core/src/plan/mod.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/plan/new.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/plan/reset.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/plan/rm.rs", ModuleClass::Pure),
     ("src/bin/git-forest-beta.rs", ModuleClass::Root),
     ("src/bin/git-forest.rs", ModuleClass::Root),
     ("src/channel.rs", ModuleClass::Pure),
@@ -44,13 +55,6 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/forest.rs", ModuleClass::Shared),
     ("src/git.rs", ModuleClass::Shared),
     ("src/lib.rs", ModuleClass::Root),
-    ("src/meta.rs", ModuleClass::Pure),
-    ("src/paths.rs", ModuleClass::Pure),
-    ("src/plan/branch_state.rs", ModuleClass::Pure),
-    ("src/plan/mod.rs", ModuleClass::Pure),
-    ("src/plan/new.rs", ModuleClass::Pure),
-    ("src/plan/reset.rs", ModuleClass::Pure),
-    ("src/plan/rm.rs", ModuleClass::Pure),
     ("src/testutil.rs", ModuleClass::TestSupport),
     ("src/version_check.rs", ModuleClass::Shell),
 ];
@@ -94,7 +98,7 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
         crate_dir: "",
         from: "commands::reset",
         to: "commands::rm",
-        reason: "reset observes and executes forest removal through rm's effectful helpers; the removal plan and its decisions live in src/plan/rm.rs, and whether those helpers become a shared module is an open follow-up",
+        reason: "reset observes and executes forest removal through rm's effectful helpers; the removal plan and its decisions live in crates/forest/core/src/plan/rm.rs, and whether those helpers become a shared module is an open follow-up",
     },
 ];
 
@@ -103,9 +107,9 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
 /// - `anyhow` carries errors; no features;
 /// - `chrono` supplies date and time types; its clock reads are banned by clippy.toml; `serde`,
 ///   so that the metadata types serialize their timestamps;
-/// - `clap`: src/cli.rs and src/meta.rs derive argument types with clap's derive macros;
-///   parsing the arguments, which reads the process's arguments, happens only in src/lib.rs;
-///   `derive`, for those macros;
+/// - `clap`: src/cli.rs and crates/forest/core/src/meta.rs derive argument types with clap's
+///   derive macros; parsing the arguments, which reads the process's arguments, happens only
+///   in src/lib.rs; `derive`, for those macros;
 /// - `serde` derives serialization; `derive`, for its derive macros.
 ///
 /// The purity scan reads the names, and every entry must still be used by a Pure module. The

@@ -1,6 +1,6 @@
-use crate::meta::ForestMode;
-use crate::paths::DisposableRootEntry;
 use clap::{Parser, Subcommand};
+use git_forest_core::meta::ForestMode;
+use git_forest_core::paths::DisposableRootEntry;
 
 #[derive(Parser)]
 #[cfg_attr(

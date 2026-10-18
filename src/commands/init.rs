@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::{expand_tilde, ResolvedConfig, ResolvedRepo, ResolvedTemplate};
-use crate::meta::META_FILENAME;
-use crate::paths::{validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName};
+use git_forest_core::meta::META_FILENAME;
+use git_forest_core::paths::{
+    validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
+};
 
 pub struct InitInputs {
     pub template_name: String,

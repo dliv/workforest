@@ -12,7 +12,7 @@ git-forest is built by a human architect specifying designs and an AI agent impl
 Each phase is specified as a plan document (`PHASE_*_PLAN.md`) that defines types, interfaces, and test cases before implementation begins. Plans serve as contracts between architect and agent.
 
 Plans specify:
-- **Types and structs** — `ForestPlan`, `RepoPlan`, `CheckoutKind` in `PHASE_3_PLAN.md` map directly to `src/commands/new.rs` (lines 22–49). `RmPlan`, `RmOutcome` in `PHASE_4_PLAN.md` map to `src/commands/rm.rs` (lines 9–49).
+- **Types and structs** — `ForestPlan`, `RepoPlan`, `CheckoutKind` in `PHASE_3_PLAN.md` map directly to `crates/forest/core/src/plan/new.rs`. `RmPlan`, `RmOutcome` in `PHASE_4_PLAN.md` map to `crates/forest/core/src/plan/rm.rs`.
 - **Test names and behaviors** — test names in code match plan specs (e.g., `plan_empty_name_errors`, `rm_removes_worktrees`). Test coverage is designed, not discovered.
 - **Review before coding** — review docs (`PHASE_3_PLAN_REVIEW_AMP.md`, `PHASE_5_REVIEW_AMP.md`) catch issues before implementation starts.
 

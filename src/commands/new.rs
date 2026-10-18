@@ -4,14 +4,14 @@ use chrono::{DateTime, Utc};
 use crate::config::ResolvedTemplate;
 use crate::forest::write_meta;
 use crate::git::ref_exists;
-use crate::meta::{ForestMeta, RepoMeta, META_FILENAME};
-use crate::paths::{forest_dir, AbsolutePath, ForestName};
-pub(crate) use crate::plan::new::{branch_created, plan_to_result};
-use crate::plan::new::{
+use git_forest_core::meta::{ForestMeta, RepoMeta, META_FILENAME};
+use git_forest_core::paths::{forest_dir, AbsolutePath, ForestName};
+pub(crate) use git_forest_core::plan::new::{branch_created, plan_to_result};
+use git_forest_core::plan::new::{
     decide_forest, target_branches, validate_new_inputs, ForestCollision, NewObservation,
     RefObservation, RepoObservation,
 };
-pub use crate::plan::new::{
+pub use git_forest_core::plan::new::{
     format_new_human, CheckoutKind, ForestPlan, NewInputs, NewResult, RepoPlan,
 };
 
@@ -268,10 +268,10 @@ mod tests {
     use crate::commands::cmd_ls;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
     use crate::forest::read_meta;
-    use crate::meta::ForestMode;
-    use crate::paths::{AbsolutePath, DisposableRootEntry, RepoName};
-    use crate::plan::new::compute_target_branch;
     use crate::testutil::TestEnv;
+    use git_forest_core::meta::ForestMode;
+    use git_forest_core::paths::{AbsolutePath, DisposableRootEntry, RepoName};
+    use git_forest_core::plan::new::compute_target_branch;
     use std::path::PathBuf;
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {

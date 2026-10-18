@@ -13,7 +13,7 @@ Consolidate to a single repo concept. Every repo is a git worktree. The only per
 
 - `RepoConfig` (`src/config.rs`, lines 21–30) has no `type` field. Fields are `path`, `name`, `base_branch`, `remote`.
 - `ResolvedRepo` (`src/config.rs`, lines 32–38) has `base_branch` as the only behavioral differentiator.
-- `RepoMeta` (`src/meta.rs`, lines 31–38) has no type field — stores `source`, `branch`, `base_branch`, `branch_created`.
+- `RepoMeta` (`crates/forest/core/src/meta.rs`) has no type field — stores `source`, `branch`, `base_branch`, `branch_created`.
 - `src/commands/new.rs` — all repos go through the same `CheckoutKind` resolution (ADR 0003). No type-based branching in any code path.
 
 Whether you modify a repo is your runtime choice, not something encoded in config. Repos branching off `main` vs `dev` differ only in `base_branch`.

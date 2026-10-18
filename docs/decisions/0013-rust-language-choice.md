@@ -15,9 +15,9 @@ Use Rust. The reasons are correctness, safety, CLI ecosystem quality, compile-ti
 
 ### Compile-time invariants via newtypes
 
-Rust's type system lets us make illegal states unrepresentable. `AbsolutePath`, `RepoName`, `ForestName`, `BranchName` (`src/paths.rs`) validate once at construction; the type system enforces the invariant everywhere else. This eliminated 7 runtime assertions, leaving only 4 that types cannot express (ADR 0010). In a dynamically typed language, every function receiving a path would need its own validation — or trust callers and hope for the best.
+Rust's type system lets us make illegal states unrepresentable. `AbsolutePath`, `RepoName`, `ForestName`, `BranchName` (`crates/forest/core/src/paths.rs`) validate once at construction; the type system enforces the invariant everywhere else. This eliminated 7 runtime assertions, leaving only 4 that types cannot express (ADR 0010). In a dynamically typed language, every function receiving a path would need its own validation — or trust callers and hope for the best.
 
-Concrete: `ForestPlan` (`src/commands/new.rs`, lines 21–26) has fields typed `ForestName`, `AbsolutePath`, `BranchName`, `RepoName`. A plan with an empty repo name or a relative path is unrepresentable at compile time.
+Concrete: `ForestPlan` (`crates/forest/core/src/plan/new.rs`) has fields typed `ForestName`, `AbsolutePath`, `BranchName`, `RepoName`. A plan with an empty repo name or a relative path is unrepresentable at compile time.
 
 ### Exhaustive `match` on enums
 
@@ -49,7 +49,7 @@ When we add parallel git operations (e.g., concurrent `git fetch` across repos),
 
 ### CLI ecosystem quality
 
-`clap` (derive-based CLI parsing with help generation, subcommands, value enums), `serde` + `toml` (config serialization), `anyhow` (ergonomic error handling with context), `chrono` (timestamps) — Rust's CLI ecosystem is mature and well-integrated. `clap::ValueEnum` on `ForestMode` (`src/meta.rs`, line 9) gives us `--mode feature|review` parsing and validation for free.
+`clap` (derive-based CLI parsing with help generation, subcommands, value enums), `serde` + `toml` (config serialization), `anyhow` (ergonomic error handling with context), `chrono` (timestamps) — Rust's CLI ecosystem is mature and well-integrated. `clap::ValueEnum` on `ForestMode` (`crates/forest/core/src/meta.rs`) gives us `--mode feature|review` parsing and validation for free.
 
 ### Industry validation: Rust as the default for CLI tools
 

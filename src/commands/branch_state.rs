@@ -1,10 +1,10 @@
 //! Reading a worktree's branch state from git. The types and their pure functions are in
-//! `crate::plan::branch_state`.
+//! `git_forest_core::plan::branch_state`.
 
 use std::path::{Path, PathBuf};
 
-pub(crate) use crate::plan::branch_state::compact_git_error;
-pub use crate::plan::branch_state::{ActualBranchState, WorktreeBranchState};
+pub(crate) use git_forest_core::plan::branch_state::compact_git_error;
+pub use git_forest_core::plan::branch_state::{ActualBranchState, WorktreeBranchState};
 
 /// Reads the branch state of the worktree at `worktree`, expected on `expected_branch`.
 pub fn read_branch_state(worktree: &Path, expected_branch: &str) -> WorktreeBranchState {

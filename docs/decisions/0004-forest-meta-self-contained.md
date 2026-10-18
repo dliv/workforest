@@ -11,11 +11,11 @@ Commands that operate on existing forests (`rm`, `status`, `exec`, `ls`) need re
 
 `.forest-meta.toml` captures all resolved values at creation time. Post-creation commands use only the meta file, never the global config.
 
-`ForestMeta` and `RepoMeta` (`src/meta.rs`) store everything needed: `name`, `source` (absolute path), `branch`, `base_branch`, `remote`, `branch_created` per repo. `remote` is optional for compatibility with older forest metadata; new forests record it so cleanup can prove branch reachability against the same remote-tracking base ref used at creation time.
+`ForestMeta` and `RepoMeta` (`crates/forest/core/src/meta.rs`) store everything needed: `name`, `source` (absolute path), `branch`, `base_branch`, `remote`, `branch_created` per repo. `remote` is optional for compatibility with older forest metadata; new forests record it so cleanup can prove branch reachability against the same remote-tracking base ref used at creation time.
 
 Commands depend only on meta + forest directory:
 
-- `plan_rm(forest_dir, meta)` (`src/commands/rm.rs`, line 53) — no config parameter.
+- `plan_rm(forest_dir, meta)` (`src/commands/rm.rs`) — no config parameter.
 - `cmd_status(forest_dir, meta)` (`src/commands/status.rs`, line 27) — no config parameter.
 - `cmd_exec(forest_dir, meta, cmd)` (`src/commands/exec.rs`, line 13) — no config parameter.
 

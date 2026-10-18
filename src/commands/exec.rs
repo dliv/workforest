@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::Path;
 
-use crate::meta::ForestMeta;
-use crate::paths::{ForestName, RepoName};
+use git_forest_core::meta::ForestMeta;
+use git_forest_core::paths::{ForestName, RepoName};
 
 #[derive(Debug, Serialize)]
 pub struct ExecResult {

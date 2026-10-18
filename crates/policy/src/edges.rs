@@ -22,6 +22,7 @@ pub enum CrateClass {
 /// Every workspace member, by package name, with its class.
 pub const CRATES: &[(&str, CrateClass)] = &[
     ("git-forest", CrateClass::Binary),
+    ("git-forest-core", CrateClass::Pure { feature: "forest" }),
     ("git-forest-policy", CrateClass::Tooling),
 ];
 

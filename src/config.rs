@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::channel;
-use crate::meta::META_FILENAME;
-use crate::paths::{validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName};
+use git_forest_core::meta::META_FILENAME;
+use git_forest_core::paths::{
+    validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
+};
 
 /// Expands a leading `~` or `~/` with `HOME` and requires the result to be absolute.
 #[expect(
@@ -75,7 +77,7 @@ pub struct RepoConfig {
 
 // --- Resolved types (post-parse) ---
 
-pub use crate::plan::new::{ResolvedRepo, ResolvedTemplate};
+pub use git_forest_core::plan::new::{ResolvedRepo, ResolvedTemplate};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {

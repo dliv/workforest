@@ -3,19 +3,21 @@ use std::path::{Component, Path, PathBuf};
 
 use super::branch_state::read_branch_state;
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
-use crate::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
-use crate::paths::{AbsolutePath, ForestName};
-use crate::plan::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
+use git_forest_core::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
+use git_forest_core::paths::{AbsolutePath, ForestName};
+use git_forest_core::plan::branch_state::{
+    compact_git_error, ActualBranchState, WorktreeBranchState,
+};
 #[cfg(test)]
-pub(crate) use crate::plan::rm::legacy_error_lines;
-use crate::plan::rm::{
+pub(crate) use git_forest_core::plan::rm::legacy_error_lines;
+use git_forest_core::plan::rm::{
     branch_not_fully_merged_error, decide_rm_dry_run, decide_rm_plan, rejected_rm_result,
     root_cleanup_results, root_entry_name_matches, worktree_removal_refusal, BranchObservation,
     ForestDirListing, ForestDirObservation, ForestRootCleanupAction, ForestRootPlan,
     RepoDryRunObservation, RepoObservation, RmDryRunObservation, RmObservation, RootListing,
     RootObservation, WorktreeEntry,
 };
-pub use crate::plan::rm::{
+pub use git_forest_core::plan::rm::{
     format_repo_done, format_rm_all_human, format_rm_all_summary, format_rm_human,
     format_rm_summary, CleanupIssue, CleanupIssueCode, DetachedHeadSafety, ForestRootCleanupResult,
     RepoRmPlan, RepoRmResult, RmAllProgress, RmAllResult, RmOptions, RmOutcome, RmPlan, RmProgress,
@@ -1599,10 +1601,10 @@ mod tests {
     use crate::commands::NewInputs;
     use crate::config::{ResolvedRepo, ResolvedTemplate};
     use crate::forest::{read_meta, write_meta};
-    use crate::meta::ForestMode;
-    use crate::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
-    use crate::plan::rm::{validate_json_output_paths, ForestRootCleanupKind};
     use crate::testutil::{make_meta, make_repo, TestEnv};
+    use git_forest_core::meta::ForestMode;
+    use git_forest_core::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
+    use git_forest_core::plan::rm::{validate_json_output_paths, ForestRootCleanupKind};
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
         NewInputs {

@@ -16,7 +16,7 @@ Mutating commands use a two-phase pattern:
 
 Concrete implementations:
 
-- `plan_forest() -> ForestPlan` / `execute_plan() -> NewResult` (`src/commands/new.rs`). `ForestPlan` contains `Vec<RepoPlan>`, each with a `CheckoutKind` enum (`ExistingLocal`, `TrackRemote`, `NewBranch` — lines 40–49) expressing the command pattern as a Rust enum.
+- `plan_forest() -> ForestPlan` / `execute_plan() -> NewResult` (`src/commands/new.rs`). `ForestPlan` contains `Vec<RepoPlan>`, each with a `CheckoutKind` enum (`ExistingLocal`, `TrackRemote`, `NewBranch`; in `crates/forest/core/src/plan/new.rs`) expressing the command pattern as a Rust enum.
 - `plan_rm() -> RmPlan` / `execute_rm() -> RmResult` (`src/commands/rm.rs`). `RmPlan` contains `Vec<RepoRmPlan>` with pre-checked `worktree_exists` and `source_exists` flags.
 - `validate_init_inputs() -> ResolvedConfig` / `write_config_atomic()` (`src/commands/init.rs`) — lighter-weight variant of the same pattern.
 
@@ -29,4 +29,4 @@ Concrete implementations:
 - **Good error reporting:** Failures reference the specific plan step (e.g., `CreateWorktree` for a specific repo).
 - **Command pattern as enums:** `CheckoutKind` and `RmOutcome` make operations explicit and exhaustively matchable.
 - Depends on ADR 0002 (plans are data, returned not printed). Enables ADR 0011 (incremental meta writing during execution).
-- The decide steps of `new`, `rm` and `reset` and their renderers live in Pure modules under `src/plan/`, so the purity and direction scans fail `just check` if planning or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.
+- The decide steps of `new`, `rm` and `reset` and their renderers live in Pure modules under `crates/forest/core/src/plan/`, so the purity and direction scans fail `just check` if planning or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.

@@ -46,7 +46,7 @@ pub struct RepoMeta {
 
 impl ForestMeta {
     /// Checks the disposable root entries against the metadata file and the repo names.
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         validate_disposable_root_entries(
             &self.disposable_root_entries,
             std::iter::once(META_FILENAME).chain(self.repos.iter().map(|repo| repo.name.as_str())),

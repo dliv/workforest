@@ -164,7 +164,7 @@ pub fn validate_disposable_root_entries<'a>(
     Ok(())
 }
 
-pub(crate) fn forest_root_entry_comparison_key(entry: &str) -> String {
+pub fn forest_root_entry_comparison_key(entry: &str) -> String {
     entry.to_lowercase()
 }
 
@@ -316,7 +316,7 @@ impl Serialize for BranchName {
     }
 }
 
-pub(crate) fn sanitize_forest_name(name: &str) -> String {
+pub fn sanitize_forest_name(name: &str) -> String {
     let sanitized = name.replace('/', "-");
 
     debug_assert!(

@@ -19,7 +19,7 @@ After Contracts 1 (AbsolutePath) and Contracts 2 (RepoName, ForestName, BranchNa
 
 | Location | Assertion | Why kept |
 |----------|-----------|----------|
-| `src/paths.rs` — `sanitize_forest_name()` | Result has no `/` | Postcondition on a pure helper. Defense-in-depth. |
+| `crates/forest/core/src/paths.rs` — `sanitize_forest_name()` | Result has no `/` | Postcondition on a pure helper. Defense-in-depth. |
 | `src/config.rs` — `parse_config()` | Repo names unique | Collection-level invariant — no single-value newtype can express set membership. |
 | `src/commands/exec.rs` — `cmd_exec()` | `forest_dir.is_absolute()` | Precondition at a `&Path` boundary where the caller passes `&Path`, not `&AbsolutePath`. |
 | `src/commands/status.rs` — `cmd_status()` | `forest_dir.is_absolute()` | Same. |

@@ -90,7 +90,7 @@ pub struct NewRepoResult {
     pub worktree_path: AbsolutePath,
 }
 
-pub(crate) fn compute_target_branch(
+pub fn compute_target_branch(
     repo_name: &str,
     forest_name: &str,
     mode: &ForestMode,
@@ -115,7 +115,7 @@ pub(crate) fn compute_target_branch(
     }
 }
 
-pub(crate) fn branch_created(checkout: &CheckoutKind) -> bool {
+pub fn branch_created(checkout: &CheckoutKind) -> bool {
     match checkout {
         CheckoutKind::ExistingLocal => false,
         CheckoutKind::TrackRemote => false,
@@ -123,7 +123,7 @@ pub(crate) fn branch_created(checkout: &CheckoutKind) -> bool {
     }
 }
 
-pub(crate) fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
+pub fn plan_to_result(plan: &ForestPlan, dry_run: bool) -> NewResult {
     let repos = plan
         .repo_plans
         .iter()
@@ -226,7 +226,7 @@ pub struct RefObservation {
 
 /// The target branch name of every template repo, as planning computes it, in template order.
 /// The observe step uses it to know which refs to read.
-pub(crate) fn target_branches(
+pub fn target_branches(
     inputs: &NewInputs,
     tmpl: &ResolvedTemplate,
     forest_name: &ForestName,

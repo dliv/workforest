@@ -13,9 +13,6 @@ mod commands;
 pub(crate) mod config;
 mod forest;
 mod git;
-mod meta;
-pub(crate) mod paths;
-pub(crate) mod plan;
 mod testutil;
 pub(crate) mod version_check;
 

@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 
-use crate::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
-use crate::paths::sanitize_forest_name;
+use git_forest_core::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
+use git_forest_core::paths::sanitize_forest_name;
 
 #[derive(Debug)]
 pub struct DiscoveredForest {
@@ -430,7 +430,7 @@ fn forest_dir_is_under_any_base(forest_dir: &Path, worktree_bases: &[&Path]) -> 
 }
 
 // The metadata file's I/O lives here, beside the other forest discovery effects; the types
-// themselves are in the Pure module `meta`.
+// themselves are in the core crate's Pure module `git_forest_core::meta`.
 
 /// Validates `meta` and writes it as TOML to `path`.
 pub fn write_meta(meta: &ForestMeta, path: &Path) -> Result<()> {
@@ -455,9 +455,9 @@ pub fn read_meta(path: &Path) -> Result<ForestMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::{ForestMode, RepoMeta};
-    use crate::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
     use chrono::{TimeZone, Utc};
+    use git_forest_core::meta::{ForestMode, RepoMeta};
+    use git_forest_core::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
 
     fn write_test_meta(dir: &Path, name: &str, mode: ForestMode) {
         let meta = ForestMeta {
