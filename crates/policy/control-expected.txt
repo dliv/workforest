@@ -16,3 +16,4 @@
 5	src/version_check.rs	use of a disallowed method `chrono::Utc::now`
 1	src/version_check.rs	use of a disallowed method `std::env::current_exe`
 1	src/version_check.rs	use of a disallowed method `std::process::Command::new`
+1	src/version_check.rs	use of a disallowed method `ureq::Agent::get`
