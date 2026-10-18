@@ -5,9 +5,32 @@ use std::path::{Path, PathBuf};
 
 use crate::channel;
 use crate::meta::META_FILENAME;
-use crate::paths::{
-    expand_tilde, validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
-};
+use crate::paths::{validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName};
+
+/// Expands a leading `~` or `~/` with `HOME` and requires the result to be absolute.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "HOME read below the root, until the home directory is passed in from src/lib.rs"
+)]
+pub fn expand_tilde(path: &str) -> Result<AbsolutePath> {
+    let result = if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(rest)
+        } else {
+            bail!("cannot expand ~/: HOME environment variable is not set");
+        }
+    } else if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home)
+        } else {
+            bail!("cannot expand ~: HOME environment variable is not set");
+        }
+    } else {
+        PathBuf::from(path)
+    };
+
+    AbsolutePath::new(result).ok_or_else(|| anyhow::anyhow!("path is not absolute: {}", path))
+}
 
 // --- Raw deserialization structs (TOML shape) ---
 
@@ -424,6 +447,38 @@ pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_tilde_replaces_home() {
+        let home = std::env::var("HOME").unwrap();
+        let result = expand_tilde("~/src/foo").unwrap();
+        assert_eq!(*result, *PathBuf::from(&home).join("src/foo"));
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(*expand_tilde("~").unwrap(), *PathBuf::from(&home));
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_unchanged() {
+        let result = expand_tilde("/usr/local/bin").unwrap();
+        assert_eq!(*result, *PathBuf::from("/usr/local/bin"));
+    }
+
+    #[test]
+    fn expand_tilde_relative_path_errors() {
+        let result = expand_tilde("foo/bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not absolute"));
+    }
+
+    #[test]
+    fn expand_tilde_returns_absolute_path() {
+        let result = expand_tilde("/some/absolute/path").unwrap();
+        assert!(result.is_absolute());
+    }
 
     #[test]
     fn parse_full_config() {

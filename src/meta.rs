@@ -1,8 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::Path;
 
 use crate::paths::{
     validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, ForestName, RepoName,
@@ -46,26 +45,8 @@ pub struct RepoMeta {
 }
 
 impl ForestMeta {
-    pub fn write(&self, path: &Path) -> Result<()> {
-        self.validate()
-            .context("forest metadata has invalid disposable root entries")?;
-        let content = toml::to_string_pretty(self).context("failed to serialize forest meta")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("failed to write forest meta to {}", path.display()))?;
-        Ok(())
-    }
-
-    pub fn read(path: &Path) -> Result<ForestMeta> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read forest meta from {}", path.display()))?;
-        let meta: ForestMeta =
-            toml::from_str(&content).context("failed to parse forest meta TOML")?;
-        meta.validate()
-            .context("forest metadata has invalid disposable root entries")?;
-        Ok(meta)
-    }
-
-    fn validate(&self) -> Result<()> {
+    /// Checks the disposable root entries against the metadata file and the repo names.
+    pub(crate) fn validate(&self) -> Result<()> {
         validate_disposable_root_entries(
             &self.disposable_root_entries,
             std::iter::once(META_FILENAME).chain(self.repos.iter().map(|repo| repo.name.as_str())),

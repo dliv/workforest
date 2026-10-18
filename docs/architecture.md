@@ -31,8 +31,8 @@ Every `.rs` file under `src/` has exactly one class, listed in `MODULES` in `cra
 - **Root**: `src/lib.rs` and the binaries in `src/bin/`. The composition root: it reads process arguments, loads configuration, dispatches commands, prints results and decides exit codes. Root may import anything.
 - **Shell**: `src/version_check.rs`, a self-contained update-check subsystem with its own effects (an HTTP call, a state file, a spawned background process). Shell imports Shared and Pure.
 - **Command**: every file in `src/commands/`. Commands return typed results and do not print (ADR 0002). A command imports Shared, Pure and allowlisted Command modules.
-- **Shared**: `src/config.rs`, `src/forest.rs`, `src/git.rs`, `src/meta.rs`, `src/paths.rs`. Types and helpers used across commands. Shared imports Shared and Pure.
-- **Pure**: `src/channel.rs`, `src/cli.rs`. None of the effects listed in "Pure modules" in their own source. Pure imports only Pure, plus allowlisted edges.
+- **Shared**: `src/config.rs`, `src/forest.rs`, `src/git.rs`. Helpers used across commands. Shared imports Shared and Pure.
+- **Pure**: `src/channel.rs`, `src/cli.rs`, `src/paths.rs`, `src/meta.rs` and the modules under `src/plan/`. None of the effects listed in "Pure modules" in their own source. Pure imports only Pure, plus allowlisted edges.
 - **TestSupport**: `src/testutil.rs`, compiled only for tests. It is classified so that every file has a class, but it is not scanned.
 
 Nothing except Root imports Root.
@@ -45,7 +45,6 @@ Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGE
 
 - `commands::ls`, `commands::status`, `commands::rm` and `commands::reset` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
 - `commands::reset` imports `commands::rm`, because reset reuses rm's removal plan; whether that plan becomes a shared module is an open question (temporary).
-- `cli` imports `meta` and `paths` only for the types `ForestMode` and `DisposableRootEntry`, until those types move into a Pure module (temporary).
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.
 
@@ -56,13 +55,13 @@ A Pure module's production code may not contain any of the effects listed below.
 - any use of `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported;
 - standard input (`std::io::stdin` or `std::io::Stdin`);
 - a `std::path` name with an effect: the `Path` methods that query the filesystem (`exists`, `try_exists`, `metadata`, `symlink_metadata`, `canonicalize`, `read_dir`, `read_link`, `is_file`, `is_dir` and `is_symlink`) and the function `absolute`, which reads the working directory. They are matched by name when called as a method, with or without a turbofish (`path.exists()`, `path.exists::<>()`), after `::` whether called or used as a value (`Path::exists(p)`, `.any(Path::exists)`, `std::path::absolute(p)`), and as the last segment of a `use` import (`use std::path::{absolute, Path};`). The scanner does not know types, so a method or item of another type with one of these names is reported too;
-- a path into a dependency crate of the root package, meaning any key of the root `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs`. Today that list holds only `clap`, which `src/cli.rs` uses to derive its argument types; parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`. An allowed crate that no Pure module uses fails the test;
+- a path into a dependency crate of the root package, meaning any key of the root `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs`. Today that list holds `anyhow`, which carries errors; `chrono`, which supplies date and time types (its clock reads are banned by `clippy.toml`); `clap`, which `src/cli.rs` and `src/meta.rs` use to derive argument types (parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`); and `serde`, which derives serialization. An allowed crate that no Pure module uses fails the test;
 - `include!` and `#[path = ...]`, which pull Rust code into the module from a file the scanner does not read;
 - `unsafe`, `extern`, `macro_rules!`, glob imports of `std` or `core`, importing or aliasing `std` itself, and non-ASCII identifiers.
 
 `Path` and `PathBuf` are allowed as data; only the effectful path names above are reported. `include_str!`, `include_bytes!`, `env!` and `option_env!` are allowed: they are compile-time inputs, fixed when the binary is built, not effects at run time. (The qualified spelling `std::env!` is still refused, because the scan bans the `std::env` path.)
 
-When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `src/paths.rs` is Shared, not Pure, because `expand_tilde` reads `HOME`; it can become Pure once the home directory is passed in. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
+When may a module become Pure? When its own production code has none of the effects above and it imports only Pure modules, or holds an allowlisted edge with a reason naming how that edge goes away. `src/paths.rs` is Pure because `expand_tilde`, which reads `HOME`, lives in `src/config.rs`; likewise the metadata file's I/O (`ForestMeta::read` and `write`) lives in `src/forest.rs`, beside the Pure types in `src/meta.rs`. Reclassifying a module is a one-line change in `MODULES`; the ambient and direction tests then say whether it holds.
 
 ## No production traits
 
@@ -92,11 +91,10 @@ The script forces `CARGO_TERM_COLOR=never` (CI sets `always`, and colour codes w
 
 ## Planned follow-ups
 
-Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `src/git.rs`, `exec`'s spawn of the user's command, the `branch_state` helper edges and the `clap` entry in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
+Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `src/git.rs`, `exec`'s spawn of the user's command, the `branch_state` helper edges and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
 
-- **Environment, home and working directory, passed in.** `xdg_dir` in `src/config.rs` reads XDG variables, `expand_tilde` in `src/paths.rs` reads `HOME`, and `current_dir_preserving_symlinks` in `src/forest.rs` reads the working directory and `PWD`; `src/lib.rs` will read these and pass them in. After the `HOME` read moves, `src/paths.rs` can become Pure.
+- **Environment, home and working directory, passed in.** `xdg_dir` in `src/config.rs` reads XDG variables, `expand_tilde` in `src/config.rs` reads `HOME`, and `current_dir_preserving_symlinks` in `src/forest.rs` reads the working directory and `PWD`; `src/lib.rs` will read these and pass them in.
 - **`init`'s git check goes through `src/git.rs`.** `validate_init_inputs` runs `git` directly.
-- **`ForestMode` and `DisposableRootEntry` move into a Pure module**, which removes the `cli -> meta` and `cli -> paths` allowlist entries.
 - **Open question: where `version_check` belongs** in the module structure. It is classified Shell and exempted as a whole module until that is decided.
 - **Open question: whether `rm`'s removal plan becomes a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry.
 
@@ -116,7 +114,7 @@ Temporary exceptions name the change that removes them; together they are the to
 
 - Bare child-module paths are not followed by the direction scan: a path that starts with a child module's name, such as `init::x` or the `pub use rm::*;` re-exports in `src/commands/mod.rs`, is ignored. Only `crate::`, `super::` and `self::` paths are checked.
 - Macro-generated code and text pulled in with `include!` are not scanned outside Pure modules; the scanner reads source tokens, not expanded code. In Pure modules, `macro_rules!` and `include!` are refused outright.
-- The purity scan matches names, not resolved types or calls. It does not see an effect reached through an allowed crate (clap's `Parser::parse` reads the process's arguments, so a Pure module calling it would not be reported) or through trait dispatch. Effects reached through the two allowlisted imports `cli -> meta` and `cli -> paths` are not scanned either; their allowlist reasons describe them as type-only imports, and the follow-up that moves `ForestMode` and `DisposableRootEntry` into a Pure module removes them.
+- The purity scan matches names, not resolved types or calls. It does not see an effect reached through an allowed crate (clap's `Parser::parse` reads the process's arguments, so a Pure module calling it would not be reported) or through trait dispatch.
 - Output routes other than the print macros, the stream handles and `dbg!` are not gated: panic messages reach standard error, and Shared or Command code, where filesystem access is by design, could open `/dev/stdout` or a similar device through `std::fs`, or write to descriptors 1 and 2 through `libc` or the `unsafe` raw-descriptor APIs. The `dbg_macro` lint has no sanctioned site, so the positive control cannot show it still fires; its proof is the break-once check recorded when it was added.
 - The dependency scan reads the root `Cargo.toml` line by line and takes each dependency's package key, hyphens read as underscores, as the name code uses. It does not decode TOML quoting or escapes in table names and keys (a quoted table-name segment such as `["dependencies".review_dep]`, or an escaped key such as `"review_\u0064ep"`; a plain quoted key such as `"quoted-name"` is read correctly), does not read top-level dotted keys such as `dependencies.foo = "1"`, and does not know that a dependency whose library target sets another `name` is used under that name. A dependency declared those ways escapes the crate rule in Pure modules. The guard test knows only today's ten names.
 - Network calls are not banned outside Pure modules: the `ureq` constructors are not in `clippy.toml`, because `src/version_check.rs` is the only network user; in Pure modules `ureq`, like every dependency crate except `clap`, is refused. Filesystem access is reported only in Pure modules; commands read and write forests by design.

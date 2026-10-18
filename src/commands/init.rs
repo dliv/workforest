@@ -3,11 +3,9 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::config::{ResolvedConfig, ResolvedRepo, ResolvedTemplate};
+use crate::config::{expand_tilde, ResolvedConfig, ResolvedRepo, ResolvedTemplate};
 use crate::meta::META_FILENAME;
-use crate::paths::{
-    expand_tilde, validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
-};
+use crate::paths::{validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName};
 
 pub struct InitInputs {
     pub template_name: String,

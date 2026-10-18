@@ -1,6 +1,6 @@
 1	src/commands/exec.rs	use of a disallowed method `std::process::Command::new`
 1	src/commands/init.rs	use of a disallowed method `std::process::Command::new`
-1	src/config.rs	use of a disallowed method `std::env::var`
+3	src/config.rs	use of a disallowed method `std::env::var`
 1	src/forest.rs	use of a disallowed method `std::env::current_dir`
 1	src/forest.rs	use of a disallowed method `std::env::var_os`
 2	src/git.rs	use of a disallowed method `std::process::Command::new`
@@ -12,7 +12,6 @@
 1	src/lib.rs	use of a disallowed method `std::io::stderr`
 2	src/lib.rs	use of a disallowed method `std::io::stdout`
 3	src/lib.rs	use of a disallowed method `std::process::Command::new`
-2	src/paths.rs	use of a disallowed method `std::env::var`
 9	src/version_check.rs	use of `eprintln!`
 5	src/version_check.rs	use of a disallowed method `chrono::Utc::now`
 1	src/version_check.rs	use of a disallowed method `std::env::current_exe`

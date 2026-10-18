@@ -39,8 +39,10 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/forest.rs", ModuleClass::Shared),
     ("src/git.rs", ModuleClass::Shared),
     ("src/lib.rs", ModuleClass::Root),
-    ("src/meta.rs", ModuleClass::Shared),
-    ("src/paths.rs", ModuleClass::Shared),
+    ("src/meta.rs", ModuleClass::Pure),
+    ("src/paths.rs", ModuleClass::Pure),
+    ("src/plan/branch_state.rs", ModuleClass::Pure),
+    ("src/plan/mod.rs", ModuleClass::Pure),
     ("src/testutil.rs", ModuleClass::TestSupport),
     ("src/version_check.rs", ModuleClass::Shell),
 ];
@@ -54,8 +56,6 @@ pub struct AllowedEdge {
 
 const BRANCH_STATE_HELPER: &str =
     "branch_state is the helper shared by the commands that inspect worktree branches";
-const CLI_TYPE_IMPORT: &str =
-    "type-only import of ForestMode or DisposableRootEntry, until these types move into a Pure module";
 
 /// Edges the class rules would refuse but that are sanctioned, each with a reason: the
 /// permanent boundary it is, or the change that removes it.
@@ -85,23 +85,17 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
         to: "commands::rm",
         reason: "reset reuses rm's removal plan; whether that plan becomes a shared module is an open follow-up",
     },
-    AllowedEdge {
-        from: "cli",
-        to: "meta",
-        reason: CLI_TYPE_IMPORT,
-    },
-    AllowedEdge {
-        from: "cli",
-        to: "paths",
-        reason: CLI_TYPE_IMPORT,
-    },
 ];
 
-/// Dependency crates of the root package that Pure modules may use. `clap`: src/cli.rs
-/// derives its argument types with clap's derive macros; parsing the arguments, which
-/// reads the process's arguments, happens only in src/lib.rs. Every entry must still be
-/// used by a Pure module.
-pub const PURE_ALLOWED_CRATES: &[&str] = &["clap"];
+/// Dependency crates of the root package that Pure modules may use, none of them an effect:
+/// - `anyhow` carries errors;
+/// - `chrono` supplies date and time types; its clock reads are banned by clippy.toml;
+/// - `clap`: src/cli.rs and src/meta.rs derive argument types with clap's derive macros;
+///   parsing the arguments, which reads the process's arguments, happens only in src/lib.rs;
+/// - `serde` derives serialization.
+///
+/// Every entry must still be used by a Pure module.
+pub const PURE_ALLOWED_CRATES: &[&str] = &["anyhow", "chrono", "clap", "serde"];
 
 /// "src/lib.rs" -> "crate"; "src/meta.rs" -> "meta"; "src/commands/mod.rs" -> "commands";
 /// "src/commands/rm.rs" -> "commands::rm"; "src/bin/x.rs" -> "bin::x". None for other paths.

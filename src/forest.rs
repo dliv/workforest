@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
@@ -427,6 +427,29 @@ fn forest_dir_is_under_any_base(forest_dir: &Path, worktree_bases: &[&Path]) -> 
             })
             .unwrap_or(false)
     })
+}
+
+// The metadata file's I/O lives here, beside the other forest discovery effects; the types
+// themselves are in the Pure module `meta`.
+impl ForestMeta {
+    pub fn write(&self, path: &Path) -> Result<()> {
+        self.validate()
+            .context("forest metadata has invalid disposable root entries")?;
+        let content = toml::to_string_pretty(self).context("failed to serialize forest meta")?;
+        std::fs::write(path, content)
+            .with_context(|| format!("failed to write forest meta to {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn read(path: &Path) -> Result<ForestMeta> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read forest meta from {}", path.display()))?;
+        let meta: ForestMeta =
+            toml::from_str(&content).context("failed to parse forest meta TOML")?;
+        meta.validate()
+            .context("forest metadata has invalid disposable root entries")?;
+        Ok(meta)
+    }
 }
 
 #[cfg(test)]
