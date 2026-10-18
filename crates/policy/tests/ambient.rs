@@ -74,13 +74,16 @@ fn pure_modules_use_only_allowed_crates() {
         let source = std::fs::read_to_string(repo_root().join(file))
             .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
         for name in external_crate_references(&source, &dependencies) {
-            if !PURE_ALLOWED_CRATES.contains(&name.as_str()) {
+            if !PURE_ALLOWED_CRATES
+                .iter()
+                .any(|(allowed, _)| *allowed == name.as_str())
+            {
                 problems.push(format!("{file}: crate {name}"));
             }
             used.insert(name);
         }
     }
-    for name in PURE_ALLOWED_CRATES {
+    for (name, _) in PURE_ALLOWED_CRATES {
         if !used.contains(*name) {
             problems.push(format!(
                 "{name} is in PURE_ALLOWED_CRATES but no Pure module uses it; remove the entry"

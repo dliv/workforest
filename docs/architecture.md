@@ -11,9 +11,10 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | Rule | Kind | Home |
 |------|------|------|
 | Environment, arguments, working directory, executable path, exit, process spawning and the clock are read only at sanctioned sites | Gated | Root `clippy.toml` (`disallowed-methods`); `#[expect]` at each sanctioned site |
-| Only the shell uses the standard streams: print macros by lint, stream handles by the ban list, `dbg!` nowhere in product code | Gated | `[lints.clippy]` in the root `Cargo.toml` (`print_stdout`, `print_stderr`, `dbg_macro`); root `clippy.toml` (`std::io::stdout`, `stderr`, `stdin`); `#[expect]` at each sanctioned site |
+| Only the shell uses the standard streams: print macros by lint, stream handles by the ban list, `dbg!` nowhere in product code | Gated | `[workspace.lints.clippy]` in the root `Cargo.toml` (`print_stdout`, `print_stderr`, `dbg_macro`), inherited by every member through `[lints] workspace = true`; root `clippy.toml` (`std::io::stdout`, `stderr`, `stdin`); `#[expect]` at each sanctioned site |
 | Every file under `src/` has exactly one module class | Gated | `crates/policy/src/classification.rs`; `crates/policy/tests/classification.rs` |
 | Crate-internal imports follow the class direction | Gated | `crates/policy/tests/direction.rs`; `ALLOWED_EDGES` |
+| Every workspace member has one crate class, and crate dependencies follow the class rules | Gated | `crates/policy/src/edges.rs` (`CRATES`), `PURE_ALLOWED_CRATES`; `crates/policy/tests/edges.rs` |
 | Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/ambient.rs`; `PURE_ALLOWED_CRATES` |
 | Production code declares no traits | Gated | `crates/policy/tests/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
@@ -36,6 +37,28 @@ Every `.rs` file under `src/` has exactly one class, listed in `MODULES` in `cra
 - **TestSupport**: `src/testutil.rs`, compiled only for tests. It is classified so that every file has a class, but it is not scanned.
 
 Nothing except Root imports Root.
+
+## Crate classes and edges
+
+Every workspace member has exactly one crate class, listed in `CRATES` in `crates/policy/src/edges.rs`:
+
+- **Pure** (`CrateClass::Pure { feature }`): a crate of Pure modules only, for one feature, living at `crates/<feature>/<role>/`.
+- **Binary**: the package that builds the binaries, whose modules may be of every module class. This is the root package, `git-forest`.
+- **Tooling**: a crate that checks the others and is never part of the product. This is `crates/policy` (`git-forest-policy`).
+
+`crates/policy/tests/edges.rs` runs `cargo metadata --format-version 1 --no-deps --offline`, which lists the members and the dependencies each one declares without the network and without touching `Cargo.lock`, and reads each member's `Cargo.toml` for the one fact `cargo metadata` does not report, its `[lints]` table. It fails when:
+
+- a member is missing from `CRATES`, or a `CRATES` entry is not a member;
+- a Pure crate has a build script, or does not live at `crates/<its feature>/<role>`;
+- a member has a path dependency, of any kind, on a package that is not a member;
+- a member depends on a Tooling crate, in any dependency table;
+- a normal or build dependency between members goes against the direction: a Pure crate depends only on Pure crates of its own feature, a Binary crate depends on any member except Tooling, and a Tooling crate depends on no member;
+- a Pure crate has a normal or build dependency on an external crate that is not in `PURE_ALLOWED_CRATES` (`crates/policy/src/classification.rs`), or declares a feature of an allowed crate that the list does not pin for it. The pins are `chrono`'s `serde`, `clap`'s `derive` and `serde`'s `derive`; `anyhow` has none;
+- a member's manifest does not inherit the workspace lints, which takes a `[lints]` table containing `workspace = true`.
+
+Dev-dependencies are exempt from the direction and the allowlist, except that none may point at Tooling: a Pure crate's tests may use `serde_json` or a Binary crate without its production code depending on them.
+
+Together with the compiler this decides what a Pure crate's code can reach. Rust refuses a path into a crate missing from the crate's manifest, and Cargo refuses a dependency cycle, so a Pure crate cannot name the Binary crate, any effectful workspace code or an external crate outside the allowlist. Every message names the member, the rule and the fix.
 
 ## Import direction
 
@@ -73,7 +96,7 @@ When does a trait earn its place? Only when production code has more than one re
 
 The root `clippy.toml` bans, through Clippy's `disallowed-methods`, the functions that read or change the process's surroundings: `std::env::var`, `var_os`, `vars`, `vars_os`, `args`, `args_os`, `current_dir`, `set_current_dir`, `current_exe`, `home_dir`, `set_var` and `remove_var`; `std::process::exit`, `abort` and `Command::new`; the clocks `chrono::Utc::now`, `chrono::Local::now`, `std::time::SystemTime::now` and `std::time::Instant::now`; and the `ureq` request functions `ureq::get`, `post`, `put`, `delete`, `head`, `options`, `connect`, `patch`, `trace` and `run`, with the `ureq::Agent` methods of the same names, whose one sanctioned caller is the update check in `src/version_check.rs`. Each entry carries a reason saying where the call belongs, and Clippy prints it with the error. Clippy resolves paths by definition, so aliases, glob imports and re-exports are caught. The same file bans the standard stream handles; see "Printing".
 
-A sanctioned site carries `#[expect(clippy::disallowed_methods, reason = "...")]` on the enclosing function (or, for `src/version_check.rs`, one `#![expect(...)]` for the whole module). `#[expect]` is used instead of `#[allow]` because a stale `#[expect]` fails the build with "this lint expectation is unfulfilled": when the call goes away, the attribute must go too. Sanctioned sites are of two kinds. Permanent boundaries are where the rules say an effect belongs, and stay as long as the architecture does: the composition-root functions `main_entry`, `run` and `output` in `src/lib.rs`, the git wrapper functions `git` and `ref_exists` in `src/git.rs`, and `exec`'s spawn of the user's command; their reasons name the boundary. Temporary exceptions are effects that a planned change will move; their reasons name that change, and "Planned follow-ups" lists them. Reason text is reviewed, not checked: the build enforces that every `#[expect]` still fires, not what its reason says.
+A sanctioned site carries `#[expect(clippy::disallowed_methods, reason = "...")]` on the enclosing function (or, for `src/version_check.rs`, one `#![expect(...)]` for the whole module). `#[expect]` is used instead of `#[allow]` because a stale `#[expect]` fails the build with "this lint expectation is unfulfilled": when the call goes away, the attribute must go too. Sanctioned sites are of two kinds. Permanent boundaries are where the rules say an effect belongs, and stay as long as the architecture does: the composition-root functions `main_entry`, `run` and `output` in `src/lib.rs`, the git wrapper functions `git` and `ref_exists` in `src/git.rs`, `exec`'s spawn of the user's command, and the policy crate's `cargo metadata` call in `crates/policy/src/metadata.rs`; their reasons name the boundary. Temporary exceptions are effects that a planned change will move; their reasons name that change, and "Planned follow-ups" lists them. Reason text is reviewed, not checked: the build enforces that every `#[expect]` still fires, not what its reason says.
 
 Tests are exempt. Unit tests inside `src/` get a crate-level `#![cfg_attr(test, allow(clippy::disallowed_methods, ...))]` in `src/lib.rs`; the integration tests get a crate-root `#![allow(...)]` in `tests/cli_test.rs`. Both build real git repositories and read the environment by design. Production code stays linted because Clippy also checks the library in its normal, non-test build, where the `cfg_attr` does not apply.
 
@@ -81,7 +104,7 @@ Tests are exempt. Unit tests inside `src/` get a crate-level `#![cfg_attr(test, 
 
 ## Printing
 
-Only the shell uses the standard streams: commands return data and `src/lib.rs` prints it (ADR 0002). Two gates enforce this. The root package's `[lints.clippy]` table turns on `print_stdout` and `print_stderr`, and `just check` runs Clippy with `-D warnings`, so `println!`, `print!`, `eprintln!` and `eprint!` fail outside sanctioned sites; the same table turns on `dbg_macro`, so `dbg!`, which prints to standard error, fails anywhere in product code (it has no sanctioned site). The root `clippy.toml` bans `std::io::stdout`, `std::io::stderr` and `std::io::stdin`, so acquiring a stream handle to write or read through it fails too, with the reason "acquire standard streams only in src/lib.rs". Sanctioned sites carry `#[expect(clippy::print_stdout, ...)]`, `#[expect(clippy::print_stderr, ...)]` or `#[expect(clippy::disallowed_methods, ...)]`: `run`, `output`, `print_json` and `report_failure` in `src/lib.rs` (`run` also flushes standard output while printing progress, and hands standard error to `exec`'s child under `--json`), and `src/version_check.rs`. `allow-print-in-tests = true` and `allow-dbg-in-tests = true` in `clippy.toml` exempt test code from the print and `dbg!` lints; the test exemptions described in "Ambient reads" cover the stream handles.
+Only the shell uses the standard streams: commands return data and `src/lib.rs` prints it (ADR 0002). Two gates enforce this. The `[workspace.lints.clippy]` table in the root `Cargo.toml`, which every member inherits through `[lints] workspace = true` (the edges test requires that table of every member), turns on `print_stdout` and `print_stderr`, and `just check` runs Clippy with `-D warnings`, so `println!`, `print!`, `eprintln!` and `eprint!` fail outside sanctioned sites; the same table turns on `dbg_macro`, so `dbg!`, which prints to standard error, fails anywhere in product code (it has no sanctioned site). The root `clippy.toml` bans `std::io::stdout`, `std::io::stderr` and `std::io::stdin`, so acquiring a stream handle to write or read through it fails too, with the reason "acquire standard streams only in src/lib.rs". Sanctioned sites carry `#[expect(clippy::print_stdout, ...)]`, `#[expect(clippy::print_stderr, ...)]` or `#[expect(clippy::disallowed_methods, ...)]`: `run`, `output`, `print_json` and `report_failure` in `src/lib.rs` (`run` also flushes standard output while printing progress, and hands standard error to `exec`'s child under `--json`), and `src/version_check.rs`. `allow-print-in-tests = true` and `allow-dbg-in-tests = true` in `clippy.toml` exempt test code from the print and `dbg!` lints; the test exemptions described in "Ambient reads" cover the stream handles.
 
 ## Positive control
 
@@ -91,7 +114,7 @@ The script forces `CARGO_TERM_COLOR=never` (CI sets `always`, and colour codes w
 
 ## Planned follow-ups
 
-Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `src/git.rs`, `exec`'s spawn of the user's command, the `branch_state` helper edges and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
+Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `src/git.rs`, `exec`'s spawn of the user's command, the policy crate's `cargo metadata` call, the `branch_state` helper edges and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
 
 - **Environment, home and working directory, passed in.** `xdg_dir` in `src/config.rs` reads XDG variables, `expand_tilde` in `src/config.rs` reads `HOME`, and `current_dir_preserving_symlinks` in `src/forest.rs` reads the working directory and `PWD`; `src/lib.rs` will read these and pass them in.
 - **`init`'s git check goes through `src/git.rs`.** `validate_init_inputs` runs `git` directly.
@@ -108,6 +131,8 @@ Temporary exceptions name the change that removes them; together they are the to
 
 **Allowing a crate in Pure modules.** Add it to `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs`, with a comment saying why the Pure module needs it and why what it uses is not an effect. An entry that no Pure module uses fails the test.
 
+**Adding a crate.** Put a feature crate at `crates/<feature>/<role>/`. Give its `Cargo.toml` `version = "0.0.0"` and `publish = false`, so `just release` touches only the root package, and a `[lints]` table with `workspace = true`. Add it to `[workspace] members` in the root `Cargo.toml` and to `CRATES` in `crates/policy/src/edges.rs` with its class; the edges test fails until it is there. Depend on it by path without a `version` key (`git-forest-<name> = { path = "crates/<feature>/<role>" }`), so the release version `sed` cannot match the line. Refresh `Cargo.lock` (`cargo check --workspace`) and commit it with the change, because `just check` runs Cargo with `--locked`.
+
 **Adding a trait or an allowed edge.** See "No production traits" and "Import direction". All three allowlists (edges, traits, crates) reject entries that are no longer used.
 
 ## What the gates do not prove
@@ -117,6 +142,10 @@ Temporary exceptions name the change that removes them; together they are the to
 - The purity scan matches names, not resolved types or calls. It does not see an effect reached through an allowed crate (clap's `Parser::parse` reads the process's arguments, so a Pure module calling it would not be reported) or through trait dispatch.
 - Output routes other than the print macros, the stream handles and `dbg!` are not gated: panic messages reach standard error, and Shared or Command code, where filesystem access is by design, could open `/dev/stdout` or a similar device through `std::fs`, or write to descriptors 1 and 2 through `libc` or the `unsafe` raw-descriptor APIs. The `dbg_macro` lint has no sanctioned site, so the positive control cannot show it still fires; its proof is the break-once check recorded when it was added.
 - The dependency scan reads the root `Cargo.toml` line by line and takes each dependency's package key, hyphens read as underscores, as the name code uses. It does not decode TOML quoting or escapes in table names and keys (a quoted table-name segment such as `["dependencies".review_dep]`, or an escaped key such as `"review_\u0064ep"`; a plain quoted key such as `"quoted-name"` is read correctly), does not read top-level dotted keys such as `dependencies.foo = "1"`, and does not know that a dependency whose library target sets another `name` is used under that name. A dependency declared those ways escapes the crate rule in Pure modules. The guard test knows only today's ten names.
+- The edges test reads the dependencies each member declares, not transitive ones, and checks the features a Pure crate declares, not the set Cargo unifies across a workspace build.
+- Default features are not checked, so a Pure crate keeps an allowed crate's default features, `chrono`'s clock among them; `clippy.toml` bans the clock reads.
+- Dev-dependencies are exempt from the crate direction and the Pure allowlist, except toward Tooling.
+- The lints fact is read from manifest text, and only the `[lints]` table form is recognized: a dotted `lints.workspace = true` key is reported as missing.
 - Network requests outside `src/version_check.rs` fail through the `ureq` bans; another HTTP client added as a dependency would need its own entries. Filesystem access is reported only in Pure modules; commands read and write forests by design.
 - The policy scans read only files under `src/` and the root `Cargo.toml`; integration tests, the policy crate itself and the `worker/` directory are not classified.
 - A `clippy.toml` entry with no call site anywhere is covered only by Clippy's own "does not refer to a reachable function" warning, and that warning is not emitted when the path's first segment names a crate that is not loaded, so such an entry could do nothing unnoticed. This was confirmed on Clippy 0.1.95 by an experiment that replaced an unused entry with a path under an unloaded crate and saw no warning.

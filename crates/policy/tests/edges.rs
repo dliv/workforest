@@ -1,0 +1,297 @@
+//! Every workspace member has one crate class, and the members' dependencies follow the class
+//! rules: read from `cargo metadata` for the real workspace, and checked on made-up members.
+
+use std::path::PathBuf;
+
+use git_forest_policy::classification::PURE_ALLOWED_CRATES;
+use git_forest_policy::edges::{check_edges, CrateClass, CRATES};
+use git_forest_policy::manifest::manifest_inherits_workspace_lints;
+use git_forest_policy::metadata::{
+    parse_members, workspace_members, Dependency, DependencyKind, ListedMember, Member,
+};
+
+const SECTION: &str = "see docs/architecture.md, section \"Crate classes and edges\"";
+
+const WIDGETS: CrateClass = CrateClass::Pure { feature: "widgets" };
+const GADGETS: CrateClass = CrateClass::Pure { feature: "gadgets" };
+
+fn member(name: &str, dir: &str, dependencies: Vec<Dependency>) -> Member {
+    Member {
+        name: name.to_owned(),
+        dir: dir.to_owned(),
+        has_build_script: false,
+        inherits_workspace_lints: true,
+        dependencies,
+    }
+}
+
+fn dependency(name: &str, kind: DependencyKind, is_path: bool, features: &[&str]) -> Dependency {
+    Dependency {
+        name: name.to_owned(),
+        kind,
+        is_path,
+        features: features
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect(),
+    }
+}
+
+fn normal(name: &str, features: &[&str]) -> Dependency {
+    dependency(name, DependencyKind::Normal, false, features)
+}
+
+fn path(name: &str, kind: DependencyKind) -> Dependency {
+    dependency(name, kind, true, &[])
+}
+
+#[test]
+fn workspace_members_follow_the_crate_rules() {
+    let members = workspace_members().unwrap_or_else(|error| panic!("{error} ({SECTION})"));
+    assert!(
+        members
+            .iter()
+            .any(|member| member.name == "git-forest" && !member.dependencies.is_empty()),
+        "cargo metadata did not list the root package git-forest with its dependencies, so the \
+         crate rules would check nothing ({SECTION})"
+    );
+    let problems = check_edges(&members, CRATES, PURE_ALLOWED_CRATES);
+    assert!(
+        problems.is_empty(),
+        "the workspace members break the crate rules:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn planted_members_report_every_violation() {
+    let crates: &[(&str, CrateClass)] = &[
+        ("app", CrateClass::Binary),
+        ("gadgets-core", GADGETS),
+        ("ghost", CrateClass::Binary),
+        ("tools", CrateClass::Tooling),
+        ("widgets-build", WIDGETS),
+        ("widgets-core", WIDGETS),
+        ("widgets-misplaced", WIDGETS),
+    ];
+    let mut widgets_build = member("widgets-build", "crates/widgets/build", vec![]);
+    widgets_build.has_build_script = true;
+    let mut gadgets_core = member(
+        "gadgets-core",
+        "crates/gadgets/core",
+        vec![normal("anyhow", &[])],
+    );
+    gadgets_core.inherits_workspace_lints = false;
+    let members = vec![
+        member(
+            "app",
+            "",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                normal("ureq", &["json"]),
+                path("vendored", DependencyKind::Normal),
+                path("tools", DependencyKind::Dev),
+            ],
+        ),
+        gadgets_core,
+        member("mystery", "crates/mystery", vec![]),
+        member("tools", "crates/tools", vec![normal("serde_json", &[])]),
+        widgets_build,
+        member(
+            "widgets-core",
+            "crates/widgets/core",
+            vec![
+                path("app", DependencyKind::Normal),
+                path("gadgets-core", DependencyKind::Normal),
+                normal("ureq", &[]),
+                normal("clap", &["derive", "env"]),
+            ],
+        ),
+        member("widgets-misplaced", "crates/misplaced", vec![]),
+    ];
+
+    let problems = check_edges(&members, crates, PURE_ALLOWED_CRATES);
+
+    let expected = [
+        "mystery is not classified",
+        "ghost is in CRATES but is not a workspace member",
+        "widgets-build is a Pure crate with a build script",
+        "widgets-misplaced is a Pure crate of feature widgets at `crates/misplaced`",
+        "app has a path dependency on vendored, which is not a workspace member",
+        "app depends on the Tooling crate tools",
+        "widgets-core (Pure crate of feature widgets) depends on app (Binary crate)",
+        "widgets-core (Pure crate of feature widgets) depends on gadgets-core (Pure crate of \
+         feature gadgets)",
+        "widgets-core is a Pure crate and depends on ureq, which is not in PURE_ALLOWED_CRATES",
+        "widgets-core declares feature env of clap",
+        "gadgets-core does not inherit the workspace lints",
+    ];
+    for fragment in expected {
+        let matching = problems
+            .iter()
+            .filter(|problem| problem.contains(fragment))
+            .count();
+        assert_eq!(
+            matching,
+            1,
+            "expected exactly one message containing {fragment:?}, got:\n  {}",
+            problems.join("\n  ")
+        );
+    }
+    assert_eq!(
+        problems.len(),
+        expected.len(),
+        "unexpected messages:\n  {}",
+        problems.join("\n  ")
+    );
+    assert!(
+        problems.iter().all(|problem| problem.ends_with(SECTION)),
+        "every message points at the docs:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn legitimate_members_report_nothing() {
+    let crates: &[(&str, CrateClass)] = &[
+        ("app", CrateClass::Binary),
+        ("tools", CrateClass::Tooling),
+        ("widgets-core", WIDGETS),
+        ("widgets-render", WIDGETS),
+    ];
+    let members = vec![
+        member(
+            "widgets-core",
+            "crates/widgets/core",
+            vec![
+                normal("anyhow", &[]),
+                normal("chrono", &["serde"]),
+                normal("clap", &["derive"]),
+                normal("serde", &["derive"]),
+                path("widgets-render", DependencyKind::Normal),
+                dependency("serde_json", DependencyKind::Dev, false, &[]),
+                path("app", DependencyKind::Dev),
+            ],
+        ),
+        member(
+            "widgets-render",
+            "crates/widgets/render",
+            vec![normal("serde", &["derive"])],
+        ),
+        member(
+            "app",
+            "",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                path("widgets-render", DependencyKind::Normal),
+                normal("ureq", &["json"]),
+            ],
+        ),
+        member("tools", "crates/tools", vec![normal("serde_json", &[])]),
+    ];
+
+    let problems = check_edges(&members, crates, PURE_ALLOWED_CRATES);
+
+    assert!(
+        problems.is_empty(),
+        "legitimate members were refused:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn members_parse_the_cargo_metadata_shape() {
+    let metadata = r#"{
+  "packages": [
+    {
+      "name": "app",
+      "version": "1.0.0",
+      "manifest_path": "/ws/Cargo.toml",
+      "targets": [
+        { "kind": ["lib"], "name": "app", "src_path": "/ws/src/lib.rs" },
+        { "kind": ["bin"], "name": "app", "src_path": "/ws/src/main.rs" }
+      ],
+      "dependencies": [
+        { "name": "widgets-core", "kind": null, "path": "/ws/crates/widgets/core", "features": [], "uses_default_features": true, "target": null, "rename": null },
+        { "name": "ureq", "kind": null, "features": ["json"], "uses_default_features": true, "target": null, "rename": null },
+        { "name": "tempfile", "kind": "dev", "features": [], "uses_default_features": true, "target": null, "rename": null }
+      ]
+    },
+    {
+      "name": "widgets-core",
+      "version": "0.0.0",
+      "manifest_path": "/ws/crates/widgets/core/Cargo.toml",
+      "targets": [
+        { "kind": ["lib"], "name": "widgets_core", "src_path": "/ws/crates/widgets/core/src/lib.rs" },
+        { "kind": ["custom-build"], "name": "build-script-build", "src_path": "/ws/crates/widgets/core/build.rs" }
+      ],
+      "dependencies": [
+        { "name": "cc", "kind": "build", "features": ["parallel"], "uses_default_features": true, "target": null, "rename": null }
+      ]
+    }
+  ],
+  "workspace_members": [],
+  "workspace_root": "/ws"
+}"#;
+
+    let members = parse_members(metadata).unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        members,
+        vec![
+            ListedMember {
+                name: "app".to_owned(),
+                dir: String::new(),
+                manifest_path: PathBuf::from("/ws/Cargo.toml"),
+                has_build_script: false,
+                dependencies: vec![
+                    path("widgets-core", DependencyKind::Normal),
+                    normal("ureq", &["json"]),
+                    dependency("tempfile", DependencyKind::Dev, false, &[]),
+                ],
+            },
+            ListedMember {
+                name: "widgets-core".to_owned(),
+                dir: "crates/widgets/core".to_owned(),
+                manifest_path: PathBuf::from("/ws/crates/widgets/core/Cargo.toml"),
+                has_build_script: true,
+                dependencies: vec![dependency(
+                    "cc",
+                    DependencyKind::Build,
+                    false,
+                    &["parallel"]
+                )],
+            },
+        ]
+    );
+    let app = members[0]
+        .clone()
+        .with_manifest("[package]\nname = \"app\"\n\n[lints]\nworkspace = true\n");
+    assert!(app.inherits_workspace_lints);
+
+    assert!(manifest_inherits_workspace_lints(
+        "[package]\nname = \"app\"\n\n[lints] # shared\nworkspace = true # every member\n"
+    ));
+    assert!(!manifest_inherits_workspace_lints(
+        "[package]\nname = \"app\"\n\n[dependencies]\nanyhow = \"1\"\n"
+    ));
+    assert!(!manifest_inherits_workspace_lints(
+        "[package]\nname = \"app\"\n\n[lints]\nworkspace = false\n"
+    ));
+    assert!(!manifest_inherits_workspace_lints(
+        "[package]\nname = \"app\"\n\n[workspace]\nmembers = [\"crates/policy\"]\n\n\
+         [workspace.lints.clippy]\nprint_stdout = \"warn\"\n"
+    ));
+
+    for malformed in [
+        "not json",
+        "{}",
+        r#"{"workspace_root": "/ws", "packages": [{}]}"#,
+    ] {
+        let error = parse_members(malformed).expect_err("a malformed document is an error");
+        assert!(
+            error.contains("cargo metadata"),
+            "the error names cargo metadata: {error}"
+        );
+    }
+}

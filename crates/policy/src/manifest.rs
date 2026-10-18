@@ -1,5 +1,6 @@
-//! Reads dependency names from a Cargo manifest without a TOML library; only the forms used
-//! by Cargo dependency tables are recognized, and a guard test checks the result is not empty.
+//! Reads facts from a Cargo manifest's text without a TOML library: dependency names, and
+//! whether the manifest inherits the workspace lints. Only the forms Cargo manifests use are
+//! recognized, and guard tests check the results on the real manifests.
 
 use std::collections::BTreeSet;
 
@@ -33,6 +34,32 @@ pub fn dependency_crate_names(manifest: &str) -> BTreeSet<String> {
         }
     }
     names
+}
+
+/// Whether a manifest inherits the workspace lints: it has a `[lints]` table containing
+/// `workspace = true`. That table form is the only one recognized; a dotted
+/// `lints.workspace = true` key under another table reads as not inheriting them.
+pub fn manifest_inherits_workspace_lints(manifest: &str) -> bool {
+    let mut in_lints_table = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_lints_table = table_header_name(line) == "lints";
+            continue;
+        }
+        if !in_lints_table {
+            continue;
+        }
+        let line = line.split('#').next().unwrap_or(line);
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "workspace" && value.trim() == "true" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The name of a table header line: the text inside its outermost brackets, after cutting a

@@ -85,15 +85,25 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     },
 ];
 
-/// Dependency crates of the root package that Pure modules may use, none of them an effect:
-/// - `anyhow` carries errors;
-/// - `chrono` supplies date and time types; its clock reads are banned by clippy.toml;
+/// Dependency crates that Pure code may use, none of them an effect, each with the features a
+/// Pure crate may declare for it:
+/// - `anyhow` carries errors; no features;
+/// - `chrono` supplies date and time types; its clock reads are banned by clippy.toml; `serde`,
+///   so that the metadata types serialize their timestamps;
 /// - `clap`: src/cli.rs and src/meta.rs derive argument types with clap's derive macros;
 ///   parsing the arguments, which reads the process's arguments, happens only in src/lib.rs;
-/// - `serde` derives serialization.
+///   `derive`, for those macros;
+/// - `serde` derives serialization; `derive`, for its derive macros.
 ///
-/// Every entry must still be used by a Pure module.
-pub const PURE_ALLOWED_CRATES: &[&str] = &["anyhow", "chrono", "clap", "serde"];
+/// The purity scan reads the names, and every entry must still be used by a Pure module. The
+/// edges test reads the features: a Pure crate may declare only the pinned ones. Default
+/// features are not checked.
+pub const PURE_ALLOWED_CRATES: &[(&str, &[&str])] = &[
+    ("anyhow", &[]),
+    ("chrono", &["serde"]),
+    ("clap", &["derive"]),
+    ("serde", &["derive"]),
+];
 
 /// "src/lib.rs" -> "crate"; "src/meta.rs" -> "meta"; "src/commands/mod.rs" -> "commands";
 /// "src/commands/rm.rs" -> "commands::rm"; "src/bin/x.rs" -> "bin::x". None for other paths.

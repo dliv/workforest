@@ -1,3 +1,4 @@
+1	crates/policy/src/metadata.rs	use of a disallowed method `std::process::Command::new`
 1	src/commands/exec.rs	use of a disallowed method `std::process::Command::new`
 1	src/commands/init.rs	use of a disallowed method `std::process::Command::new`
 3	src/config.rs	use of a disallowed method `std::env::var`
