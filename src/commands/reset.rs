@@ -15,11 +15,43 @@ pub enum ResetProgress<'a> {
     ForestDone(&'a ForestResetEntry),
 }
 
+/// How a reset runs, derived once from its flags: `--dry-run` wins, and a run without
+/// `--confirm` needs confirmation. It decides both what the reset observes and what it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetRun {
+    /// `--dry-run`: preview the reset.
+    DryRun,
+    /// Neither `--dry-run` nor `--confirm`: preview the reset and ask for `--confirm`.
+    ConfirmationRequired,
+    /// `--confirm`: remove the forests, back up the config and delete the state file.
+    Confirmed,
+}
+
+impl ResetRun {
+    fn from_flags(confirm: bool, dry_run: bool) -> Self {
+        if dry_run {
+            Self::DryRun
+        } else if confirm {
+            Self::Confirmed
+        } else {
+            Self::ConfirmationRequired
+        }
+    }
+
+    /// Whether the run previews the reset, and so reads each forest's dry-run facts.
+    fn previews(self) -> bool {
+        match self {
+            Self::DryRun | Self::ConfirmationRequired => true,
+            Self::Confirmed => false,
+        }
+    }
+}
+
 // --- Planning (read-only) ---
 
 /// Plans a reset: observes the config, the state file and the forests, then decides.
-fn plan_reset(config_only: bool) -> Result<ResetPlan> {
-    decide_reset_plan(config_only, observe_reset(config_only))
+fn plan_reset(config_only: bool, run: ResetRun) -> Result<ResetPlan> {
+    decide_reset_plan(config_only, observe_reset(config_only, run))
 }
 
 // --- Observation (read-only) ---
@@ -27,13 +59,16 @@ fn plan_reset(config_only: bool) -> Result<ResetPlan> {
 /// Reads what planning a reset needs: the config and state paths and whether they exist, and,
 /// unless `config_only`, the forests under the config's worktree bases. Every read error is
 /// kept for `decide_reset_plan`.
-fn observe_reset(config_only: bool) -> ResetObservation {
+fn observe_reset(config_only: bool, run: ResetRun) -> ResetObservation {
     let config_path = crate::config::default_config_path();
     let state_path = crate::config::xdg_state_dir().map(|dir| dir.join("state.toml"));
     let files = match (&config_path, &state_path) {
-        (Ok(config_path), Ok(state_path)) => {
-            Some(observe_reset_files(config_path, state_path, config_only))
-        }
+        (Ok(config_path), Ok(state_path)) => Some(observe_reset_files(
+            config_path,
+            state_path,
+            config_only,
+            run,
+        )),
         _ => None,
     };
     ResetObservation {
@@ -47,13 +82,14 @@ fn observe_reset_files(
     config_path: &Path,
     state_path: &Path,
     config_only: bool,
+    run: ResetRun,
 ) -> ResetFilesObservation {
     let config_exists = config_path.exists();
     let state_exists = state_path.exists();
     let config =
         (!config_only && config_exists).then(|| match crate::config::load_config(config_path) {
             Ok(config) => {
-                ConfigObservation::Scanned(observe_discovery(config.all_worktree_bases()))
+                ConfigObservation::Scanned(observe_discovery(config.all_worktree_bases(), run))
             }
             Err(error) => ConfigObservation::Unparsable(error.to_string()),
         });
@@ -65,8 +101,9 @@ fn observe_reset_files(
 }
 
 /// Scans each worktree base for forests, keeping each base's error, and observes every forest
-/// found, after deduplication, as a dry-run of its removal would.
-fn observe_discovery(bases: Vec<&Path>) -> DiscoveryObservation {
+/// found, after deduplication, as planning its removal would; a preview also reads what a
+/// dry-run of its removal would, into the removal observation's `dry_run`.
+fn observe_discovery(bases: Vec<&Path>, run: ResetRun) -> DiscoveryObservation {
     let mut base_failures = Vec::new();
     let mut discovered_forests = Vec::new();
     for base in bases {
@@ -81,14 +118,19 @@ fn observe_discovery(bases: Vec<&Path>) -> DiscoveryObservation {
     let forests = dedupe_discovered_forests(discovered_forests)
         .into_iter()
         .map(|discovered| {
-            let rm = rm::observe_rm_planning(&discovered.dir, &discovered.meta);
-            let dry_run = rm::observe_rm_dry_run(&discovered.dir, &discovered.meta, &rm.repos);
+            let mut rm = rm::observe_rm_planning(&discovered.dir, &discovered.meta);
+            if run.previews() {
+                rm.dry_run = Some(rm::observe_rm_dry_run(
+                    &discovered.dir,
+                    &discovered.meta,
+                    &rm.repos,
+                ));
+            }
             ForestObservation {
                 path_exists: discovered.dir.exists(),
                 path: discovered.dir,
                 meta: discovered.meta,
                 rm,
-                dry_run,
             }
         })
         .collect();
@@ -300,17 +342,14 @@ pub fn cmd_reset(
     now: chrono::DateTime<chrono::Utc>,
     on_progress: Option<&dyn Fn(ResetProgress)>,
 ) -> Result<ResetResult> {
-    let plan = plan_reset(config_only)?;
+    let run = ResetRun::from_flags(confirm, dry_run);
+    let plan = plan_reset(config_only, run)?;
 
-    if dry_run {
-        return Ok(plan_to_dry_run(&plan));
-    }
-
-    if !confirm {
-        return Ok(plan_to_confirm_required(&plan));
-    }
-
-    Ok(execute_reset(&plan, now, on_progress))
+    Ok(match run {
+        ResetRun::DryRun => plan_to_dry_run(&plan),
+        ResetRun::ConfirmationRequired => plan_to_confirm_required(&plan),
+        ResetRun::Confirmed => execute_reset(&plan, now, on_progress),
+    })
 }
 
 #[cfg(test)]
@@ -765,6 +804,45 @@ path = "/tmp/nonexistent-repo"
         assert!(result.forests[0].removed);
         assert!(!forest_dir.exists());
         assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn observe_reset_reads_dry_run_facts_only_for_a_preview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+        let forest_dir = worktree_base.join("my-feature");
+        std::fs::create_dir_all(&forest_dir).unwrap();
+        let meta = crate::meta::ForestMeta {
+            name: crate::paths::ForestName::new("my-feature".to_string()).unwrap(),
+            created_at: chrono::Utc::now(),
+            mode: crate::meta::ForestMode::Feature,
+            disposable_root_entries: vec![],
+            repos: vec![],
+        };
+        meta.write(&forest_dir.join(crate::meta::META_FILENAME))
+            .unwrap();
+        write_reset_config(
+            tmp.path(),
+            &worktree_base,
+            &tmp.path().join("nonexistent-repo"),
+            "nonexistent-repo",
+        );
+
+        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
+
+        let reads_dry_run_facts = |run: ResetRun| {
+            let files = observe_reset(false, run).files.expect("both paths resolve");
+            let Some(ConfigObservation::Scanned(discovery)) = files.config else {
+                panic!("the config's worktree base is scanned");
+            };
+            assert_eq!(discovery.forests.len(), 1);
+            discovery.forests[0].rm.dry_run.is_some()
+        };
+
+        assert!(reads_dry_run_facts(ResetRun::DryRun));
+        assert!(reads_dry_run_facts(ResetRun::ConfirmationRequired));
+        assert!(!reads_dry_run_facts(ResetRun::Confirmed));
     }
 
     #[cfg(unix)]

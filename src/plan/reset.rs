@@ -105,13 +105,13 @@ pub struct BaseScanFailure {
 }
 
 /// One forest a reset would remove: its path and metadata, whether the path exists, and what
-/// planning and a dry-run of its removal read.
+/// planning its removal read. A preview's dry-run facts are in the removal observation's
+/// `dry_run`; a confirmed reset reads none.
 pub struct ForestObservation {
     pub path: PathBuf,
     pub meta: ForestMeta,
     pub path_exists: bool,
     pub rm: RmObservation,
-    pub dry_run: RmDryRunObservation,
 }
 
 /// One forest of a reset plan.
@@ -120,8 +120,9 @@ pub(crate) struct ForestInfo {
     pub(crate) path: PathBuf,
     pub(crate) repos: Vec<RepoRmPlan>,
     pub(crate) root_rejection: Option<CleanupIssue>,
-    /// What a dry-run of the forest's removal read while planning.
-    pub(crate) dry_run: RmDryRunObservation,
+    /// What a dry-run of the forest's removal read while planning; present only when the run
+    /// previews.
+    pub(crate) dry_run: Option<RmDryRunObservation>,
     /// Whether the forest path existed while planning.
     pub(crate) path_exists: bool,
 }
@@ -180,7 +181,7 @@ pub(crate) fn decide_reset_plan(
                     path: forest.path,
                     root_rejection: rm_plan.root_rejection(),
                     repos: rm_plan.repo_plans,
-                    dry_run: forest.dry_run,
+                    dry_run: rm_plan.dry_run,
                     path_exists: forest.path_exists,
                 });
             }
@@ -281,29 +282,34 @@ pub(crate) fn repo_reset_entry(
 
 /// The preview of a reset: each forest's removal decided from what planning observed, through
 /// `rm`'s dry-run decisions, and the config and state files kept unless every forest is clean.
+/// Only previews reach it, and a preview's plan carries each forest's dry-run observation.
 pub(crate) fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
     let mut errors = plan.discovery_errors.clone();
     let forests: Vec<ForestResetEntry> = plan
         .forests
         .iter()
         .map(|f| {
+            let dry_run = f
+                .dry_run
+                .as_ref()
+                .expect("a plan made for a preview carries each forest's dry-run observation");
             let forest_error_start = errors.len();
             let repos = if let Some(error) = f
                 .root_rejection
                 .clone()
-                .or_else(|| f.dry_run.current_root_refusal.clone().map(root_refused))
+                .or_else(|| dry_run.current_root_refusal.clone().map(root_refused))
             {
                 errors.push(error);
                 vec![]
             } else {
                 debug_assert_eq!(
                     f.repos.len(),
-                    f.dry_run.repos.len(),
+                    dry_run.repos.len(),
                     "a reset observes every repo of a forest whose root is not refused"
                 );
                 f.repos
                     .iter()
-                    .zip(&f.dry_run.repos)
+                    .zip(&dry_run.repos)
                     .map(|(repo, observed)| {
                         let (worktree_removed, wt_succeeded) =
                             plan_reset_worktree_outcome(repo, observed, &mut errors);
@@ -681,30 +687,29 @@ mod tests {
                     detached_head_safety: DetachedHeadSafety::NotDetached,
                     has_dirty_files: false,
                 }],
-                dry_run: None,
-            },
-            dry_run: RmDryRunObservation {
-                current_root_refusal: None,
-                repos: vec![RepoDryRunObservation {
-                    worktree_is_symlink: false,
-                    worktree_canonical: Some(worktree_path.clone()),
-                    worktrees: Some(Ok(vec![WorktreeEntry {
-                        path: worktree_path.clone(),
-                        canonical: Some(worktree_path),
-                        branch: Some(format!("refs/heads/{branch}")),
-                        locked,
-                    }])),
-                    branch: Some(BranchObservation {
-                        exists: Ok(true),
-                        deletes_without_force: true,
-                        safe_to_force_delete: false,
-                    }),
-                }],
-                forest_dir: ForestDirObservation {
-                    exists: true,
-                    is_symlink: false,
-                    listing: ForestDirListing::Entries(vec![]),
-                },
+                dry_run: Some(RmDryRunObservation {
+                    current_root_refusal: None,
+                    repos: vec![RepoDryRunObservation {
+                        worktree_is_symlink: false,
+                        worktree_canonical: Some(worktree_path.clone()),
+                        worktrees: Some(Ok(vec![WorktreeEntry {
+                            path: worktree_path.clone(),
+                            canonical: Some(worktree_path),
+                            branch: Some(format!("refs/heads/{branch}")),
+                            locked,
+                        }])),
+                        branch: Some(BranchObservation {
+                            exists: Ok(true),
+                            deletes_without_force: true,
+                            safe_to_force_delete: false,
+                        }),
+                    }],
+                    forest_dir: ForestDirObservation {
+                        exists: true,
+                        is_symlink: false,
+                        listing: ForestDirListing::Entries(vec![]),
+                    },
+                }),
             },
             path,
         }
