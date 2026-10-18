@@ -75,28 +75,13 @@ pub struct RepoConfig {
 
 // --- Resolved types (post-parse) ---
 
-#[derive(Debug, Clone)]
-pub struct ResolvedRepo {
-    pub path: AbsolutePath,
-    pub name: RepoName,
-    pub base_branch: String,
-    pub remote: String,
-}
+pub use crate::plan::new::{ResolvedRepo, ResolvedTemplate};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub default_template: String,
     pub templates: BTreeMap<String, ResolvedTemplate>,
     pub version_check: Option<VersionCheckConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedTemplate {
-    pub worktree_base: AbsolutePath,
-    pub base_branch: String,
-    pub feature_branch_template: String,
-    pub disposable_root_entries: Vec<DisposableRootEntry>,
-    pub repos: Vec<ResolvedRepo>,
 }
 
 impl ResolvedConfig {

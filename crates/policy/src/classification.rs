@@ -43,6 +43,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/paths.rs", ModuleClass::Pure),
     ("src/plan/branch_state.rs", ModuleClass::Pure),
     ("src/plan/mod.rs", ModuleClass::Pure),
+    ("src/plan/new.rs", ModuleClass::Pure),
     ("src/testutil.rs", ModuleClass::TestSupport),
     ("src/version_check.rs", ModuleClass::Shell),
 ];

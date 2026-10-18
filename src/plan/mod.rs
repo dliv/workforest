@@ -3,3 +3,4 @@
 //! and execute plans.
 
 pub(crate) mod branch_state;
+pub(crate) mod new;
