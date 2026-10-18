@@ -1,7 +1,9 @@
 //! The workspace graph as `cargo metadata` reports it: each member's name, directory, build
-//! script and declared dependencies, plus whether its manifest inherits the workspace lints,
-//! which `cargo metadata` does not report and which is read from the manifest's text.
+//! script, own `[features]` table and declared dependencies, plus whether its manifest inherits
+//! the workspace lints, which `cargo metadata` does not report and which is read from the
+//! manifest's text.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -23,14 +25,30 @@ pub enum DependencyKind {
 /// One dependency a member declares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dependency {
-    /// The package name, as `cargo metadata` reports it (hyphens kept, a `rename` ignored).
+    /// The package name, as `cargo metadata` reports it (hyphens kept).
     pub name: String,
+    /// The name the manifest declares the dependency under when it differs from the package
+    /// name (`<rename> = { package = "<name>", ... }`).
+    pub rename: Option<String>,
     pub kind: DependencyKind,
     /// Whether the dependency is declared with a `path`.
     pub is_path: bool,
     /// The features the declaration enables explicitly; default features are not listed.
     pub features: Vec<String>,
 }
+
+impl Dependency {
+    /// The name the member's manifest, and so its `[features]` table, uses for the dependency:
+    /// its `rename` when it has one, else its package name.
+    pub fn manifest_name(&self) -> &str {
+        self.rename.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// A package's own `[features]` table as `cargo metadata` reports it: each feature's name and
+/// the entries it enables (`dep:<name>`, `<dep>/<feat>`, `<dep>?/<feat>` or another feature's
+/// name), `default` included when the manifest declares it.
+pub type Features = BTreeMap<String, Vec<String>>;
 
 /// One workspace member.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +62,7 @@ pub struct Member {
     pub has_build_script: bool,
     /// Whether the manifest has a `[lints]` table containing `workspace = true`.
     pub inherits_workspace_lints: bool,
+    pub features: Features,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -56,6 +75,7 @@ pub struct ListedMember {
     /// The absolute path of the member's `Cargo.toml`.
     pub manifest_path: PathBuf,
     pub has_build_script: bool,
+    pub features: Features,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -67,6 +87,7 @@ impl ListedMember {
             name: self.name,
             dir: self.dir,
             has_build_script: self.has_build_script,
+            features: self.features,
             dependencies: self.dependencies,
         }
     }
@@ -111,6 +132,7 @@ fn parse_member(package: &Value, workspace_root: &Path) -> Result<ListedMember, 
             }
         }
     }
+    let features = parse_features(package, &context)?;
     let dependencies = array_field(package, "dependencies", &context)?
         .iter()
         .map(|dependency| parse_dependency(dependency, &context))
@@ -120,8 +142,25 @@ fn parse_member(package: &Value, workspace_root: &Path) -> Result<ListedMember, 
         dir,
         manifest_path,
         has_build_script,
+        features,
         dependencies,
     })
+}
+
+fn parse_features(package: &Value, context: &str) -> Result<Features, String> {
+    package
+        .get("features")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("cargo metadata output has no object `features` in {context}"))?
+        .iter()
+        .map(|(feature, enables)| {
+            let context = format!("{context}, feature {feature}");
+            let enables = enables.as_array().ok_or_else(|| {
+                format!("cargo metadata output has no array of enabled features for {context}")
+            })?;
+            Ok((feature.clone(), feature_names(enables, &context)?))
+        })
+        .collect()
 }
 
 fn parse_dependency(dependency: &Value, context: &str) -> Result<Dependency, String> {
@@ -137,8 +176,28 @@ fn parse_dependency(dependency: &Value, context: &str) -> Result<Dependency, Str
             ))
         }
     };
+    let rename = match dependency.get("rename") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(rename)) => Some(rename.clone()),
+        Some(other) => {
+            return Err(format!(
+                "cargo metadata reports a non-string rename {other} for {context}"
+            ))
+        }
+    };
     let is_path = dependency.get("path").is_some_and(|path| !path.is_null());
-    let features = array_field(dependency, "features", &context)?
+    let features = feature_names(array_field(dependency, "features", &context)?, &context)?;
+    Ok(Dependency {
+        name,
+        rename,
+        kind,
+        is_path,
+        features,
+    })
+}
+
+fn feature_names(features: &[Value], context: &str) -> Result<Vec<String>, String> {
+    features
         .iter()
         .map(|feature| {
             feature
@@ -146,13 +205,7 @@ fn parse_dependency(dependency: &Value, context: &str) -> Result<Dependency, Str
                 .map(ToOwned::to_owned)
                 .ok_or_else(|| format!("cargo metadata lists a non-string feature for {context}"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Dependency {
-        name,
-        kind,
-        is_path,
-        features,
-    })
+        .collect()
 }
 
 fn string_field<'a>(value: &'a Value, key: &str, context: &str) -> Result<&'a str, String> {

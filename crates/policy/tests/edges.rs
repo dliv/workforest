@@ -7,7 +7,7 @@ use git_forest_policy::classification::PURE_ALLOWED_CRATES;
 use git_forest_policy::edges::{check_edges, CrateClass, CRATES};
 use git_forest_policy::manifest::manifest_inherits_workspace_lints;
 use git_forest_policy::metadata::{
-    parse_members, workspace_members, Dependency, DependencyKind, ListedMember, Member,
+    parse_members, workspace_members, Dependency, DependencyKind, Features, ListedMember, Member,
 };
 
 const SECTION: &str = "see docs/architecture.md, section \"Crate classes and edges\"";
@@ -21,13 +21,31 @@ fn member(name: &str, dir: &str, dependencies: Vec<Dependency>) -> Member {
         dir: dir.to_owned(),
         has_build_script: false,
         inherits_workspace_lints: true,
+        features: Features::new(),
         dependencies,
     }
+}
+
+/// A `[features]` table: each feature's name and the entries it enables.
+fn features(table: &[(&str, &[&str])]) -> Features {
+    table
+        .iter()
+        .map(|(feature, entries)| {
+            let entries = entries.iter().map(|entry| (*entry).to_owned()).collect();
+            ((*feature).to_owned(), entries)
+        })
+        .collect()
+}
+
+fn with_features(mut member: Member, table: &[(&str, &[&str])]) -> Member {
+    member.features = features(table);
+    member
 }
 
 fn dependency(name: &str, kind: DependencyKind, is_path: bool, features: &[&str]) -> Dependency {
     Dependency {
         name: name.to_owned(),
+        rename: None,
         kind,
         is_path,
         features: features
@@ -43,6 +61,13 @@ fn normal(name: &str, features: &[&str]) -> Dependency {
 
 fn path(name: &str, kind: DependencyKind) -> Dependency {
     dependency(name, kind, true, &[])
+}
+
+fn renamed(rename: &str, dependency: Dependency) -> Dependency {
+    Dependency {
+        rename: Some(rename.to_owned()),
+        ..dependency
+    }
 }
 
 #[test]
@@ -69,10 +94,18 @@ fn planted_members_report_every_violation() {
         ("app", CrateClass::Binary),
         ("gadgets-core", GADGETS),
         ("ghost", CrateClass::Binary),
+        ("torn", WIDGETS),
         ("tools", CrateClass::Tooling),
+        ("twin", CrateClass::Binary),
+        ("twin", CrateClass::Binary),
         ("widgets-build", WIDGETS),
         ("widgets-core", WIDGETS),
+        ("widgets-forward-default", WIDGETS),
+        ("widgets-forward-named", WIDGETS),
+        ("widgets-forward-renamed", WIDGETS),
+        ("widgets-forward-weak", WIDGETS),
         ("widgets-misplaced", WIDGETS),
+        ("torn", CrateClass::Binary),
     ];
     let mut widgets_build = member("widgets-build", "crates/widgets/build", vec![]);
     widgets_build.has_build_script = true;
@@ -108,6 +141,45 @@ fn planted_members_report_every_violation() {
             ],
         ),
         member("widgets-misplaced", "crates/misplaced", vec![]),
+        with_features(
+            member(
+                "widgets-forward-default",
+                "crates/widgets/forward-default",
+                vec![normal("clap", &["derive"])],
+            ),
+            &[("default", &["clap/env"])],
+        ),
+        with_features(
+            member(
+                "widgets-forward-named",
+                "crates/widgets/forward-named",
+                vec![normal("clap", &["derive"])],
+            ),
+            &[
+                ("default", &["environment-input"]),
+                ("environment-input", &["clap/env"]),
+            ],
+        ),
+        with_features(
+            member(
+                "widgets-forward-weak",
+                "crates/widgets/forward-weak",
+                vec![normal("chrono", &["serde"])],
+            ),
+            &[("clock", &["chrono?/clock"])],
+        ),
+        with_features(
+            member(
+                "widgets-forward-renamed",
+                "crates/widgets/forward-renamed",
+                vec![renamed("cli", normal("clap", &["derive"]))],
+            ),
+            &[("terminal", &["cli/env"])],
+        ),
+        // Listed twice with one class, and twice with two: one message each, and no class rule,
+        // though torn as a Pure crate would be misplaced and depend on a crate not allowed.
+        member("twin", "crates/twin", vec![]),
+        member("torn", "crates/torn", vec![normal("ureq", &[])]),
     ];
 
     let problems = check_edges(&members, crates, PURE_ALLOWED_CRATES);
@@ -125,6 +197,16 @@ fn planted_members_report_every_violation() {
         "widgets-core is a Pure crate and depends on ureq, which is not in PURE_ALLOWED_CRATES",
         "widgets-core declares feature env of clap",
         "gadgets-core does not inherit the workspace lints",
+        "widgets-forward-default forwards feature env of clap through its feature default \
+         (`clap/env`)",
+        "widgets-forward-named forwards feature env of clap through its feature \
+         environment-input (`clap/env`)",
+        "widgets-forward-weak forwards feature clock of chrono through its feature clock \
+         (`chrono?/clock`)",
+        "widgets-forward-renamed forwards feature env of clap through its feature terminal \
+         (`cli/env`)",
+        "twin is listed 2 times in CRATES (Binary crate, Binary crate)",
+        "torn is listed 2 times in CRATES (Pure crate of feature widgets, Binary crate)",
     ];
     for fragment in expected {
         let matching = problems
@@ -160,23 +242,36 @@ fn legitimate_members_report_nothing() {
         ("widgets-render", WIDGETS),
     ];
     let members = vec![
-        member(
-            "widgets-core",
-            "crates/widgets/core",
-            vec![
-                normal("anyhow", &[]),
-                normal("chrono", &["serde"]),
-                normal("clap", &["derive"]),
-                normal("serde", &["derive"]),
-                path("widgets-render", DependencyKind::Normal),
-                dependency("serde_json", DependencyKind::Dev, false, &[]),
-                path("app", DependencyKind::Dev),
+        // Forwarding to a dev-dependency is exempt, like the dev-dependency; `dep:` entries and
+        // bare names forward no dependency feature.
+        with_features(
+            member(
+                "widgets-core",
+                "crates/widgets/core",
+                vec![
+                    normal("anyhow", &[]),
+                    normal("chrono", &["serde"]),
+                    normal("clap", &["derive"]),
+                    normal("serde", &["derive"]),
+                    path("widgets-render", DependencyKind::Normal),
+                    dependency("serde_json", DependencyKind::Dev, false, &[]),
+                    path("app", DependencyKind::Dev),
+                ],
+            ),
+            &[
+                ("default", &["ordered-json"]),
+                ("ordered-json", &["serde_json/preserve_order"]),
+                ("time", &["dep:chrono"]),
             ],
         ),
-        member(
-            "widgets-render",
-            "crates/widgets/render",
-            vec![normal("serde", &["derive"])],
+        // A forwarded feature that PURE_ALLOWED_CRATES pins.
+        with_features(
+            member(
+                "widgets-render",
+                "crates/widgets/render",
+                vec![normal("serde", &["derive"])],
+            ),
+            &[("extra", &["serde/derive"])],
         ),
         member(
             "app",
@@ -207,6 +302,7 @@ fn members_parse_the_cargo_metadata_shape() {
       "name": "app",
       "version": "1.0.0",
       "manifest_path": "/ws/Cargo.toml",
+      "features": { "default": ["compressed"], "compressed": ["ureq/gzip", "dep:flate"] },
       "targets": [
         { "kind": ["lib"], "name": "app", "src_path": "/ws/src/lib.rs" },
         { "kind": ["bin"], "name": "app", "src_path": "/ws/src/main.rs" }
@@ -214,13 +310,14 @@ fn members_parse_the_cargo_metadata_shape() {
       "dependencies": [
         { "name": "widgets-core", "kind": null, "path": "/ws/crates/widgets/core", "features": [], "uses_default_features": true, "target": null, "rename": null },
         { "name": "ureq", "kind": null, "features": ["json"], "uses_default_features": true, "target": null, "rename": null },
-        { "name": "tempfile", "kind": "dev", "features": [], "uses_default_features": true, "target": null, "rename": null }
+        { "name": "tempfile", "kind": "dev", "features": [], "uses_default_features": true, "target": null, "rename": "scratch" }
       ]
     },
     {
       "name": "widgets-core",
       "version": "0.0.0",
       "manifest_path": "/ws/crates/widgets/core/Cargo.toml",
+      "features": {},
       "targets": [
         { "kind": ["lib"], "name": "widgets_core", "src_path": "/ws/crates/widgets/core/src/lib.rs" },
         { "kind": ["custom-build"], "name": "build-script-build", "src_path": "/ws/crates/widgets/core/build.rs" }
@@ -244,10 +341,17 @@ fn members_parse_the_cargo_metadata_shape() {
                 dir: String::new(),
                 manifest_path: PathBuf::from("/ws/Cargo.toml"),
                 has_build_script: false,
+                features: features(&[
+                    ("compressed", &["ureq/gzip", "dep:flate"]),
+                    ("default", &["compressed"]),
+                ]),
                 dependencies: vec![
                     path("widgets-core", DependencyKind::Normal),
                     normal("ureq", &["json"]),
-                    dependency("tempfile", DependencyKind::Dev, false, &[]),
+                    renamed(
+                        "scratch",
+                        dependency("tempfile", DependencyKind::Dev, false, &[])
+                    ),
                 ],
             },
             ListedMember {
@@ -255,6 +359,7 @@ fn members_parse_the_cargo_metadata_shape() {
                 dir: "crates/widgets/core".to_owned(),
                 manifest_path: PathBuf::from("/ws/crates/widgets/core/Cargo.toml"),
                 has_build_script: true,
+                features: Features::new(),
                 dependencies: vec![dependency(
                     "cc",
                     DependencyKind::Build,
@@ -268,6 +373,7 @@ fn members_parse_the_cargo_metadata_shape() {
         .clone()
         .with_manifest("[package]\nname = \"app\"\n\n[lints]\nworkspace = true\n");
     assert!(app.inherits_workspace_lints);
+    assert_eq!(app.features, members[0].features);
 
     assert!(manifest_inherits_workspace_lints(
         "[package]\nname = \"app\"\n\n[lints] # shared\nworkspace = true # every member\n"
@@ -287,6 +393,7 @@ fn members_parse_the_cargo_metadata_shape() {
         "not json",
         "{}",
         r#"{"workspace_root": "/ws", "packages": [{}]}"#,
+        r#"{"workspace_root": "/ws", "packages": [{"name": "app", "manifest_path": "/ws/Cargo.toml", "targets": [], "dependencies": [], "features": {"default": "compressed"}}]}"#,
     ] {
         let error = parse_members(malformed).expect_err("a malformed document is an error");
         assert!(
