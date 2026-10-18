@@ -117,9 +117,11 @@ fn matching_close(
 /// and `self` resolve against `module` plus the inline `mod name { ... }` blocks enclosing the
 /// path (`commands::rm` + `super::branch_state` = `commands::branch_state`; inside an inline
 /// module `child` of `channel`, `super::X` is `channel::X`). Each resolved path is truncated
-/// to the longest module path present in MODULES; a path that resolves to `crate` itself
-/// becomes an edge to Root, which the class rules refuse (none exist today). `use` paths
-/// starting with anything else (external crates, `std`, bare child names) are ignored.
+/// to the longest module path in `known_modules`, which the direction test fills with the
+/// module paths of the file's own crate; a path that resolves to `crate` itself becomes an edge
+/// to that crate's root module, which in the root package is Root, refused by the class rules
+/// (none exist today). `use` paths starting with anything else (external crates, `std`, bare
+/// child names) are ignored.
 /// Self-edges, which include edges into the file's own inline modules, and edges to the
 /// module's own children are dropped.
 pub fn crate_edges(module: &str, source: &str, known_modules: &[String]) -> BTreeSet<String> {

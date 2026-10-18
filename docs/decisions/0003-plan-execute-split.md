@@ -17,10 +17,10 @@ Mutating commands use a two-phase pattern:
 Concrete implementations:
 
 - `plan_forest() -> ForestPlan` / `execute_plan() -> NewResult` (`src/commands/new.rs`). `ForestPlan` contains `Vec<RepoPlan>`, each with a `CheckoutKind` enum (`ExistingLocal`, `TrackRemote`, `NewBranch`; in `crates/forest/core/src/plan/new.rs`) expressing the command pattern as a Rust enum.
-- `plan_rm() -> RmPlan` / `execute_rm() -> RmResult` (`src/commands/rm.rs`). `RmPlan` contains `Vec<RepoRmPlan>` with pre-checked `worktree_exists` and `source_exists` flags.
+- `plan_rm() -> RmPlan` / `execute_rm() -> RmResult` (`src/commands/rm.rs`). `RmPlan` contains `Vec<RepoRmPlan>` (in `crates/forest/core/src/plan/rm.rs`) with pre-checked `worktree_exists` and `source_exists` flags.
 - `validate_init_inputs() -> ResolvedConfig` / `write_config_atomic()` (`src/commands/init.rs`) — lighter-weight variant of the same pattern.
 
-`--dry-run` falls out naturally: `cmd_new` calls `plan_forest`, then returns `plan_to_result(&plan, true)` without executing (line 390). Same for `cmd_rm`.
+`--dry-run` falls out naturally: `cmd_new` calls `plan_forest`, then returns `plan_to_result(&plan, true)` without executing. Same for `cmd_rm`.
 
 ## Consequences
 

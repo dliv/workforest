@@ -13,11 +13,11 @@ Tests create real git repositories, real worktrees, and real branches. No mockin
 
 Key infrastructure:
 
-- `TestEnv::new()` (line 16) — creates temp directories for `src/`, `worktrees/`, `config/`.
-- `TestEnv::create_repo()` (line 24) — `git init -b main` + initial commit. Real repo, real refs.
-- `TestEnv::create_repo_with_remote()` (line 107) — bare repo + clone + push + fetch. Sets up `refs/remotes/origin/main` for branch resolution tests.
-- `setup_forest_with_git_repos()` (line 205) — creates a pre-built forest directory with real git repos, for tests that need existing forest structure.
-- `TestEnv::default_config()` (line 157) — returns a `ResolvedConfig` pointing at temp repos.
+- `TestEnv::new()` — creates temp directories for `src/`, `worktrees/`, `config/`.
+- `TestEnv::create_repo()` — `git init -b main` + initial commit. Real repo, real refs.
+- `TestEnv::create_repo_with_remote()` — bare repo + clone + push + fetch. Sets up `refs/remotes/origin/main` for branch resolution tests.
+- `setup_forest_with_git_repos()` — creates a pre-built forest directory with real git repos, for tests that need existing forest structure.
+- `TestEnv::default_template()` — returns a `ResolvedTemplate` pointing at temp repos.
 
 Test examples:
 

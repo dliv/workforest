@@ -1,5 +1,5 @@
 /// Result structs for command output. Commands return these instead of printing
-/// directly — main.rs formats them as human-readable or JSON based on --json.
+/// directly — src/lib.rs formats them as human-readable or JSON based on --json.
 /// See docs/decisions/0002-functional-core-imperative-shell.md.
 mod branch_state;
 mod exec;

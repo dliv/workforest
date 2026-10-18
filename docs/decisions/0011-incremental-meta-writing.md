@@ -11,8 +11,8 @@ Status: Accepted
 
 `execute_plan()` in `src/commands/new.rs` writes `.forest-meta.toml` incrementally:
 
-1. **Write initial meta** with header fields (`name`, `created_at`, `mode`) and an empty `repos` vec (lines 312–320).
-2. **After each successful worktree creation**, push the new `RepoMeta` onto `meta.repos` and rewrite the file (lines 363–371).
+1. **Write initial meta** with header fields (`name`, `created_at`, `mode`) and an empty `repos` vec.
+2. **After each successful worktree creation**, push the new `RepoMeta` onto `meta.repos` and rewrite the file.
 
 "Incremental" means rewriting the full TOML with a growing repos vec each time — not append-only file operations. `write_meta()` (`src/forest.rs`) serializes the full struct via `toml::to_string_pretty`.
 

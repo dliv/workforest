@@ -16,8 +16,8 @@ Commands that operate on existing forests (`rm`, `status`, `exec`, `ls`) need re
 Commands depend only on meta + forest directory:
 
 - `plan_rm(forest_dir, meta)` (`src/commands/rm.rs`) — no config parameter.
-- `cmd_status(forest_dir, meta)` (`src/commands/status.rs`, line 27) — no config parameter.
-- `cmd_exec(forest_dir, meta, cmd)` (`src/commands/exec.rs`, line 13) — no config parameter.
+- `cmd_status(forest_dir, meta)` (`src/commands/status.rs`) — no config parameter.
+- `cmd_exec(forest_dir, meta, cmd)` (`src/commands/exec.rs`) — no config parameter.
 
 Config is loaded in `src/lib.rs` only to resolve `worktree_base` for forest discovery, then meta takes over.
 

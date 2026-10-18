@@ -15,8 +15,8 @@ All templates live in one `~/.config/git-forest/config.toml`. The file uses a `B
 
 Current code already uses a single-file pattern:
 
-- `default_config_path()` (`src/config.rs`, line 46) returns one XDG path.
-- `write_config_atomic()` (`src/config.rs`, lines 140–176) uses temp-file + rename for atomic writes.
+- `default_config_path()` (`src/config.rs`) returns one XDG path.
+- `write_config_atomic()` (`src/config.rs`) uses temp-file + rename for atomic writes.
 - `--force` is only required when overwriting an existing template name, not when adding new ones.
 
 ## Consequences
