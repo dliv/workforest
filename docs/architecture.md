@@ -46,7 +46,7 @@ Every workspace member has exactly one crate class, listed in `CRATES` in `crate
 - **Binary**: the package that builds the binaries, whose modules may be of every module class. This is the root package, `git-forest`.
 - **Tooling**: a crate that checks the others and is never part of the product. This is `crates/policy` (`git-forest-policy`).
 
-The full layout, with the crates still to follow, is in ADR 0017; what makes a noun a feature, and why the forest is the only one, is in `docs/candidate-features.md`.
+The full layout, with the crates still to follow, is in ADR 0017; what makes work a feature, and why the forest is the only one, is in `docs/candidate-features.md`.
 
 `crates/policy/tests/edges.rs` runs `cargo metadata --format-version 1 --no-deps --offline`, which lists the members and the dependencies each one declares without the network and without touching `Cargo.lock`, and reads each member's `Cargo.toml` for the one fact `cargo metadata` does not report, its `[lints]` table. It fails when:
 
