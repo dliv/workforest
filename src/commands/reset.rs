@@ -1,52 +1,14 @@
-use anyhow::{bail, Result};
-use serde::Serialize;
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use super::branch_state::ActualBranchState;
 use super::rm::{self, CleanupIssue, CleanupIssueCode, RepoRmPlan, RmOutcome};
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
-use crate::paths::RepoName;
-
-// --- Types ---
-
-#[derive(Debug, Serialize)]
-pub struct ResetResult {
-    pub dry_run: bool,
-    pub confirm_required: bool,
-    pub config_only: bool,
-    pub config_file: FileResetEntry,
-    pub state_file: FileResetEntry,
-    pub forests: Vec<ForestResetEntry>,
-    pub warnings: Vec<String>,
-    pub errors: Vec<CleanupIssue>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FileResetEntry {
-    pub path: PathBuf,
-    pub existed: bool,
-    pub deleted: bool,
-    /// If the file was backed up instead of deleted, this is the backup path.
-    pub backed_up_to: Option<PathBuf>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ForestResetEntry {
-    pub name: String,
-    pub path: PathBuf,
-    pub removed: bool,
-    #[serde(default)]
-    pub repos: Vec<RepoResetEntry>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepoResetEntry {
-    pub name: RepoName,
-    pub branch: String,
-    pub branch_created: bool,
-    pub worktree_removed: RmOutcome,
-    pub branch_deleted: RmOutcome,
-}
+use crate::plan::reset::{
+    decide_reset_plan, plan_to_confirm_required, plan_to_dry_run, repo_reset_entry, root_refused,
+    BaseScanFailure, ConfigObservation, DiscoveryObservation, FileResetEntry, ForestObservation,
+    ForestResetEntry, ResetFilesObservation, ResetObservation, ResetPlan,
+};
+pub use crate::plan::reset::{format_reset_human, format_reset_summary, ResetResult};
 
 pub enum ResetProgress<'a> {
     ForestStarting { name: &'a str, path: &'a Path },
@@ -55,90 +17,85 @@ pub enum ResetProgress<'a> {
 
 // --- Planning (read-only) ---
 
-struct ForestInfo {
-    name: String,
-    path: PathBuf,
-    repos: Vec<RepoRmPlan>,
-    root_rejection: Option<CleanupIssue>,
-}
-
-struct ResetPlan {
-    config_path: PathBuf,
-    config_exists: bool,
-    state_path: PathBuf,
-    state_exists: bool,
-    config_only: bool,
-    forests: Vec<ForestInfo>,
-    warnings: Vec<String>,
-    discovery_errors: Vec<CleanupIssue>,
-}
-
+/// Plans a reset: observes the config, the state file and the forests, then decides.
 fn plan_reset(config_only: bool) -> Result<ResetPlan> {
-    let config_path = crate::config::default_config_path()?;
-    let state_path = crate::config::xdg_state_dir()?.join("state.toml");
+    decide_reset_plan(config_only, observe_reset(config_only))
+}
 
+// --- Observation (read-only) ---
+
+/// Reads what planning a reset needs: the config and state paths and whether they exist, and,
+/// unless `config_only`, the forests under the config's worktree bases. Every read error is
+/// kept for `decide_reset_plan`.
+fn observe_reset(config_only: bool) -> ResetObservation {
+    let config_path = crate::config::default_config_path();
+    let state_path = crate::config::xdg_state_dir().map(|dir| dir.join("state.toml"));
+    let files = match (&config_path, &state_path) {
+        (Ok(config_path), Ok(state_path)) => {
+            Some(observe_reset_files(config_path, state_path, config_only))
+        }
+        _ => None,
+    };
+    ResetObservation {
+        config_path,
+        state_path,
+        files,
+    }
+}
+
+fn observe_reset_files(
+    config_path: &Path,
+    state_path: &Path,
+    config_only: bool,
+) -> ResetFilesObservation {
     let config_exists = config_path.exists();
     let state_exists = state_path.exists();
-
-    let mut forests = Vec::new();
-    let mut warnings = Vec::new();
-    let mut discovery_errors = Vec::new();
-
-    if !config_only && config_exists {
-        match crate::config::load_config(&config_path) {
+    let config =
+        (!config_only && config_exists).then(|| match crate::config::load_config(config_path) {
             Ok(config) => {
-                let bases = config.all_worktree_bases();
-                let mut discovered_forests = Vec::new();
-                for base in bases {
-                    match discover_forests_with_dirs(base) {
-                        Ok(mut discovered) => {
-                            discovered_forests.append(&mut discovered);
-                        }
-                        Err(e) => {
-                            discovery_errors.push(CleanupIssue::new(CleanupIssueCode::WorktreeBaseScanFailed, format!(
-                                "could not safely scan worktree base {}: {}\n  hint: config and state will be preserved until forest recovery is complete",
-                                base.display(),
-                                e
-                            )));
-                        }
-                    }
-                }
-                for discovered in dedupe_discovered_forests(discovered_forests) {
-                    let forest_path = discovered.dir;
-                    let meta = discovered.meta;
-                    let name = meta.name.to_string();
-                    let rm_plan = rm::plan_rm(&forest_path, &meta);
-                    forests.push(ForestInfo {
-                        name,
-                        path: forest_path,
-                        root_rejection: rm_plan.root_rejection(),
-                        repos: rm_plan.repo_plans,
-                    });
-                }
+                ConfigObservation::Scanned(observe_discovery(config.all_worktree_bases()))
             }
-            Err(e) => {
-                warnings.push(format!(
-                    "config exists but could not be parsed: {}\n  worktree directories may need manual cleanup",
-                    e
-                ));
-            }
+            Err(error) => ConfigObservation::Unparsable(error.to_string()),
+        });
+    ResetFilesObservation {
+        config_exists,
+        state_exists,
+        config,
+    }
+}
+
+/// Scans each worktree base for forests, keeping each base's error, and observes every forest
+/// found, after deduplication, as a dry-run of its removal would.
+fn observe_discovery(bases: Vec<&Path>) -> DiscoveryObservation {
+    let mut base_failures = Vec::new();
+    let mut discovered_forests = Vec::new();
+    for base in bases {
+        match discover_forests_with_dirs(base) {
+            Ok(mut discovered) => discovered_forests.append(&mut discovered),
+            Err(error) => base_failures.push(BaseScanFailure {
+                base: base.to_path_buf(),
+                error: error.to_string(),
+            }),
         }
     }
-
-    if !config_exists && !state_exists && forests.is_empty() {
-        bail!("nothing to reset\n  hint: no config, state, or forests found");
-    }
-
-    Ok(ResetPlan {
-        config_path,
-        config_exists,
-        state_path,
-        state_exists,
-        config_only,
+    let forests = dedupe_discovered_forests(discovered_forests)
+        .into_iter()
+        .map(|discovered| {
+            let rm = rm::observe_rm_planning(&discovered.dir, &discovered.meta);
+            let dry_run = rm::observe_rm_dry_run(&discovered.dir, &discovered.meta, &rm.repos);
+            ForestObservation {
+                path_exists: discovered.dir.exists(),
+                path: discovered.dir,
+                meta: discovered.meta,
+                rm,
+                dry_run,
+            }
+        })
+        .collect();
+    DiscoveryObservation {
+        base_failures,
         forests,
-        warnings,
-        discovery_errors,
-    })
+    }
 }
 
 // --- Execution (impure) ---
@@ -183,40 +140,23 @@ fn execute_reset(
             }
         }
 
-        let entry = if errors.len() > forest_error_start || !path.exists() {
-            ForestResetEntry {
-                name: name.clone(),
-                path: path.clone(),
-                removed: false,
-                repos,
-            }
+        let removed = if errors.len() > forest_error_start || !path.exists() {
+            false
         } else if let Some(error) = rm::current_forest_root_safety_error(path) {
             errors.push(CleanupIssue::new(
                 CleanupIssueCode::ForestRootRefused,
                 error,
             ));
-            ForestResetEntry {
-                name: name.clone(),
-                path: path.clone(),
-                removed: false,
-                repos,
-            }
+            false
         } else {
-            if rm::remove_forest_dir_recursively_preserving_meta(path, &mut errors) {
-                ForestResetEntry {
-                    name: name.clone(),
-                    path: path.clone(),
-                    removed: true,
-                    repos,
-                }
-            } else {
-                ForestResetEntry {
-                    name: name.clone(),
-                    path: path.clone(),
-                    removed: false,
-                    repos,
-                }
-            }
+            rm::remove_forest_dir_recursively_preserving_meta(path, &mut errors)
+        };
+        let entry = ForestResetEntry {
+            name: name.clone(),
+            path: path.clone(),
+            removed,
+            repos,
+            path_exists: path.exists(),
         };
 
         if let Some(cb) = &on_progress {
@@ -238,6 +178,12 @@ fn execute_reset(
     } else {
         false
     };
+
+    // The renderers tell a blocked forest from an already missing one by whether its path
+    // exists once every step has run.
+    for entry in &mut forest_entries {
+        entry.path_exists = entry.path.exists();
+    }
 
     ResetResult {
         dry_run: false,
@@ -303,77 +249,6 @@ fn remove_missing_reset_worktree(
     )
 }
 
-fn plan_reset_worktree_outcome(
-    repo: &RepoRmPlan,
-    errors: &mut Vec<CleanupIssue>,
-) -> (RmOutcome, bool) {
-    if !repo.worktree_exists {
-        if repo.source_exists {
-            if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
-                errors.push(CleanupIssue::new(
-                    CleanupIssueCode::WorktreeRefused,
-                    msg.clone(),
-                ));
-                return (RmOutcome::Failed { error: msg }, false);
-            }
-        }
-        return (
-            RmOutcome::Skipped {
-                reason: "worktree already missing".to_string(),
-            },
-            true,
-        );
-    }
-
-    if !repo.source_exists {
-        let msg = format!(
-            "{}: source repo missing; dry-run cannot prove worktree removal",
-            repo.name
-        );
-        errors.push(CleanupIssue::new(
-            CleanupIssueCode::WorktreeRefused,
-            msg.clone(),
-        ));
-        return (RmOutcome::Failed { error: msg }, false);
-    }
-
-    if let Some(msg) = rm::worktree_metadata_dry_run_error(repo, true) {
-        errors.push(CleanupIssue::new(
-            CleanupIssueCode::WorktreeRefused,
-            msg.clone(),
-        ));
-        return (RmOutcome::Failed { error: msg }, false);
-    }
-
-    if matches!(repo.branch_state.actual, ActualBranchState::Unknown { .. }) {
-        let msg = format!(
-            "{}: branch lookup failed; dry-run cannot prove worktree removal",
-            repo.name
-        );
-        errors.push(CleanupIssue::new(
-            CleanupIssueCode::WorktreeRefused,
-            msg.clone(),
-        ));
-        return (RmOutcome::Failed { error: msg }, false);
-    }
-
-    (RmOutcome::Success, true)
-}
-
-fn repo_reset_entry(
-    repo: &RepoRmPlan,
-    worktree_removed: RmOutcome,
-    branch_deleted: RmOutcome,
-) -> RepoResetEntry {
-    RepoResetEntry {
-        name: repo.name.clone(),
-        branch: repo.branch.clone(),
-        branch_created: repo.branch_created,
-        worktree_removed,
-        branch_deleted,
-    }
-}
-
 fn delete_file(path: &Path, errors: &mut Vec<CleanupIssue>) -> bool {
     match std::fs::remove_file(path) {
         Ok(()) => true,
@@ -418,79 +293,6 @@ fn backup_file(
 
 // --- Orchestrator ---
 
-fn plan_to_dry_run(plan: &ResetPlan) -> ResetResult {
-    let mut errors = plan.discovery_errors.clone();
-    let forests: Vec<ForestResetEntry> = plan
-        .forests
-        .iter()
-        .map(|f| {
-            let forest_error_start = errors.len();
-            let repos = if let Some(error) = f
-                .root_rejection
-                .clone()
-                .or_else(|| rm::current_forest_root_safety_error(&f.path).map(root_refused))
-            {
-                errors.push(error);
-                vec![]
-            } else {
-                f.repos
-                    .iter()
-                    .map(|repo| {
-                        let (worktree_removed, wt_succeeded) =
-                            plan_reset_worktree_outcome(repo, &mut errors);
-                        let branch_deleted =
-                            rm::plan_branch_delete_outcome(repo, false, wt_succeeded, &mut errors);
-                        repo_reset_entry(repo, worktree_removed, branch_deleted)
-                    })
-                    .collect()
-            };
-            ForestResetEntry {
-                name: f.name.clone(),
-                path: f.path.clone(),
-                removed: f.path.exists() && errors.len() == forest_error_start,
-                repos,
-            }
-        })
-        .collect();
-    let cleanup_succeeded = errors.is_empty();
-
-    ResetResult {
-        dry_run: true,
-        confirm_required: false,
-        config_only: plan.config_only,
-        config_file: FileResetEntry {
-            path: plan.config_path.clone(),
-            existed: plan.config_exists,
-            deleted: plan.config_exists && cleanup_succeeded,
-            // Signal to formatter that this would be backed up, not deleted
-            backed_up_to: if plan.config_exists && cleanup_succeeded {
-                Some(
-                    plan.config_path
-                        .with_file_name("config.toml.<timestamp>.bak"),
-                )
-            } else {
-                None
-            },
-        },
-        state_file: FileResetEntry {
-            path: plan.state_path.clone(),
-            existed: plan.state_exists,
-            deleted: plan.state_exists && cleanup_succeeded,
-            backed_up_to: None,
-        },
-        forests,
-        warnings: plan.warnings.clone(),
-        errors,
-    }
-}
-
-fn plan_to_confirm_required(plan: &ResetPlan) -> ResetResult {
-    let mut result = plan_to_dry_run(plan);
-    result.dry_run = false;
-    result.confirm_required = result.errors.is_empty();
-    result
-}
-
 pub fn cmd_reset(
     confirm: bool,
     config_only: bool,
@@ -511,268 +313,12 @@ pub fn cmd_reset(
     Ok(execute_reset(&plan, now, on_progress))
 }
 
-// --- Human formatting ---
-
-pub fn format_reset_human(result: &ResetResult) -> String {
-    let mut lines = Vec::new();
-
-    let cleanup_blocked = reset_cleanup_blocked(result);
-
-    if result.confirm_required {
-        lines.push("The following would be deleted:".to_string());
-    } else if result.dry_run {
-        lines.push("Dry run — no changes will be made.".to_string());
-    } else if cleanup_blocked {
-        lines.push("Reset blocked by errors.".to_string());
-    } else if result.errors.is_empty() {
-        lines.push("Reset complete.".to_string());
-    } else {
-        lines.push("Reset completed with errors.".to_string());
-    }
-
-    let is_preview = result.dry_run || result.confirm_required || cleanup_blocked;
-
-    if !result.config_only {
-        if result.forests.is_empty() {
-            lines.push(String::new());
-            lines.push("Forests: none found".to_string());
-        } else {
-            lines.push(String::new());
-            lines.push("Forests:".to_string());
-            for forest in &result.forests {
-                let status = if is_preview {
-                    if forest.removed {
-                        "would remove"
-                    } else if forest.path.exists() {
-                        "blocked"
-                    } else {
-                        "already missing"
-                    }
-                } else if forest.removed {
-                    "removed"
-                } else {
-                    "failed"
-                };
-                lines.push(format!(
-                    "  {}: {} ({})",
-                    forest.name,
-                    status,
-                    forest.path.display()
-                ));
-                for repo in &forest.repos {
-                    lines.push(format!(
-                        "    {}",
-                        format_repo_reset_status(repo, is_preview)
-                    ));
-                }
-            }
-        }
-    }
-
-    lines.push(String::new());
-
-    let config_status = format_file_status(&result.config_file, is_preview, cleanup_blocked);
-    lines.push(format!(
-        "Config: {} ({})",
-        config_status,
-        result.config_file.path.display()
-    ));
-
-    let state_status = format_file_status(&result.state_file, is_preview, cleanup_blocked);
-    lines.push(format!(
-        "State:  {} ({})",
-        state_status,
-        result.state_file.path.display()
-    ));
-
-    if !result.warnings.is_empty() {
-        lines.push(String::new());
-        lines.push("Warnings:".to_string());
-        for warning in &result.warnings {
-            lines.push(format!("  {}", warning));
-        }
-    }
-
-    if !result.errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Errors:".to_string());
-        for error in rm::legacy_error_lines(&result.errors) {
-            lines.push(format!("  {}", error));
-        }
-    }
-
-    if result.confirm_required && result.errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Pass --confirm to proceed.".to_string());
-    }
-
-    lines.join("\n")
-}
-
-pub fn format_reset_summary(result: &ResetResult) -> String {
-    let mut lines = Vec::new();
-
-    let cleanup_blocked = reset_cleanup_blocked(result);
-
-    if cleanup_blocked {
-        lines.push("Reset blocked by errors.".to_string());
-    } else if result.errors.is_empty() {
-        lines.push("Reset complete.".to_string());
-    } else {
-        lines.push("Reset completed with errors.".to_string());
-    }
-
-    let is_preview = false;
-
-    if !result.forests.is_empty() {
-        let repo_count = result
-            .forests
-            .iter()
-            .map(|forest| forest.repos.len())
-            .sum::<usize>();
-        if repo_count > 0 {
-            lines.push(String::new());
-            lines.push("Branch cleanup:".to_string());
-            for forest in &result.forests {
-                for repo in &forest.repos {
-                    lines.push(format!(
-                        "  {}/{}",
-                        forest.name,
-                        format_repo_reset_status(repo, is_preview)
-                    ));
-                }
-            }
-        }
-    }
-
-    lines.push(String::new());
-    let config_status = format_file_status(&result.config_file, is_preview, cleanup_blocked);
-    lines.push(format!(
-        "Config: {} ({})",
-        config_status,
-        result.config_file.path.display()
-    ));
-    let state_status = format_file_status(&result.state_file, is_preview, cleanup_blocked);
-    lines.push(format!(
-        "State:  {} ({})",
-        state_status,
-        result.state_file.path.display()
-    ));
-
-    if !result.warnings.is_empty() {
-        lines.push(String::new());
-        lines.push("Warnings:".to_string());
-        for warning in &result.warnings {
-            lines.push(format!("  {}", warning));
-        }
-    }
-
-    if !result.errors.is_empty() {
-        lines.push(String::new());
-        lines.push("Errors:".to_string());
-        for error in rm::legacy_error_lines(&result.errors) {
-            lines.push(format!("  {}", error));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn format_repo_reset_status(repo: &RepoResetEntry, is_preview: bool) -> String {
-    let wt = match &repo.worktree_removed {
-        RmOutcome::Success => {
-            if is_preview {
-                "would remove worktree".to_string()
-            } else {
-                "worktree removed".to_string()
-            }
-        }
-        RmOutcome::Skipped { reason } => format!("worktree skipped ({})", reason),
-        RmOutcome::Failed { .. } => "worktree FAILED".to_string(),
-    };
-
-    let branch = match &repo.branch_deleted {
-        RmOutcome::Success => {
-            if is_preview {
-                format!(", would delete branch {}", repo.branch)
-            } else {
-                format!(", branch deleted {}", repo.branch)
-            }
-        }
-        RmOutcome::Skipped { reason } if reason == "branch not created by forest" => {
-            ", branch kept (not created by forest)".to_string()
-        }
-        RmOutcome::Skipped { reason } => format!(", branch skipped ({})", reason),
-        RmOutcome::Failed { .. } => ", branch FAILED".to_string(),
-    };
-
-    format!("{}: {}{}", repo.name, wt, branch)
-}
-
-fn reset_cleanup_blocked(result: &ResetResult) -> bool {
-    result.errors.iter().any(|issue| !file_cleanup_error(issue))
-        && ((result.config_file.existed
-            && !result.config_file.deleted
-            && result.config_file.backed_up_to.is_none())
-            || (result.state_file.existed && !result.state_file.deleted)
-            || result
-                .forests
-                .iter()
-                .any(|forest| !forest.removed && forest.path.exists()))
-}
-
-/// Whether an issue comes from backing up the config or deleting the state file, the two
-/// steps that run after every forest is cleaned up.
-fn file_cleanup_error(issue: &CleanupIssue) -> bool {
-    match issue.code {
-        CleanupIssueCode::ConfigBackupFailed | CleanupIssueCode::StateDeleteFailed => true,
-        CleanupIssueCode::DirtyWorktree
-        | CleanupIssueCode::WorktreeRefused
-        | CleanupIssueCode::WorktreeRemoveFailed
-        | CleanupIssueCode::WorktreeMetadataStale
-        | CleanupIssueCode::BranchDeleteFailed
-        | CleanupIssueCode::ForestRootRefused
-        | CleanupIssueCode::RootEntryRemoveFailed
-        | CleanupIssueCode::ForestDirNotRemoved
-        | CleanupIssueCode::ForestMetadataStagingFailed
-        | CleanupIssueCode::ForestPlanRejected
-        | CleanupIssueCode::WorktreeBaseScanFailed => false,
-    }
-}
-
-/// A forest-root refusal, as an issue.
-fn root_refused(text: String) -> CleanupIssue {
-    CleanupIssue::new(CleanupIssueCode::ForestRootRefused, text)
-}
-
-fn format_file_status(entry: &FileResetEntry, is_preview: bool, cleanup_blocked: bool) -> String {
-    if is_preview {
-        if !entry.existed {
-            "not found".to_string()
-        } else if !entry.deleted {
-            "blocked".to_string()
-        } else if entry.backed_up_to.is_some() {
-            "would back up".to_string()
-        } else {
-            "would delete".to_string()
-        }
-    } else if let Some(backup_path) = &entry.backed_up_to {
-        format!("backed up to {}", backup_path.display())
-    } else if entry.deleted {
-        "deleted".to_string()
-    } else if cleanup_blocked && entry.existed {
-        "preserved".to_string()
-    } else if entry.existed {
-        "failed".to_string()
-    } else {
-        "not found".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::channel;
+    use crate::paths::RepoName;
+    use crate::plan::reset::RepoResetEntry;
     use serial_test::serial;
     use std::path::PathBuf;
 
@@ -859,6 +405,7 @@ name = "{}"
                 path: PathBuf::from("/tmp/worktrees/my-feature"),
                 removed: true,
                 repos: vec![],
+                path_exists: false,
             }],
             warnings: vec![],
             errors: vec![],
@@ -924,6 +471,7 @@ name = "{}"
                 path: PathBuf::from("/tmp/worktrees/test"),
                 removed: true,
                 repos: vec![],
+                path_exists: false,
             }],
             warnings: vec![],
             errors: vec![],
@@ -1056,6 +604,7 @@ name = "{}"
                     worktree_removed: RmOutcome::Success,
                     branch_deleted: RmOutcome::Success,
                 }],
+                path_exists: false,
             }],
             warnings: vec![],
             errors: vec![],

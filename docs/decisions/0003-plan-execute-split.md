@@ -29,3 +29,4 @@ Concrete implementations:
 - **Good error reporting:** Failures reference the specific plan step (e.g., `CreateWorktree` for a specific repo).
 - **Command pattern as enums:** `CheckoutKind` and `RmOutcome` make operations explicit and exhaustively matchable.
 - Depends on ADR 0002 (plans are data, returned not printed). Enables ADR 0011 (incremental meta writing during execution).
+- Since bucket 4a, the decide steps of `new`, `rm` and `reset` and their renderers live in Pure modules under `src/plan/`, so the purity and direction scans fail `just check` if planning or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.

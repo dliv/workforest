@@ -44,6 +44,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/plan/branch_state.rs", ModuleClass::Pure),
     ("src/plan/mod.rs", ModuleClass::Pure),
     ("src/plan/new.rs", ModuleClass::Pure),
+    ("src/plan/reset.rs", ModuleClass::Pure),
     ("src/plan/rm.rs", ModuleClass::Pure),
     ("src/testutil.rs", ModuleClass::TestSupport),
     ("src/version_check.rs", ModuleClass::Shell),
@@ -74,13 +75,8 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     },
     AllowedEdge {
         from: "commands::reset",
-        to: "commands::branch_state",
-        reason: BRANCH_STATE_HELPER,
-    },
-    AllowedEdge {
-        from: "commands::reset",
         to: "commands::rm",
-        reason: "reset reuses rm's removal plan; whether that plan becomes a shared module is an open follow-up",
+        reason: "reset observes and executes forest removal through rm's effectful helpers; the removal plan and its decisions live in src/plan/rm.rs, and whether those helpers become a shared module is an open follow-up",
     },
 ];
 

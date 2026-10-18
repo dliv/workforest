@@ -5,22 +5,25 @@ use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
 use crate::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
 use crate::paths::{AbsolutePath, ForestName};
 use crate::plan::branch_state::{compact_git_error, ActualBranchState, WorktreeBranchState};
+#[cfg(test)]
+pub(crate) use crate::plan::rm::legacy_error_lines;
 use crate::plan::rm::{
-    branch_not_fully_merged_error, decide_rm_dry_run, decide_rm_plan, forecast_branch_delete,
-    rejected_rm_result, root_cleanup_results, root_entry_name_matches, worktree_metadata_refusal,
-    worktree_removal_refusal, BranchObservation, ForestDirListing, ForestDirObservation,
-    ForestRootCleanupAction, ForestRootPlan, RepoDryRunObservation, RepoObservation,
-    RmDryRunObservation, RmObservation, RootListing, RootObservation, WorktreeEntry,
+    branch_not_fully_merged_error, decide_rm_dry_run, decide_rm_plan, rejected_rm_result,
+    root_cleanup_results, root_entry_name_matches, worktree_removal_refusal, BranchObservation,
+    ForestDirListing, ForestDirObservation, ForestRootCleanupAction, ForestRootPlan,
+    RepoDryRunObservation, RepoObservation, RmDryRunObservation, RmObservation, RootListing,
+    RootObservation, WorktreeEntry,
 };
 pub use crate::plan::rm::{
     format_repo_done, format_rm_all_human, format_rm_all_summary, format_rm_human,
-    format_rm_summary, legacy_error_lines, CleanupIssue, CleanupIssueCode, DetachedHeadSafety,
-    ForestRootCleanupResult, RepoRmPlan, RepoRmResult, RmAllProgress, RmAllResult, RmOptions,
-    RmOutcome, RmPlan, RmProgress, RmResult,
+    format_rm_summary, CleanupIssue, CleanupIssueCode, DetachedHeadSafety, ForestRootCleanupResult,
+    RepoRmPlan, RepoRmResult, RmAllProgress, RmAllResult, RmOptions, RmOutcome, RmPlan, RmProgress,
+    RmResult,
 };
 
 // --- Planning (read-only) ---
 
+#[cfg(test)]
 pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
     plan_rm_with_options(forest_dir, meta, &RmOptions::default())
         .expect("validated forest metadata should produce a removal plan")
@@ -38,23 +41,47 @@ fn plan_rm_with_options(
 
 // --- Observation (read-only) ---
 
-/// Reads what planning a removal needs: the forest root and, for each repo of the forest, its
-/// worktree, branch state, source repo, detached-HEAD safety and dirtiness. For a dry-run it
-/// also reads what the dry-run result is decided from, so nothing is read after planning.
+/// Reads what planning a removal needs and, for a dry-run, what the dry-run result is decided
+/// from, so nothing is read after planning.
 fn observe_rm(forest_dir: &Path, meta: &ForestMeta, dry_run: bool) -> RmObservation {
+    let planning = observe_rm_planning(forest_dir, meta);
+    let dry_run = dry_run.then(|| observe_rm_dry_run(forest_dir, meta, &planning.repos));
+    RmObservation {
+        dry_run,
+        ..planning
+    }
+}
+
+/// Reads what planning a removal needs: the forest root and, for each repo of the forest, its
+/// worktree, branch state, source repo, detached-HEAD safety and dirtiness. `reset` observes
+/// its forests through it.
+pub(super) fn observe_rm_planning(forest_dir: &Path, meta: &ForestMeta) -> RmObservation {
     let repo_names: Vec<&str> = meta.repos.iter().map(|repo| repo.name.as_str()).collect();
-    let root = observe_forest_root(forest_dir, &repo_names);
-    let repos: Vec<RepoObservation> = meta
-        .repos
-        .iter()
-        .map(|repo| observe_repo(forest_dir, repo))
-        .collect();
-    let dry_run = dry_run.then(|| RmDryRunObservation {
+    RmObservation {
+        root: observe_forest_root(forest_dir, &repo_names),
+        repos: meta
+            .repos
+            .iter()
+            .map(|repo| observe_repo(forest_dir, repo))
+            .collect(),
+        dry_run: None,
+    }
+}
+
+/// Reads what a removal's dry-run result is decided from: the root's safety read again, each
+/// repo's worktree listing and branch facts (`repos` is what planning observed of each repo),
+/// and the forest directory. `reset` observes its forests through it.
+pub(super) fn observe_rm_dry_run(
+    forest_dir: &Path,
+    meta: &ForestMeta,
+    repos: &[RepoObservation],
+) -> RmDryRunObservation {
+    RmDryRunObservation {
         current_root_refusal: current_forest_root_safety_error(forest_dir),
         repos: meta
             .repos
             .iter()
-            .zip(&repos)
+            .zip(repos)
             .map(|(repo, observed)| {
                 observe_repo_dry_run(
                     &forest_dir.join(repo.name.as_str()),
@@ -64,11 +91,6 @@ fn observe_rm(forest_dir: &Path, meta: &ForestMeta, dry_run: bool) -> RmObservat
             })
             .collect(),
         forest_dir: observe_forest_dir(forest_dir),
-    });
-    RmObservation {
-        root,
-        repos,
-        dry_run,
     }
 }
 
@@ -167,20 +189,6 @@ fn observe_repo_dry_run(
             ),
         }),
     }
-}
-
-/// `observe_repo_dry_run` for a planned repo, read now. `reset`'s dry-run uses it through the
-/// wrappers below.
-fn observe_planned_repo_dry_run(repo_plan: &RepoRmPlan) -> RepoDryRunObservation {
-    let repo = RepoMeta {
-        name: repo_plan.name.clone(),
-        source: repo_plan.source.clone(),
-        branch: repo_plan.branch.clone(),
-        base_branch: repo_plan.base_branch.clone(),
-        remote: repo_plan.remote.clone(),
-        branch_created: repo_plan.branch_created,
-    };
-    observe_repo_dry_run(&repo_plan.worktree_path, &repo, repo_plan.source_exists)
 }
 
 /// The source repo's worktree listing with each listed path's canonical form.
@@ -982,18 +990,6 @@ pub(super) fn delete_branch(
     }
 }
 
-/// The dry-run branch-deletion forecast for one planned repo, observing its facts first.
-/// `reset`'s dry-run uses it.
-pub(super) fn plan_branch_delete_outcome(
-    repo_plan: &RepoRmPlan,
-    force: bool,
-    wt_succeeded: bool,
-    errors: &mut Vec<CleanupIssue>,
-) -> RmOutcome {
-    let observed = observe_planned_repo_dry_run(repo_plan);
-    forecast_branch_delete(repo_plan, force, wt_succeeded, &observed, errors)
-}
-
 fn branch_delete_would_succeed_without_force(source: &AbsolutePath, branch: &str) -> bool {
     // `git branch -d` checks the configured upstream when one exists; otherwise
     // it falls back to HEAD. Mirror that read-only so dry-run does not mutate.
@@ -1404,15 +1400,6 @@ fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
         .as_ref()
         .expect("a plan made for a dry-run carries its dry-run observation");
     decide_rm_dry_run(plan, observation, force)
-}
-
-/// The dry-run worktree-metadata refusal for one planned repo, observing its facts first.
-/// `reset`'s dry-run uses it.
-pub(super) fn worktree_metadata_dry_run_error(
-    repo_plan: &RepoRmPlan,
-    force: bool,
-) -> Option<String> {
-    worktree_metadata_refusal(repo_plan, force, &observe_planned_repo_dry_run(repo_plan))
 }
 
 #[cfg(test)]

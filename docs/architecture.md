@@ -17,7 +17,7 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/ambient.rs`; `PURE_ALLOWED_CRATES` |
 | Production code declares no traits | Gated | `crates/policy/tests/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
-| `new` and `rm` plan before they execute (ADR 0003) | Checkable | Search for `plan_forest`/`execute_plan` and `plan_rm`/`execute_rm` |
+| `new`, `rm` and `reset` plan through decide functions in Pure modules before they execute (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `src/plan/` |
 | Newtypes are validated once, at construction | Checkable | Search `src/paths.rs` for `pub fn new` on each newtype |
 | When a module may become Pure | Judgment | Section "Pure modules" |
 | When a trait earns its place | Judgment | Section "No production traits" |
@@ -43,8 +43,8 @@ Nothing except Root imports Root.
 
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason:
 
-- `commands::ls`, `commands::status` and `commands::reset` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
-- `commands::reset` imports `commands::rm`, because reset reuses rm's removal plan; whether that plan becomes a shared module is an open question (temporary).
+- `commands::ls` and `commands::status` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
+- `commands::reset` imports `commands::rm`, because reset observes and executes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal); the removal plan and its decisions live in `src/plan/rm.rs`. Whether those helpers become a shared module is an open question (temporary).
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.
 
@@ -96,7 +96,7 @@ Temporary exceptions name the change that removes them; together they are the to
 - **Environment, home and working directory, passed in.** `xdg_dir` in `src/config.rs` reads XDG variables, `expand_tilde` in `src/config.rs` reads `HOME`, and `current_dir_preserving_symlinks` in `src/forest.rs` reads the working directory and `PWD`; `src/lib.rs` will read these and pass them in.
 - **`init`'s git check goes through `src/git.rs`.** `validate_init_inputs` runs `git` directly.
 - **Open question: where `version_check` belongs** in the module structure. It is classified Shell and exempted as a whole module until that is decided.
-- **Open question: whether `rm`'s removal plan becomes a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry.
+- **Open question: whether `rm`'s observation and execution helpers become a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry. The removal plan and its decisions already live in `src/plan/rm.rs`, which `src/plan/reset.rs` reuses; the remaining edge is for those effectful helpers.
 
 ## Changing the rules
 
