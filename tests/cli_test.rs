@@ -16,15 +16,184 @@ fn bin_name() -> &'static str {
     }
 }
 
-fn bin_cmd() -> assert_cmd::Command {
-    #[cfg(feature = "beta")]
-    {
-        cargo_bin_cmd!("git-forest-beta")
+/// The built binary for this channel, in its own isolated environment (see `ForestCmd`).
+fn bin_cmd() -> ForestCmd {
+    ForestCmd::new()
+}
+
+// --- Test isolation ---
+//
+// No test reads or writes the developer's home, and no test lets the version check act: it
+// would write its state file, start a background `--internal-version-check` process and send the
+// current version to the update server. Every command runs through `ForestCmd`, whose state
+// directory leaves the check nothing to do whatever the test's config says, and which fails the
+// test if that state changes. Environments whose first command is `init --force` (`setup_new_env`
+// and the goldens) also disable the check in their config. The tests that exercise the check
+// itself opt out by name, and those that need the network or the background check run only with
+// `--ignored`.
+
+/// The version-check state that leaves the check nothing to do: a check that ran recently (dated
+/// in the future, so it never goes stale) and found the current version. With it, the check
+/// prints no notice, writes no state, starts no background check and contacts no server.
+fn inert_version_state() -> String {
+    format!(
+        "[version_check]\nlast_checked = \"2099-01-01T00:00:00Z\"\nlatest_version = \"{}\"\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// One command of the built binary in its own environment: HOME is an empty directory unless the
+/// test sets its own, XDG_CONFIG_HOME is cleared unless the test sets it, and XDG_STATE_HOME is
+/// the command's own directory, seeded with `inert_version_state`. After the run the command
+/// fails the test if that state changed. A test that needs another state directory says so with
+/// `state_home` or `exercise_version_check`; setting XDG_STATE_HOME directly is refused.
+struct ForestCmd {
+    cmd: assert_cmd::Command,
+    guard: StateGuard,
+    _sandbox: tempfile::TempDir,
+}
+
+/// What a command checks about the version-check state after it runs.
+enum StateGuard {
+    /// The seeded state at this path must still hold `inert_version_state`, or be gone (`reset`
+    /// deletes it).
+    Inert(std::path::PathBuf),
+    /// The test chose the state directory and checks it itself.
+    ChosenByTest,
+}
+
+impl ForestCmd {
+    fn new() -> Self {
+        let sandbox = tempfile::tempdir().unwrap();
+        let home = sandbox.path().join("home");
+        let state_home = sandbox.path().join("state");
+        let state_dir = state_home.join(bin_name());
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join("state.toml");
+        std::fs::write(&state_file, inert_version_state()).unwrap();
+
+        // The only place the binary is built into a command, so nothing bypasses the isolation.
+        #[cfg(feature = "beta")]
+        let mut cmd = cargo_bin_cmd!("git-forest-beta");
+        #[cfg(not(feature = "beta"))]
+        let mut cmd = cargo_bin_cmd!("git-forest");
+        cmd.env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env("XDG_STATE_HOME", &state_home);
+        Self {
+            cmd,
+            guard: StateGuard::Inert(state_file),
+            _sandbox: sandbox,
+        }
     }
-    #[cfg(not(feature = "beta"))]
-    {
-        cargo_bin_cmd!("git-forest")
+
+    fn arg(&mut self, arg: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.cmd.arg(arg);
+        self
     }
+
+    fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.cmd.args(args);
+        self
+    }
+
+    fn env(
+        &mut self,
+        key: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> &mut Self {
+        refuse_state_home(key.as_ref());
+        self.cmd.env(key, value);
+        self
+    }
+
+    fn env_remove(&mut self, key: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        refuse_state_home(key.as_ref());
+        self.cmd.env_remove(key);
+        self
+    }
+
+    /// Points XDG_STATE_HOME at `dir`, which the test guards itself: the goldens disable the
+    /// check in their config and assert that `dir` never appears.
+    #[cfg(feature = "stable")]
+    fn state_home(&mut self, dir: impl AsRef<std::path::Path>) -> &mut Self {
+        self.cmd.env("XDG_STATE_HOME", dir.as_ref());
+        self.guard = StateGuard::ChosenByTest;
+        self
+    }
+
+    /// Lets the version check use the state under HOME, for the tests that exercise the check
+    /// itself and seed that state first.
+    fn exercise_version_check(&mut self) -> &mut Self {
+        self.cmd.env_remove("XDG_STATE_HOME");
+        self.guard = StateGuard::ChosenByTest;
+        self
+    }
+
+    fn output(&mut self) -> std::io::Result<std::process::Output> {
+        let output = self.cmd.output();
+        self.check_state();
+        output
+    }
+
+    fn assert(&mut self) -> assert_cmd::assert::Assert {
+        let assert = self.cmd.assert();
+        self.check_state();
+        assert
+    }
+
+    fn check_state(&self) {
+        let StateGuard::Inert(path) = &self.guard else {
+            return;
+        };
+        match std::fs::read_to_string(path) {
+            Ok(state) => assert_eq!(
+                state,
+                inert_version_state(),
+                "the version check ran in a test and changed {}; run the binary through bin_cmd() \
+                 and keep its state directory",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot read {}: {error}", path.display()),
+        }
+    }
+}
+
+/// Refuses XDG_STATE_HOME through `env` or `env_remove`: it holds the version check's state.
+fn refuse_state_home(key: &std::ffi::OsStr) {
+    assert!(
+        key != "XDG_STATE_HOME",
+        "XDG_STATE_HOME holds the version check's state; leave it to bin_cmd(), or choose it with \
+         state_home() or exercise_version_check() so the test says why"
+    );
+}
+
+#[test]
+#[should_panic(expected = "the version check ran in a test")]
+fn the_isolation_guard_fails_when_the_version_check_changes_its_state() {
+    let mut cmd = bin_cmd();
+    let StateGuard::Inert(state) = &cmd.guard else {
+        panic!("bin_cmd() should seed its own state");
+    };
+    // Stand in for a version check that rewrote its state during the run.
+    std::fs::write(
+        state,
+        "[version_check]\nlast_checked = \"2020-01-01T00:00:00Z\"\n",
+    )
+    .unwrap();
+    let _ = cmd.arg("--version").output();
+}
+
+#[test]
+#[should_panic(expected = "XDG_STATE_HOME holds the version check's state")]
+fn the_isolation_guard_refuses_an_unexplained_state_directory() {
+    bin_cmd().env_remove("XDG_STATE_HOME");
 }
 
 #[test]
@@ -56,12 +225,13 @@ fn init_show_path() {
 
 /// Returns the env vars needed to isolate config to a fake home directory.
 /// XDG paths resolve via $HOME (~/.config/git-forest/) on Unix/macOS.
-/// We clear XDG_CONFIG_HOME/XDG_STATE_HOME so the $HOME default is used.
+/// We clear XDG_CONFIG_HOME so the $HOME default is used; XDG_STATE_HOME is each command's own
+/// (see `ForestCmd`).
 fn config_env(fake_home: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
     vec![("HOME", fake_home.to_path_buf())]
 }
 
-const CLEARED_XDG_VARS: [&str; 2] = ["XDG_CONFIG_HOME", "XDG_STATE_HOME"];
+const CLEARED_XDG_VARS: [&str; 1] = ["XDG_CONFIG_HOME"];
 
 /// Returns the expected config path under a fake home directory.
 fn expected_config_path(fake_home: &std::path::Path) -> std::path::PathBuf {
@@ -219,7 +389,7 @@ fn subcommand_rm_recognized() {
         .stderr(predicates::str::contains("git forest init"));
 }
 
-fn with_no_config() -> assert_cmd::Command {
+fn with_no_config() -> ForestCmd {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("empty-home");
     std::fs::create_dir_all(&fake_home).unwrap();
@@ -312,12 +482,40 @@ fn create_repo_with_remote(base: &std::path::Path, name: &str) -> std::path::Pat
     repo_path
 }
 
-/// Sets up a complete test environment: fake HOME, two repos with remotes, and a config.
-/// Returns (tmpdir, fake_home, worktree_base).
+/// A config with a placeholder template and the version check disabled, for an environment
+/// whose first command is `init --force`: the parser refuses a `default_template` that names no
+/// template, and `init --force` replaces the placeholder and keeps `[version_check]`.
+const VERSION_CHECK_DISABLED_CONFIG: &str = r#"default_template = "default"
+
+[template.default]
+worktree_base = "/placeholder"
+base_branch = "main"
+feature_branch_template = "placeholder/{name}"
+repos = [{ path = "/placeholder/repo" }]
+
+[version_check]
+enabled = false
+"#;
+
+/// Writes `VERSION_CHECK_DISABLED_CONFIG` as the config under `fake_home`.
+fn write_version_check_disabled_config(fake_home: &std::path::Path) {
+    let config_dir = fake_home.join(".config").join(bin_name());
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        VERSION_CHECK_DISABLED_CONFIG,
+    )
+    .unwrap();
+}
+
+/// Sets up a complete test environment: fake HOME, two repos with remotes, and a config with
+/// the version check disabled before the first command. Returns (tmpdir, fake_home,
+/// worktree_base).
 fn setup_new_env() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
     std::fs::create_dir_all(&fake_home).unwrap();
+    write_version_check_disabled_config(&fake_home);
 
     let repo_a = create_repo_with_remote(tmp.path(), "foo-api");
     let repo_b = create_repo_with_remote(tmp.path(), "foo-web");
@@ -1496,7 +1694,7 @@ fn version_check_fresh_cache_no_notice() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1527,7 +1725,7 @@ fn version_check_cached_newer_version_shows_notice() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1546,6 +1744,7 @@ fn version_check_cached_newer_version_shows_notice() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_stale_cache_updates_timestamp() {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
@@ -1562,7 +1761,7 @@ fn version_check_stale_cache_updates_timestamp() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1586,6 +1785,7 @@ fn version_check_stale_cache_updates_timestamp() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_stale_cache_with_newer_version_shows_notice_and_updates() {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
@@ -1598,7 +1798,7 @@ fn version_check_stale_cache_with_newer_version_shows_notice_and_updates() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1625,6 +1825,7 @@ fn version_check_stale_cache_with_newer_version_shows_notice_and_updates() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_first_run_shows_privacy_notice() {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
@@ -1635,7 +1836,7 @@ fn version_check_first_run_shows_privacy_notice() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1653,6 +1854,7 @@ fn version_check_first_run_shows_privacy_notice() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_missing_latest_version_does_sync_check() {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
@@ -1665,7 +1867,7 @@ fn version_check_missing_latest_version_does_sync_check() {
         .args(["init", "--show-path"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1693,6 +1895,7 @@ fn version_check_missing_latest_version_does_sync_check() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn internal_version_check_flag_exits_cleanly() {
     let tmp = tempfile::tempdir().unwrap();
     let fake_home = tmp.path().join("home");
@@ -1704,7 +1907,7 @@ fn internal_version_check_flag_exits_cleanly() {
         .arg("--internal-version-check")
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .output()
         .unwrap();
 
@@ -1720,9 +1923,14 @@ fn internal_version_check_flag_exits_cleanly() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_no_ambiguous_message() {
     // Ensure the old confusing "or the update server is unreachable" message is gone
-    let output = bin_cmd().args(["version", "--check"]).output().unwrap();
+    let output = bin_cmd()
+        .exercise_version_check()
+        .args(["version", "--check"])
+        .output()
+        .unwrap();
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -1762,7 +1970,7 @@ path = "/tmp/nonexistent-repo"
         .args(["reset", "--confirm"])
         .env("HOME", &fake_home)
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_STATE_HOME")
+        .exercise_version_check()
         .assert()
         .success();
 
@@ -1794,9 +2002,11 @@ fn version_subcommand_outputs_version() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn version_check_graceful_failure() {
     // --check should succeed even when the endpoint is unreachable
     bin_cmd()
+        .exercise_version_check()
         .args(["version", "--check"])
         .assert()
         .success()
@@ -1804,8 +2014,10 @@ fn version_check_graceful_failure() {
 }
 
 #[test]
+#[ignore = "contacts the update server or starts the background version check; run with --ignored"]
 fn debug_version_check_shows_debug_output() {
     let output = bin_cmd()
+        .exercise_version_check()
         .args(["--debug", "version", "--check"])
         .output()
         .unwrap();
@@ -2001,7 +2213,7 @@ fn dry_runs_skip_the_version_check() {
             .args(args)
             .env("HOME", &fake_home)
             .env("XDG_CONFIG_HOME", fake_home.join(".config"))
-            .env_remove("XDG_STATE_HOME")
+            .exercise_version_check()
             .output()
             .unwrap()
     };
@@ -2086,12 +2298,12 @@ fn golden_transcript(output: &std::process::Output, tmp: &std::path::Path) -> St
 /// The built binary with its home, configuration and state directories inside `tmp`. Nothing may
 /// create `<tmp>/golden-state`: only the version check writes there.
 #[cfg(feature = "stable")]
-fn golden_cmd(tmp: &std::path::Path) -> assert_cmd::Command {
+fn golden_cmd(tmp: &std::path::Path) -> ForestCmd {
     let home = tmp.join("home");
     let mut cmd = bin_cmd();
     cmd.env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_STATE_HOME", tmp.join("golden-state"));
+        .state_home(tmp.join("golden-state"));
     cmd
 }
 
@@ -2107,22 +2319,6 @@ fn golden(tmp: &std::path::Path, args: &[&str]) -> String {
     golden_transcript(&golden_run(tmp, args), tmp)
 }
 
-/// A config with a placeholder template and the version check disabled, written before the first
-/// command. The parser refuses a `default_template` that names no template; `init --force`
-/// replaces the placeholder and keeps `[version_check]`.
-#[cfg(feature = "stable")]
-const GOLDEN_PRESEED_CONFIG: &str = r#"default_template = "default"
-
-[template.default]
-worktree_base = "/placeholder"
-base_branch = "main"
-feature_branch_template = "placeholder/{name}"
-repos = [{ path = "/placeholder/repo" }]
-
-[version_check]
-enabled = false
-"#;
-
 /// The golden environment: repositories `foo-api` and `foo-web` with remotes, a template with
 /// the version check disabled, and the forest `feat`. Returns the temp dir and the worktree base.
 #[cfg(feature = "stable")]
@@ -2132,9 +2328,7 @@ fn golden_env() -> (tempfile::TempDir, std::path::PathBuf) {
     let repo_b = create_repo_with_remote(tmp.path(), "foo-web");
     let worktree_base = tmp.path().join("worktrees");
 
-    let config_dir = tmp.path().join("home").join(".config").join("git-forest");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), GOLDEN_PRESEED_CONFIG).unwrap();
+    write_version_check_disabled_config(&tmp.path().join("home"));
 
     let init = [
         "init",
