@@ -1,34 +1,10 @@
 use anyhow::Result;
-use serde::Serialize;
 use std::path::Path;
 
-use super::branch_state::{
-    compact_git_error, path_exists_or_symlink, read_branch_state, ActualBranchState,
-    WorktreeBranchState,
-};
+use super::branch_state::{path_exists_or_symlink, read_branch_state, ActualBranchState};
 use git_forest_core::meta::ForestMeta;
-use git_forest_core::paths::{ForestName, RepoName};
-
-#[derive(Debug, Serialize)]
-pub struct StatusResult {
-    pub forest_name: ForestName,
-    pub repos: Vec<RepoStatus>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepoStatus {
-    pub name: RepoName,
-    pub branch_state: WorktreeBranchState,
-    pub status: RepoStatusKind,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub enum RepoStatusKind {
-    Ok { output: String },
-    Missing { path: String },
-    Error { message: String },
-}
+pub use git_forest_core::plan::status::format_status_human;
+use git_forest_core::plan::status::{RepoStatus, RepoStatusKind, StatusResult};
 
 pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> {
     debug_assert!(forest_dir.is_absolute(), "forest_dir must be absolute");
@@ -69,39 +45,6 @@ pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> 
         forest_name: meta.name.clone(),
         repos,
     })
-}
-
-pub fn format_status_human(result: &StatusResult) -> String {
-    let mut lines = Vec::new();
-    for repo in &result.repos {
-        lines.push(format!("=== {} ===", repo.name));
-        if let Some(message) = repo.branch_state.drift_message() {
-            lines.push(format!("  warning: {}", message));
-        } else if let Some(message) = repo.branch_state.lookup_error_message() {
-            lines.push(format!("  warning: {}", message));
-        }
-        match &repo.status {
-            RepoStatusKind::Ok { output } => lines.push(output.clone()),
-            RepoStatusKind::Missing { path } => {
-                lines.push(format!("  warning: worktree missing at {}", path));
-            }
-            RepoStatusKind::Error { message } => {
-                if !branch_lookup_error_matches(&repo.branch_state.actual, message) {
-                    lines.push(format!("  warning: {}", compact_git_error(message)));
-                }
-            }
-        }
-    }
-    lines.join("\n")
-}
-
-fn branch_lookup_error_matches(actual: &ActualBranchState, message: &str) -> bool {
-    matches!(
-        actual,
-        ActualBranchState::Unknown {
-            branch_lookup_error
-        } if branch_lookup_error == message
-    )
 }
 
 #[cfg(test)]

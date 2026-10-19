@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-pub(crate) use git_forest_core::plan::branch_state::compact_git_error;
 pub use git_forest_core::plan::branch_state::{ActualBranchState, WorktreeBranchState};
 
 /// Reads the branch state of the worktree at `worktree`, expected on `expected_branch`.

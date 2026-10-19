@@ -20,7 +20,7 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | Root modules contain none of the source forms forbidden by the Root profile | Gated | `crates/policy/src/scan.rs`; `crates/policy/tests/ambient.rs` |
 | Production code declares no traits | Gated | `crates/policy/tests/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
-| The decide steps of `new`, `rm`, `reset` and `ls`, and their renderers, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `crates/forest/core/src/plan/` |
+| The decide steps of `new`, `rm`, `reset` and `ls` and their renderers, and the result types and renderers of `status` and `exec`, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `crates/forest/core/src/plan/` |
 | Root composes: ops' public surface is explicit re-exports only; each `run` arm calls at most one command entry point and progress callbacks call no operation; Root adds no predicates over repository, forest or configuration state, except its read of `version_check.enabled` for the update check | Checkable | the searches in "Root composition" |
 | Newtypes are validated once, at construction | Checkable | Search `crates/forest/core/src/paths.rs` for `pub fn new` on each newtype |
 | When a module may become Pure | Judgment | Section "Pure modules" |

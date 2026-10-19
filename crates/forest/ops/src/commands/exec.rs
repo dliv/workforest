@@ -1,43 +1,11 @@
 use anyhow::{bail, Result};
-use serde::Serialize;
 use std::path::Path;
 
 use git_forest_core::meta::ForestMeta;
-use git_forest_core::paths::{ForestName, RepoName};
-
-#[derive(Debug, Serialize)]
-pub struct ExecResult {
-    pub forest_name: ForestName,
-    pub failures: Vec<ExecRepoFailure>,
-}
-
-/// One repo where the command did not succeed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ExecRepoFailure {
-    pub repo: RepoName,
-    pub code: ExecFailureCode,
-    pub message: String,
-    /// The command's exit status, when it exited with one.
-    pub exit_status: Option<i32>,
-}
-
-/// Why the command did not succeed in a repo. Serialized kebab-case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExecFailureCode {
-    /// The repo's worktree is missing, so the command did not run there.
-    WorktreeMissing,
-    /// The command ran and exited unsuccessfully, or was terminated by a signal.
-    CommandExited,
-    /// The command could not be started.
-    SpawnFailed,
-}
-
-/// Progress of `exec`, reported to the caller instead of printed.
-pub enum ExecProgress<'a> {
-    RepoStarting { name: &'a RepoName },
-    RepoFailed(&'a ExecRepoFailure),
-}
+use git_forest_core::plan::exec::ExecRepoFailure;
+pub use git_forest_core::plan::exec::{
+    format_exec_human, ExecFailureCode, ExecProgress, ExecResult,
+};
 
 /// Runs `cmd` in each repo's worktree, in order. `child_stdout` gives the command's standard
 /// output; its standard error is inherited. Progress goes to `on_progress`.
@@ -112,19 +80,6 @@ pub fn cmd_exec(
         forest_name: meta.name.clone(),
         failures,
     })
-}
-
-pub fn format_exec_human(result: &ExecResult) -> String {
-    if result.failures.is_empty() {
-        String::new()
-    } else {
-        let repos: Vec<String> = result
-            .failures
-            .iter()
-            .map(|failure| failure.repo.to_string())
-            .collect();
-        format!("\nFailed in: {}", repos.join(", "))
-    }
 }
 
 #[cfg(test)]
