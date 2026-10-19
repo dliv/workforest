@@ -1,144 +1,56 @@
-use anyhow::{bail, ensure, Context, Result};
-use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use anyhow::{bail, Result};
+use std::collections::BTreeMap;
+use std::path::Path;
 
-use crate::config::{expand_tilde, ResolvedConfig, ResolvedRepo, ResolvedTemplate};
-use git_forest_core::meta::META_FILENAME;
-use git_forest_core::paths::{
-    validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
+use crate::config::{expand_tilde, ResolvedConfig, ResolvedTemplate};
+use crate::git::is_git_repository;
+use git_forest_core::plan::init::{
+    decide_init, validate_init_inputs, InitObservation, InitRepoSummary, InitResult,
+    RepoPathObservation,
 };
+pub use git_forest_core::plan::init::{format_init_human, InitInputs, RepoInput};
 
-pub struct InitInputs {
-    pub template_name: String,
-    pub worktree_base: String,
-    pub base_branch: String,
-    pub feature_branch_template: String,
-    pub disposable_root_entries: Vec<DisposableRootEntry>,
-    pub repos: Vec<RepoInput>,
+/// Reads what `init` needs once the inputs are valid: the worktree base, expanded, and for each
+/// `--repo` path in input order whether it expands, whether something is there and whether git
+/// finds a repository there. Every path is observed; every error is kept for `decide_init`.
+fn observe_init(inputs: &InitInputs) -> InitObservation {
+    InitObservation {
+        worktree_base: expand_tilde(&inputs.worktree_base),
+        repos: inputs
+            .repos
+            .iter()
+            .map(|repo_input| observe_repo_path(&repo_input.path))
+            .collect(),
+    }
 }
 
-pub struct RepoInput {
-    pub path: String,
-    pub name: Option<String>,
-    pub base_branch: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InitResult {
-    pub config_path: PathBuf,
-    pub template_name: String,
-    pub worktree_base: AbsolutePath,
-    pub disposable_root_entries: Vec<DisposableRootEntry>,
-    pub repos: Vec<InitRepoSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InitRepoSummary {
-    pub name: String,
-    pub path: AbsolutePath,
-    pub base_branch: String,
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "checks for git directly, until the check is routed through crates/forest/ops/src/git.rs"
-)]
-pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
-    if inputs.repos.is_empty() {
-        bail!("at least one --repo is required\n  hint: git forest init --feature-branch-template \"yourname/{{name}}\" --repo <path>");
+fn observe_repo_path(path: &str) -> RepoPathObservation {
+    let path = match expand_tilde(path) {
+        Ok(path) => path,
+        Err(error) => return RepoPathObservation::Unexpanded(error),
+    };
+    if !path.exists() {
+        return RepoPathObservation::Missing(path);
     }
-
-    if !inputs.feature_branch_template.contains("{name}") {
-        bail!("--feature-branch-template must contain {{name}}\n  hint: use a template like \"yourname/{{name}}\"");
-    }
-
-    if inputs.template_name.trim().is_empty() {
-        bail!("template name must not be empty");
-    }
-    if inputs.template_name != inputs.template_name.trim() {
-        bail!("template name must not have leading/trailing whitespace");
-    }
-
-    let worktree_base = expand_tilde(&inputs.worktree_base)?;
-
-    let mut resolved_repos = Vec::new();
-    let mut names = HashSet::new();
-
-    for repo_input in &inputs.repos {
-        let path = expand_tilde(&repo_input.path)?;
-
-        ensure!(
-            path.exists(),
-            "repo path does not exist: {}\n  hint: provide an absolute path to a git repository",
-            path.display()
-        );
-
-        // Verify it's a git repo
-        let git_check = std::process::Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(&path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        match git_check {
-            Ok(s) if !s.success() => {
-                bail!(
-                    "not a git repository: {}\n  hint: provide a path to a git repository",
-                    path.display()
-                );
-            }
-            Err(e) => {
-                bail!("failed to check git repo at {}: {}", path.display(), e);
-            }
-            _ => {}
-        }
-
-        let name_str = repo_input.name.clone().unwrap_or_else(|| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default()
-        });
-
-        let name = RepoName::new(name_str)
-            .with_context(|| format!("repo has empty name (path: {})", path.display()))?;
-
-        ensure!(
-            names.insert(name.to_string()),
-            "duplicate repo name: {}\n  hint: use --repo /path:custom-name to disambiguate",
-            name
-        );
-
-        let base_branch = repo_input
-            .base_branch
-            .clone()
-            .unwrap_or_else(|| inputs.base_branch.clone());
-
-        resolved_repos.push(ResolvedRepo {
+    match is_git_repository(&path) {
+        Ok(true) => RepoPathObservation::Repository(path),
+        Ok(false) => RepoPathObservation::NotRepository(path),
+        Err(error) => RepoPathObservation::CheckFailed {
             path,
-            name,
-            base_branch,
-            remote: "origin".to_string(),
-        });
+            error: error.to_string(),
+        },
     }
+}
 
-    validate_disposable_root_entries(
-        &inputs.disposable_root_entries,
-        std::iter::once(META_FILENAME).chain(resolved_repos.iter().map(|repo| repo.name.as_str())),
-    )?;
-
-    Ok(ResolvedTemplate {
-        worktree_base,
-        base_branch: inputs.base_branch.clone(),
-        feature_branch_template: inputs.feature_branch_template.clone(),
-        disposable_root_entries: inputs.disposable_root_entries.clone(),
-        repos: resolved_repos,
-    })
+/// Resolves the template `init` adds: the input checks, then the observation, then the
+/// decision over it.
+fn plan_init(inputs: &InitInputs) -> Result<ResolvedTemplate> {
+    validate_init_inputs(inputs)?;
+    decide_init(inputs, observe_init(inputs))
 }
 
 pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<InitResult> {
-    let template = validate_init_inputs(&inputs)?;
+    let template = plan_init(&inputs)?;
     let template_name = inputs.template_name.clone();
 
     let mut config = if config_path.exists() {
@@ -183,40 +95,11 @@ pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<I
     })
 }
 
-pub fn format_init_human(result: &InitResult) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Config written to {}",
-        result.config_path.display()
-    ));
-    lines.push(format!("Template: {}", result.template_name));
-    lines.push(format!("Worktree base: {}", result.worktree_base.display()));
-    if !result.disposable_root_entries.is_empty() {
-        lines.push(format!(
-            "Disposable root entries: {}",
-            result
-                .disposable_root_entries
-                .iter()
-                .map(DisposableRootEntry::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    lines.push(format!("Repos ({}): ", result.repos.len()));
-    for repo in &result.repos {
-        lines.push(format!(
-            "  {} ({}, base: {})",
-            repo.name,
-            repo.path.display(),
-            repo.base_branch
-        ));
-    }
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_forest_core::paths::DisposableRootEntry;
+    use std::path::PathBuf;
 
     fn create_test_git_repo(base: &Path, name: &str) -> PathBuf {
         let repo_dir = base.join(name);
@@ -259,7 +142,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let template = validate_init_inputs(&inputs).unwrap();
+        let template = plan_init(&inputs).unwrap();
         assert_eq!(template.repos.len(), 1);
         assert_eq!(template.repos[0].name.as_str(), "my-repo");
         assert_eq!(template.repos[0].base_branch, "dev");
@@ -279,7 +162,7 @@ mod tests {
             DisposableRootEntry::new(".claude".to_string()).unwrap(),
         ];
 
-        let template = validate_init_inputs(&inputs).unwrap();
+        let template = plan_init(&inputs).unwrap();
 
         assert_eq!(
             template.disposable_root_entries,
@@ -299,7 +182,7 @@ mod tests {
         inputs.disposable_root_entries =
             vec![DisposableRootEntry::new("repo-a".to_string()).unwrap()];
 
-        let error = validate_init_inputs(&inputs).unwrap_err().to_string();
+        let error = plan_init(&inputs).unwrap_err().to_string();
 
         assert!(error.contains("reserved"), "error: {error}");
     }
@@ -308,7 +191,7 @@ mod tests {
     fn validate_init_empty_repos() {
         let inputs = make_init_inputs(vec![]);
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("--repo"));
     }
@@ -334,7 +217,7 @@ mod tests {
             },
         ]);
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate"));
     }
@@ -351,7 +234,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not a git"));
     }
@@ -374,7 +257,7 @@ mod tests {
             }],
         };
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -400,7 +283,7 @@ mod tests {
             }],
         };
 
-        let template = validate_init_inputs(&inputs).unwrap();
+        let template = plan_init(&inputs).unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
             *template.worktree_base,
@@ -480,7 +363,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -696,7 +579,7 @@ mod tests {
             }],
         };
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -719,7 +602,7 @@ mod tests {
             }],
         };
 
-        let result = validate_init_inputs(&inputs);
+        let result = plan_init(&inputs);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("whitespace"));
     }

@@ -11,7 +11,7 @@ The policy crate (ADR 0016) keeps effects and effectful imports out of the Pure 
 
 Each role is its own workspace member, and a feature's crates live at `crates/<feature>/<role>/`. The end state:
 
-- `crates/forest/core` (`git-forest-core`), Pure: the forest's decisions, types and renderers, meaning the path newtypes, the forest metadata types, the decisions, result types and renderers of `new`, `rm`, `reset` and `ls`, and the result types and renderers of `status` and `exec`. Present.
+- `crates/forest/core` (`git-forest-core`), Pure: the forest's decisions, types and renderers, meaning the path newtypes, the forest metadata types, the decide steps of `new`, `rm`, `reset`, `ls` and `init`, and the result types and renderers of every command. Present.
 - `crates/forest/ops` (`git-forest-ops`), Effectful: the forest's observe and execute steps, the git wrapper, forest discovery, the metadata file's I/O, and the configuration file's I/O (`config`), which `init` writes and `reset` backs up. Present.
 - `crates/update-check` (`git-forest-update-check`), Edge: the update server client, its state file and `VersionResponse`. Present.
 - The repository root (`git-forest`), Binary: `src/lib.rs` and the binaries, `cli`, `channel`, resolving the file locations and loading the configuration through ops; the composition root.

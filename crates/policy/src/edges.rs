@@ -49,7 +49,7 @@ pub const CRATES: &[(&str, CrateClass)] = &[
 ///   passed in;
 /// - `directories`: the platform fallback for the config and state directories;
 /// - `libc`: the owner check in the config write's permission-denied diagnosis, on Unix;
-/// - `serde`: derives the config schema and result types;
+/// - `serde`: derives the config schema;
 /// - `toml`: reads and writes `config.toml` and `.forest-meta.toml`.
 ///
 /// An HTTP client is deliberately absent: network access belongs to the update-check edge.

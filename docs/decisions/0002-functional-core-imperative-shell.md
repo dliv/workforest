@@ -16,7 +16,7 @@ The pattern in every command:
 1. `cmd_xxx(inputs) -> Result<XxxResult>` — pure-ish logic, no printing.
 2. `output()` in `src/lib.rs` — dispatches based on `--json`: either `serde_json::to_string_pretty` or `format_xxx_human`.
 
-Concrete types: `NewResult` (`crates/forest/core/src/plan/new.rs`), `RmResult` (`crates/forest/core/src/plan/rm.rs`), `LsResult` (`crates/forest/core/src/plan/ls.rs`), `StatusResult` (`crates/forest/core/src/plan/status.rs`), `ExecResult` (`crates/forest/core/src/plan/exec.rs`), `InitResult` (`crates/forest/ops/src/commands/init.rs`). All derive `Serialize`. Each command module also exports a `format_*_human()` function returning `String`.
+Concrete types: `NewResult` (`crates/forest/core/src/plan/new.rs`), `RmResult` (`crates/forest/core/src/plan/rm.rs`), `LsResult` (`crates/forest/core/src/plan/ls.rs`), `StatusResult` (`crates/forest/core/src/plan/status.rs`), `ExecResult` (`crates/forest/core/src/plan/exec.rs`), `InitResult` (`crates/forest/core/src/plan/init.rs`). All derive `Serialize`. Each result type has its `format_*_human()` renderer, returning `String`, beside it in the core, and each command module in the forest ops crate re-exports what the root names.
 
 The module docstring in `crates/forest/ops/src/commands/mod.rs` explicitly references this decision.
 

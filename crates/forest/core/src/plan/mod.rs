@@ -4,6 +4,7 @@
 
 pub mod branch_state;
 pub mod exec;
+pub mod init;
 pub mod ls;
 pub mod new;
 pub mod reset;

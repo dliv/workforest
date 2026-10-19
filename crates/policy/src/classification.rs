@@ -36,6 +36,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
         ModuleClass::Pure,
     ),
     ("crates/forest/core/src/plan/exec.rs", ModuleClass::Pure),
+    ("crates/forest/core/src/plan/init.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/ls.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/mod.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/new.rs", ModuleClass::Pure),

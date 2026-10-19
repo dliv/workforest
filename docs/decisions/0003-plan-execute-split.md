@@ -18,7 +18,7 @@ Concrete implementations:
 
 - `plan_forest() -> ForestPlan` / `execute_plan() -> NewResult` (`crates/forest/ops/src/commands/new.rs`). `ForestPlan` contains `Vec<RepoPlan>`, each with a `CheckoutKind` enum (`ExistingLocal`, `TrackRemote`, `NewBranch`; in `crates/forest/core/src/plan/new.rs`) expressing the command pattern as a Rust enum.
 - `plan_rm() -> RmPlan` / `execute_rm() -> RmResult` (`crates/forest/ops/src/commands/rm.rs`). `RmPlan` contains `Vec<RepoRmPlan>` (in `crates/forest/core/src/plan/rm.rs`) with pre-checked `worktree_exists` and `source_exists` flags.
-- `validate_init_inputs() -> ResolvedTemplate` (`crates/forest/ops/src/commands/init.rs`) / `write_config_atomic()` (`crates/forest/ops/src/config.rs`) — lighter-weight variant of the same pattern.
+- `validate_init_inputs()` and `decide_init() -> ResolvedTemplate` (`crates/forest/core/src/plan/init.rs`), over what `observe_init()` (`crates/forest/ops/src/commands/init.rs`) reads of each `--repo` path, / `write_config_atomic()` (`crates/forest/ops/src/config.rs`) — lighter-weight variant of the same pattern; `cmd_init` adds the template to the loaded config, refusing to replace one without `--force`, before the write.
 
 `--dry-run` falls out naturally: `cmd_new_at` (`crates/forest/ops/src/commands/new.rs`) calls `plan_forest`, then returns `plan_to_result(&plan, true)` without executing. Same for `cmd_rm_with_options` and `cmd_rm_all_with_options` (`crates/forest/ops/src/commands/rm.rs`), which return the dry-run result of their plans without executing them. These are the entry points `src/lib.rs` calls; `cmd_new`, `cmd_rm` and `cmd_rm_all` are thin wrappers used by tests.
 
@@ -29,6 +29,6 @@ Concrete implementations:
 - **Good error reporting:** Failures reference the specific plan step (e.g., `CreateWorktree` for a specific repo).
 - **Command pattern as enums:** `CheckoutKind` and `RmOutcome` make operations explicit and exhaustively matchable.
 - Depends on ADR 0002 (plans are data, returned not printed). Enables ADR 0011 (incremental meta writing during execution).
-- The decide steps of `new`, `rm`, `reset` and `ls` and their renderers, and the result types and renderers of `status` and `exec`, live in Pure modules under `crates/forest/core/src/plan/`, so the purity and direction scans fail `just check` if deciding or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.
+- The decide steps of `new`, `rm`, `reset`, `ls` and `init`, and the result types and renderers of every command, live in Pure modules under `crates/forest/core/src/plan/`, so the purity and direction scans fail `just check` if deciding or rendering reads the filesystem, runs git or imports effectful code. `status` and `exec` have no decide step: `status` runs `git status` only where an earlier observation allows it, and `exec` streams the user's command. Observation and execution stay effectful.
 
 Revisit if: a mutation's later steps depend on what its earlier steps produce, so it cannot be planned up front, or a dry-run is found to predict a different outcome than the run.

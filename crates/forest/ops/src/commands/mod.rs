@@ -1,5 +1,6 @@
-//! Result structs for command output. Commands return these instead of printing
-//! directly — src/lib.rs formats them as human-readable or JSON based on --json.
+//! The forest's commands: each one's observe and execute steps. Commands return result
+//! structs, defined with their renderers in `git-forest-core`, instead of printing directly;
+//! src/lib.rs formats them as human-readable or JSON based on --json.
 //! See docs/decisions/0002-functional-core-imperative-shell.md.
 mod branch_state;
 mod exec;

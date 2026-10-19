@@ -77,6 +77,22 @@ pub fn ref_exists(repo: &Path, refname: &str) -> Result<bool> {
     }
 }
 
+/// Whether `path` is inside a git repository, from `git rev-parse --git-dir` run there with its
+/// output discarded. `Err` only when git could not be started there.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/forest/ops/src/git.rs is the one git subprocess wrapper"
+)]
+pub(crate) fn is_git_repository(path: &Path) -> std::io::Result<bool> {
+    let status = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    Ok(status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +159,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("git show-ref --verify refs/heads/main failed"));
+    }
+
+    #[test]
+    fn is_git_repository_reports_each_outcome() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("test-repo");
+        assert!(is_git_repository(&repo).unwrap());
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_git_repository(tmp.path()).unwrap());
+
+        let file = tmp.path().join("not-a-directory");
+        std::fs::write(&file, "a regular file").unwrap();
+        assert!(is_git_repository(&file).is_err());
     }
 }

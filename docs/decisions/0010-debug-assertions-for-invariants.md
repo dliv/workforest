@@ -24,6 +24,7 @@ After Contracts 1 (AbsolutePath) and Contracts 2 (RepoName, ForestName, BranchNa
 | `crates/forest/ops/src/commands/exec.rs` — `cmd_exec()` | `forest_dir.is_absolute()` | Precondition at a `&Path` boundary where the caller passes `&Path`, not `&AbsolutePath`. |
 | `crates/forest/ops/src/commands/status.rs` — `cmd_status()` | `forest_dir.is_absolute()` | Same. |
 | `crates/forest/core/src/plan/new.rs` — `decide_forest()` | One observation per template repo | Collection-level invariant across two lists: the shell builds the observation from the template's repos, the decision zips the two, and no type ties their lengths. |
+| `crates/forest/core/src/plan/init.rs` — `decide_init()` | One observation per `--repo` input | Same kind as `decide_forest()`: the shell observes each `--repo` path in input order, the decision zips the inputs with the observations, and no type ties their lengths. |
 | `crates/forest/core/src/plan/rm.rs` — `decide_rm_dry_run()` | One dry-run observation per planned repo, once the root is not refused | Same kind, across the plan and the observation gathered for it; the lengths agree only when the root is not refused, a runtime fact no type carries. |
 | `crates/forest/core/src/plan/reset.rs` — `plan_to_dry_run()` | One dry-run observation per forest repo, once the root is not refused | Same as `decide_rm_dry_run()`, for each forest of a reset preview. |
 
