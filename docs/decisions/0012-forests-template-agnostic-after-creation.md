@@ -12,7 +12,7 @@ Phase 5B introduces named templates (multiple repo groups in one config). During
 Don't store the template name in `.forest-meta.toml`. The template is a creation-time routing decision, not operational state.
 
 - `ForestMeta` (`crates/forest/core/src/meta.rs`) has no `template` field.
-- `src/commands/rm.rs`, `status.rs`, `exec.rs` — none reference config templates.
+- `crates/forest/ops/src/commands/rm.rs`, `status.rs`, `exec.rs` — none reference config templates.
 - `src/lib.rs` — post-creation commands load config only for `worktree_base`, then work from meta.
 - The template name is available in `NewResult` for the agent that created the forest — it doesn't need to persist.
 

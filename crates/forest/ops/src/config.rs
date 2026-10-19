@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::channel;
 use git_forest_core::meta::META_FILENAME;
 use git_forest_core::paths::{
     validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
@@ -14,7 +13,7 @@ use git_forest_core::paths::{
     clippy::disallowed_methods,
     reason = "HOME read below the root, until the home directory is passed in from src/lib.rs"
 )]
-pub fn expand_tilde(path: &str) -> Result<AbsolutePath> {
+pub(crate) fn expand_tilde(path: &str) -> Result<AbsolutePath> {
     let result = if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home).join(rest)
@@ -77,7 +76,7 @@ pub struct RepoConfig {
 
 // --- Resolved types (post-parse) ---
 
-pub use git_forest_core::plan::new::{ResolvedRepo, ResolvedTemplate};
+pub(crate) use git_forest_core::plan::new::{ResolvedRepo, ResolvedTemplate};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
@@ -116,26 +115,26 @@ impl ResolvedConfig {
 
 // --- XDG path helpers ---
 
-/// Returns the XDG config directory for git-forest.
+/// Returns the XDG config directory for the application `app_name`.
 ///
 /// Resolution order:
-/// 1. `$XDG_CONFIG_HOME/git-forest/` (if env var set)
-/// 2. `~/.config/git-forest/` (Unix/macOS default)
+/// 1. `$XDG_CONFIG_HOME/<app_name>/` (if env var set)
+/// 2. `~/.config/<app_name>/` (Unix/macOS default)
 /// 3. `directories` crate fallback (Windows)
-pub(crate) fn xdg_config_dir() -> Result<PathBuf> {
-    xdg_dir("XDG_CONFIG_HOME", ".config", |proj| {
+pub(crate) fn xdg_config_dir(app_name: &str) -> Result<PathBuf> {
+    xdg_dir(app_name, "XDG_CONFIG_HOME", ".config", |proj| {
         proj.config_dir().to_path_buf()
     })
 }
 
-/// Returns the XDG state directory for git-forest.
+/// Returns the XDG state directory for the application `app_name`.
 ///
 /// Resolution order:
-/// 1. `$XDG_STATE_HOME/git-forest/` (if env var set)
-/// 2. `~/.local/state/git-forest/` (Unix/macOS default)
+/// 1. `$XDG_STATE_HOME/<app_name>/` (if env var set)
+/// 2. `~/.local/state/<app_name>/` (Unix/macOS default)
 /// 3. `directories` crate fallback (Windows)
-pub(crate) fn xdg_state_dir() -> Result<PathBuf> {
-    xdg_dir("XDG_STATE_HOME", ".local/state", |proj| {
+pub fn xdg_state_dir(app_name: &str) -> Result<PathBuf> {
+    xdg_dir(app_name, "XDG_STATE_HOME", ".local/state", |proj| {
         proj.state_dir()
             .unwrap_or_else(|| proj.data_local_dir())
             .to_path_buf()
@@ -147,16 +146,18 @@ pub(crate) fn xdg_state_dir() -> Result<PathBuf> {
     reason = "environment read below the root, until XDG locations are passed in from src/lib.rs"
 )]
 fn xdg_dir(
+    app_name: &str,
     env_var: &str,
     default_suffix: &str,
     fallback: fn(&directories::ProjectDirs) -> PathBuf,
 ) -> Result<PathBuf> {
-    xdg_dir_with_env(env_var, default_suffix, fallback, |key| {
+    xdg_dir_with_env(app_name, env_var, default_suffix, fallback, |key| {
         std::env::var(key).ok()
     })
 }
 
 fn xdg_dir_with_env(
+    app_name: &str,
     env_var: &str,
     default_suffix: &str,
     fallback: fn(&directories::ProjectDirs) -> PathBuf,
@@ -165,7 +166,7 @@ fn xdg_dir_with_env(
     // 1. Explicit env var
     if let Some(val) = env_lookup(env_var) {
         if !val.is_empty() {
-            return Ok(PathBuf::from(val).join(channel::APP_NAME));
+            return Ok(PathBuf::from(val).join(app_name));
         }
     }
 
@@ -173,37 +174,37 @@ fn xdg_dir_with_env(
     #[cfg(unix)]
     {
         if let Some(home) = env_lookup("HOME") {
-            return Ok(PathBuf::from(home)
-                .join(default_suffix)
-                .join(channel::APP_NAME));
+            return Ok(PathBuf::from(home).join(default_suffix).join(app_name));
         }
     }
 
     // 3. directories crate fallback (Windows, or if HOME is unset)
     #[cfg(not(unix))]
     let _ = default_suffix;
-    let proj = directories::ProjectDirs::from("", "", channel::APP_NAME)
+    let proj = directories::ProjectDirs::from("", "", app_name)
         .context("could not determine config directory")?;
     Ok(fallback(&proj))
 }
 
 // --- Config loading ---
 
-pub fn default_config_path() -> Result<PathBuf> {
-    Ok(xdg_config_dir()?.join("config.toml"))
+/// The config file of the application `app_name`, in its XDG config directory.
+pub fn default_config_path(app_name: &str) -> Result<PathBuf> {
+    Ok(xdg_config_dir(app_name)?.join("config.toml"))
 }
 
-pub fn load_default_config() -> Result<ResolvedConfig> {
-    let path = default_config_path()?;
+/// Loads the config file at `path`, which the composition root resolved, with a hint to run
+/// `init` when it does not exist.
+pub fn load_default_config(path: &Path) -> Result<ResolvedConfig> {
     ensure!(
         path.exists(),
         "config not found at {}\n  hint: run `git forest init` to create one",
         path.display()
     );
-    load_config(&path)
+    load_config(path)
 }
 
-pub fn load_config(path: &Path) -> Result<ResolvedConfig> {
+pub(crate) fn load_config(path: &Path) -> Result<ResolvedConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;
     parse_config(&contents)
@@ -228,7 +229,7 @@ pub fn version_check_enabled(config_file: Option<&Path>) -> bool {
     }
 }
 
-pub fn parse_config(contents: &str) -> Result<ResolvedConfig> {
+pub(crate) fn parse_config(contents: &str) -> Result<ResolvedConfig> {
     let raw: MultiTemplateConfig =
         toml::from_str(contents).context("failed to parse config TOML")?;
 
@@ -391,7 +392,7 @@ fn diagnose_permission_denied(target: &Path) -> String {
     format!("{} is not writable", dir.display())
 }
 
-pub fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
+pub(crate) fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -1147,6 +1148,7 @@ path = "/tmp/src/foo-api"
     #[test]
     fn xdg_config_dir_respects_env_var() {
         let result = super::xdg_dir_with_env(
+            "git-forest",
             "XDG_CONFIG_HOME",
             ".config",
             |proj| proj.config_dir().to_path_buf(),
@@ -1158,13 +1160,14 @@ path = "/tmp/src/foo-api"
         .unwrap();
         assert_eq!(
             result,
-            PathBuf::from("/tmp/test-xdg-config").join(channel::APP_NAME)
+            PathBuf::from("/tmp/test-xdg-config").join("git-forest")
         );
     }
 
     #[test]
     fn xdg_state_dir_respects_env_var() {
         let result = super::xdg_dir_with_env(
+            "git-forest",
             "XDG_STATE_HOME",
             ".local/state",
             |proj| {
@@ -1180,7 +1183,7 @@ path = "/tmp/src/foo-api"
         .unwrap();
         assert_eq!(
             result,
-            PathBuf::from("/tmp/test-xdg-state").join(channel::APP_NAME)
+            PathBuf::from("/tmp/test-xdg-state").join("git-forest")
         );
     }
 
@@ -1188,6 +1191,7 @@ path = "/tmp/src/foo-api"
     #[test]
     fn xdg_config_dir_defaults_to_dot_config() {
         let result = super::xdg_dir_with_env(
+            "git-forest",
             "XDG_CONFIG_HOME",
             ".config",
             |proj| proj.config_dir().to_path_buf(),
@@ -1199,7 +1203,7 @@ path = "/tmp/src/foo-api"
         .unwrap();
         assert_eq!(
             result,
-            PathBuf::from("/home/testuser/.config").join(channel::APP_NAME)
+            PathBuf::from("/home/testuser/.config").join("git-forest")
         );
     }
 
@@ -1207,6 +1211,7 @@ path = "/tmp/src/foo-api"
     #[test]
     fn xdg_state_dir_defaults_to_dot_local_state() {
         let result = super::xdg_dir_with_env(
+            "git-forest",
             "XDG_STATE_HOME",
             ".local/state",
             |proj| {
@@ -1222,14 +1227,14 @@ path = "/tmp/src/foo-api"
         .unwrap();
         assert_eq!(
             result,
-            PathBuf::from("/home/testuser/.local/state").join(channel::APP_NAME)
+            PathBuf::from("/home/testuser/.local/state").join("git-forest")
         );
     }
 
     #[test]
     fn default_config_path_ends_with_config_toml() {
-        let path = super::default_config_path().unwrap();
-        assert!(path.ends_with(format!("{}/config.toml", channel::APP_NAME)));
+        let path = super::default_config_path("git-forest").unwrap();
+        assert!(path.ends_with("git-forest/config.toml"));
     }
 
     // --- Permission diagnosis tests ---

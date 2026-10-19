@@ -109,8 +109,8 @@ fn module_ids_name_their_crate_directory() {
             path: path.to_owned(),
         })
     };
-    assert_eq!(module_id("src/commands/rm.rs"), id("", "commands::rm"));
-    assert_eq!(module_id("src/commands/mod.rs"), id("", "commands"));
+    assert_eq!(module_id("src/cli.rs"), id("", "cli"));
+    assert_eq!(module_id("src/draw/mod.rs"), id("", "draw"));
     assert_eq!(module_id("src/lib.rs"), id("", "crate"));
     assert_eq!(
         module_id("crates/widgets/core/src/draw/shape.rs"),
@@ -126,7 +126,7 @@ fn module_ids_name_their_crate_directory() {
     );
     for malformed in [
         "crates/widgets/core/lib.rs",
-        "src/commands/rm.txt",
+        "src/cli.txt",
         "src/mod.rs",
         "src//rm.rs",
         "/src/lib.rs",

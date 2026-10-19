@@ -166,7 +166,7 @@ fn the_scan_sees_the_crate_internal_imports() {
 #[test]
 fn paths_resolve_within_their_own_crate() {
     let modules: &[(&str, ModuleClass)] = &[
-        ("src/forest.rs", ModuleClass::Shared),
+        ("src/store.rs", ModuleClass::Shared),
         ("src/lib.rs", ModuleClass::Root),
         ("src/model.rs", ModuleClass::Shared),
         ("crates/widgets/core/src/draw/mod.rs", ModuleClass::Pure),
@@ -178,12 +178,12 @@ fn paths_resolve_within_their_own_crate() {
     assert_eq!(
         crate_edges(
             "draw",
-            "use crate::model::Widget;\nfn f() { let _ = crate::forest::find(); }",
+            "use crate::model::Widget;\nfn f() { let _ = crate::store::find(); }",
             &known
         ),
         module_set(&["crate", "model"])
     );
-    assert_eq!(crate_modules(modules, ""), vec!["forest", "crate", "model"]);
+    assert_eq!(crate_modules(modules, ""), vec!["store", "crate", "model"]);
 }
 
 #[test]

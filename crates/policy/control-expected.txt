@@ -1,15 +1,15 @@
+1	crates/forest/ops/src/commands/exec.rs	use of a disallowed method `std::process::Command::new`
+1	crates/forest/ops/src/commands/init.rs	use of a disallowed method `std::process::Command::new`
+3	crates/forest/ops/src/config.rs	use of a disallowed method `std::env::var`
+1	crates/forest/ops/src/forest.rs	use of a disallowed method `std::env::current_dir`
+1	crates/forest/ops/src/forest.rs	use of a disallowed method `std::env::var_os`
+2	crates/forest/ops/src/git.rs	use of a disallowed method `std::process::Command::new`
 1	crates/policy/src/metadata.rs	use of a disallowed method `std::process::Command::new`
 9	crates/update-check/src/lib.rs	use of `eprintln!`
 5	crates/update-check/src/lib.rs	use of a disallowed method `chrono::Utc::now`
 1	crates/update-check/src/lib.rs	use of a disallowed method `std::env::current_exe`
 1	crates/update-check/src/lib.rs	use of a disallowed method `std::process::Command::new`
 1	crates/update-check/src/lib.rs	use of a disallowed method `ureq::Agent::get`
-1	src/commands/exec.rs	use of a disallowed method `std::process::Command::new`
-1	src/commands/init.rs	use of a disallowed method `std::process::Command::new`
-3	src/config.rs	use of a disallowed method `std::env::var`
-1	src/forest.rs	use of a disallowed method `std::env::current_dir`
-1	src/forest.rs	use of a disallowed method `std::env::var_os`
-2	src/git.rs	use of a disallowed method `std::process::Command::new`
 8	src/lib.rs	use of `eprintln!`
 3	src/lib.rs	use of `print!`
 19	src/lib.rs	use of `println!`

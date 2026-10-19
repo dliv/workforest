@@ -21,10 +21,10 @@ test:
     cargo test --workspace --locked --no-default-features --features beta
 
 test-linux:
-    docker run --rm -v "{{justfile_directory()}}:/work" -w /work rust:latest cargo test
+    docker run --rm -v "{{justfile_directory()}}:/work" -w /work rust:latest cargo test --workspace
 
 loc:
-    tokei src tests
+    tokei src crates tests
 
 # macOS-only (sed -i '' syntax). Bumps version, commits, tags, pushes, deploys worker.
 release version:

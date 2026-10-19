@@ -1,7 +1,7 @@
 //! Planning a forest's removal: the plan and result types, the pure decisions over what the
-//! root package's `commands::rm` observes (the removal plan, the root cleanup, the safety rules
-//! and the dry-run with its branch-deletion forecast), and the human renderers of `rm` and
-//! `rm --all`.
+//! forest ops crate's (`git-forest-ops`) `commands::rm` observes (the removal plan, the root
+//! cleanup, the safety rules and the dry-run with its branch-deletion forecast), and the human
+//! renderers of `rm` and `rm --all`.
 
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -395,9 +395,9 @@ pub struct RmObservation {
     pub dry_run: Option<RmDryRunObservation>,
 }
 
-/// Plans the removal of the forest at `forest_dir` from what the root package's `commands::rm`
-/// observed, raising option and metadata errors where planning always has. A plan made for a
-/// dry-run keeps the dry-run's observation.
+/// Plans the removal of the forest at `forest_dir` from what the forest ops crate's
+/// (`git-forest-ops`) `commands::rm` observed, raising option and metadata errors where
+/// planning always has. A plan made for a dry-run keeps the dry-run's observation.
 pub fn decide_rm_plan(
     forest_dir: &Path,
     meta: &ForestMeta,

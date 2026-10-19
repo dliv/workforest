@@ -449,17 +449,14 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
- "directories",
  "git-forest-core",
+ "git-forest-ops",
  "git-forest-update-check",
  "insta",
- "libc",
  "predicates",
  "serde",
  "serde_json",
- "serial_test",
  "tempfile",
- "toml",
 ]
 
 [[package]]
@@ -471,6 +468,23 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "git-forest-ops"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "directories",
+ "git-forest-core",
+ "insta",
+ "libc",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

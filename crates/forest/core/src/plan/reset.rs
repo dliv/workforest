@@ -1,6 +1,7 @@
-//! Planning a reset: the plan and result types, the pure decisions over what the root
-//! package's `commands::reset` observes (which forests a reset would remove, through `rm`'s
-//! decisions, and what becomes of the config and state files), and the human renderers.
+//! Planning a reset: the plan and result types, the pure decisions over what the forest ops
+//! crate's (`git-forest-ops`) `commands::reset` observes (which forests a reset would remove,
+//! through `rm`'s decisions, and what becomes of the config and state files), and the human
+//! renderers.
 
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -138,10 +139,10 @@ pub struct ResetPlan {
     pub discovery_errors: Vec<CleanupIssue>,
 }
 
-/// Plans a reset from what the root package's `commands::reset` observed: the path errors
-/// first, then the config warning or the scan failures in config order, then each forest's
-/// removal plan in discovery order, refusing when there is nothing to reset, as planning always
-/// has.
+/// Plans a reset from what the forest ops crate's (`git-forest-ops`) `commands::reset`
+/// observed: the path errors first, then the config warning or the scan failures in config
+/// order, then each forest's removal plan in discovery order, refusing when there is nothing to
+/// reset, as planning always has.
 pub fn decide_reset_plan(config_only: bool, observation: ResetObservation) -> Result<ResetPlan> {
     let config_path = observation.config_path?;
     let state_path = observation.state_path?;

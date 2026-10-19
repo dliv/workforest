@@ -1,26 +1,16 @@
 #![warn(clippy::all)]
-#![cfg_attr(
-    test,
-    allow(
-        clippy::disallowed_methods,
-        reason = "unit tests build real git repositories and read the environment; the non-test build still lints production code"
-    )
-)]
 
 pub mod channel;
 mod cli;
-mod commands;
-pub(crate) mod config;
-mod forest;
-mod git;
-mod testutil;
 
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use cli::{Cli, Command};
+use git_forest_ops::{commands, config, forest};
 use git_forest_update_check as update_check;
 
 /// A failure that ends a command: what `main_entry` renders and maps to an exit code.
@@ -166,13 +156,22 @@ fn report_failure(failure: &Failure, json: bool) {
 pub fn main_entry() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
 
+    // The config and state file locations, resolved once. A command that needs one raises its
+    // resolution error itself; the update check uses whichever resolved.
+    let config_file = config::default_config_path(channel::APP_NAME);
+    let state_file =
+        config::xdg_state_dir(channel::APP_NAME).map(|dir| dir.join(update_check::STATE_FILE_NAME));
+    let resolved_config_file = config_file.as_ref().ok().cloned();
+    let resolved_state_file = state_file.as_ref().ok().cloned();
+
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
     if args
         .iter()
         .any(|arg| arg == update_check::INTERNAL_VERSION_CHECK_ARG)
     {
-        update_check::run_background_version_check(&update_check_settings());
+        let settings = update_check_settings(resolved_config_file.as_deref(), resolved_state_file);
+        update_check::run_background_version_check(&settings);
         return ExitCode::SUCCESS;
     }
 
@@ -211,11 +210,13 @@ pub fn main_entry() -> ExitCode {
     };
 
     let now = chrono::Utc::now();
-    let outcome = run(cli, now);
+    let outcome = run(cli, now, config_file, state_file);
     match &outcome {
         Ok(Completion::Complete) => {
             if should_version_check {
-                update_check::check_cache_and_notify(&update_check_settings(), debug);
+                let settings =
+                    update_check_settings(resolved_config_file.as_deref(), resolved_state_file);
+                update_check::check_cache_and_notify(&settings, debug);
             }
         }
         Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => {}
@@ -224,14 +225,14 @@ pub fn main_entry() -> ExitCode {
     exit_code(&outcome)
 }
 
-/// The update check's settings: this binary's version, names and channel, the state file in
-/// the state directory, and the config's enabled flag. Built the same way for the background
-/// check, after a command and for `version --check`.
-fn update_check_settings() -> update_check::Settings {
-    let state_file = config::xdg_state_dir()
-        .ok()
-        .map(|dir| dir.join(update_check::STATE_FILE_NAME));
-    let enabled = if config::version_check_enabled(config::default_config_path().ok().as_deref()) {
+/// The update check's settings: this binary's version, names and channel, the state file, and
+/// the enabled flag read from the config file. Built the same way for the background check,
+/// after a command and for `version --check`.
+fn update_check_settings(
+    config_file: Option<&Path>,
+    state_file: Option<PathBuf>,
+) -> update_check::Settings {
+    let enabled = if config::version_check_enabled(config_file) {
         update_check::Enablement::Enabled
     } else {
         update_check::Enablement::Disabled
@@ -290,7 +291,12 @@ fn exec_completion(result: &commands::ExecResult) -> Completion {
     clippy::print_stderr,
     reason = "composition root: dispatches commands, prints results and progress, and spawns brew for update"
 )]
-fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failure> {
+fn run(
+    cli: Cli,
+    now: chrono::DateTime<chrono::Utc>,
+    config_file: Result<PathBuf>,
+    state_file: Result<PathBuf>,
+) -> Result<Completion, Failure> {
     let completion = match cli.command {
         Command::Init {
             template,
@@ -303,7 +309,7 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             force,
             show_path,
         } => {
-            let config_path = config::default_config_path()?;
+            let config_path = config_file?;
             if show_path {
                 println!("{}", config_path.display());
                 return Ok(Completion::Complete);
@@ -387,7 +393,7 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             no_fetch,
             dry_run,
         } => {
-            let config = config::load_default_config()?;
+            let config = config::load_default_config(&config_file?)?;
             let tmpl = config.resolve_template(template.as_deref())?;
 
             // Parse --repo-branch strings ("repo=branch") into tuples
@@ -426,7 +432,7 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             discard_root_entries,
             dry_run,
         } => {
-            let config = config::load_default_config()?;
+            let config = config::load_default_config(&config_file?)?;
             let bases = config.all_worktree_bases();
             let rm_options = commands::RmOptions {
                 require_utf8_json_paths: cli.json,
@@ -498,11 +504,27 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             dry_run,
         } => {
             let result = if cli.json {
-                let r = commands::cmd_reset(confirm, config_only, dry_run, now, None)?;
+                let r = commands::cmd_reset(
+                    confirm,
+                    config_only,
+                    dry_run,
+                    config_file,
+                    state_file,
+                    now,
+                    None,
+                )?;
                 output(&r, true, commands::format_reset_human)?;
                 r
             } else if dry_run || !confirm {
-                let r = commands::cmd_reset(confirm, config_only, dry_run, now, None)?;
+                let r = commands::cmd_reset(
+                    confirm,
+                    config_only,
+                    dry_run,
+                    config_file,
+                    state_file,
+                    now,
+                    None,
+                )?;
                 let text = commands::format_reset_human(&r);
                 if !text.is_empty() {
                     println!("{}", text);
@@ -517,6 +539,8 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
                     confirm,
                     config_only,
                     dry_run,
+                    config_file,
+                    state_file,
                     now,
                     Some(&|progress| match progress {
                         commands::ResetProgress::ForestStarting { name, path } => {
@@ -538,14 +562,14 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             reset_completion(&result)
         }
         Command::Ls => {
-            let config = config::load_default_config()?;
+            let config = config::load_default_config(&config_file?)?;
             let bases = config.all_worktree_bases();
             let result = commands::cmd_ls(&bases, now)?;
             output(&result, cli.json, commands::format_ls_human)?;
             Completion::Complete
         }
         Command::Status { name } => {
-            let config = config::load_default_config()?;
+            let config = config::load_default_config(&config_file?)?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
             let result = commands::cmd_status(&dir, &meta)?;
@@ -553,7 +577,7 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
             Completion::Complete
         }
         Command::Exec { name, cmd } => {
-            let config = config::load_default_config()?;
+            let config = config::load_default_config(&config_file?)?;
             let bases = config.all_worktree_bases();
             let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
             // Under --json the child's stdout goes to stderr, so stdout holds only the document.
@@ -598,7 +622,10 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
         Command::Version { check } => {
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
             if check {
-                let settings = update_check_settings();
+                let settings = update_check_settings(
+                    config_file.as_ref().ok().map(PathBuf::as_path),
+                    state_file.ok(),
+                );
                 if settings.enabled == update_check::Enablement::Disabled {
                     eprintln!("Version check is disabled in config.");
                 } else {

@@ -1,6 +1,6 @@
 //! The branch state of a forest's worktree: which branch it was created for and what it has
-//! checked out now. Pure: reading the state from git is `read_branch_state` in the root
-//! package's `commands::branch_state`.
+//! checked out now. Pure: reading the state from git is `read_branch_state` in
+//! `crates/forest/ops/src/commands/branch_state.rs`.
 
 use serde::Serialize;
 

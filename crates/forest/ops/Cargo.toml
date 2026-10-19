@@ -1,0 +1,25 @@
+[package]
+name = "git-forest-ops"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+git-forest-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+insta = "1"
+serde_json = "1"
+serial_test = "3"
+tempfile = "3"
+
+[lints]
+workspace = true

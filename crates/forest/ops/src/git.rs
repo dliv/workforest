@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "src/git.rs is the one git subprocess wrapper"
+    reason = "crates/forest/ops/src/git.rs is the one git subprocess wrapper"
 )]
 pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -36,7 +36,7 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// Check if a ref exists. Returns true if `git show-ref --verify <refname>` succeeds.
 #[expect(
     clippy::disallowed_methods,
-    reason = "src/git.rs is the one git subprocess wrapper"
+    reason = "crates/forest/ops/src/git.rs is the one git subprocess wrapper"
 )]
 pub fn ref_exists(repo: &Path, refname: &str) -> Result<bool> {
     let output = Command::new("git")

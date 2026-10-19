@@ -19,7 +19,7 @@ disallowed-methods = [
   { path = "std::env::remove_var", reason = "never mutate the process environment" },
   { path = "std::process::exit", reason = "decide the exit code only in src/lib.rs" },
   { path = "std::process::abort", reason = "decide the exit code only in src/lib.rs" },
-  { path = "std::process::Command::new", reason = "run git only through src/git.rs; other processes only at a named shell site" },
+  { path = "std::process::Command::new", reason = "run git only through crates/forest/ops/src/git.rs; other processes only at a named shell site" },
   { path = "std::io::stdout", reason = "acquire standard streams only in src/lib.rs" },
   { path = "std::io::stderr", reason = "acquire standard streams only in src/lib.rs" },
   { path = "std::io::stdin", reason = "acquire standard streams only in src/lib.rs" },

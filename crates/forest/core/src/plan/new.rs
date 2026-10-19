@@ -1,5 +1,5 @@
 //! Planning a new forest: its inputs, plan and result types, the pure decisions over what
-//! the root package's `commands::new` observes, and the human renderer.
+//! the forest ops crate's (`git-forest-ops`) `commands::new` observes, and the human renderer.
 
 use anyhow::{bail, ensure, Result};
 use serde::Serialize;

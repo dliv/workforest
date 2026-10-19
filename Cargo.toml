@@ -7,15 +7,11 @@ edition = "2021"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-directories = "6"
 git-forest-core = { path = "crates/forest/core" }
+git-forest-ops = { path = "crates/forest/ops" }
 git-forest-update-check = { path = "crates/update-check" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "1"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [features]
 default = ["stable"]
@@ -36,11 +32,10 @@ required-features = ["beta"]
 assert_cmd = "2"
 insta = "1"
 predicates = "3"
-serial_test = "3"
 tempfile = "3"
 
 [workspace]
-members = ["crates/forest/core", "crates/policy", "crates/update-check"]
+members = ["crates/forest/core", "crates/forest/ops", "crates/policy", "crates/update-check"]
 
 [workspace.lints.clippy]
 print_stdout = "warn"

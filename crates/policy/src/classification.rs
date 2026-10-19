@@ -13,7 +13,8 @@ pub enum ModuleClass {
     Root,
     /// A self-contained subsystem with its own effects. Imports Shared and Pure.
     Shell,
-    /// A command in `src/commands/`. Imports Shared, Pure and allowlisted Command modules.
+    /// A command module under `crates/forest/ops/src/commands/`. Imports Shared, Pure and
+    /// allowlisted Command modules.
     Command,
     /// Types and helpers used across commands. Imports Shared and Pure.
     Shared,
@@ -38,25 +39,50 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("crates/forest/core/src/plan/new.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/reset.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/rm.rs", ModuleClass::Pure),
+    (
+        "crates/forest/ops/src/commands/branch_state.rs",
+        ModuleClass::Command,
+    ),
+    (
+        "crates/forest/ops/src/commands/exec.rs",
+        ModuleClass::Command,
+    ),
+    (
+        "crates/forest/ops/src/commands/init.rs",
+        ModuleClass::Command,
+    ),
+    ("crates/forest/ops/src/commands/ls.rs", ModuleClass::Command),
+    (
+        "crates/forest/ops/src/commands/mod.rs",
+        ModuleClass::Command,
+    ),
+    (
+        "crates/forest/ops/src/commands/new.rs",
+        ModuleClass::Command,
+    ),
+    (
+        "crates/forest/ops/src/commands/reset.rs",
+        ModuleClass::Command,
+    ),
+    ("crates/forest/ops/src/commands/rm.rs", ModuleClass::Command),
+    (
+        "crates/forest/ops/src/commands/status.rs",
+        ModuleClass::Command,
+    ),
+    ("crates/forest/ops/src/config.rs", ModuleClass::Shared),
+    ("crates/forest/ops/src/forest.rs", ModuleClass::Shared),
+    ("crates/forest/ops/src/git.rs", ModuleClass::Shared),
+    ("crates/forest/ops/src/lib.rs", ModuleClass::Shared),
+    (
+        "crates/forest/ops/src/testutil.rs",
+        ModuleClass::TestSupport,
+    ),
     ("crates/update-check/src/lib.rs", ModuleClass::Shell),
     ("src/bin/git-forest-beta.rs", ModuleClass::Root),
     ("src/bin/git-forest.rs", ModuleClass::Root),
     ("src/channel.rs", ModuleClass::Pure),
     ("src/cli.rs", ModuleClass::Pure),
-    ("src/commands/branch_state.rs", ModuleClass::Command),
-    ("src/commands/exec.rs", ModuleClass::Command),
-    ("src/commands/init.rs", ModuleClass::Command),
-    ("src/commands/ls.rs", ModuleClass::Command),
-    ("src/commands/mod.rs", ModuleClass::Command),
-    ("src/commands/new.rs", ModuleClass::Command),
-    ("src/commands/reset.rs", ModuleClass::Command),
-    ("src/commands/rm.rs", ModuleClass::Command),
-    ("src/commands/status.rs", ModuleClass::Command),
-    ("src/config.rs", ModuleClass::Shared),
-    ("src/forest.rs", ModuleClass::Shared),
-    ("src/git.rs", ModuleClass::Shared),
     ("src/lib.rs", ModuleClass::Root),
-    ("src/testutil.rs", ModuleClass::TestSupport),
 ];
 
 /// An import edge the class rules would refuse but that is sanctioned, between two modules of
@@ -77,25 +103,25 @@ const BRANCH_STATE_HELPER: &str =
 /// permanent boundary it is, or the change that removes it.
 pub const ALLOWED_EDGES: &[AllowedEdge] = &[
     AllowedEdge {
-        crate_dir: "",
+        crate_dir: "crates/forest/ops",
         from: "commands::ls",
         to: "commands::branch_state",
         reason: BRANCH_STATE_HELPER,
     },
     AllowedEdge {
-        crate_dir: "",
+        crate_dir: "crates/forest/ops",
         from: "commands::rm",
         to: "commands::branch_state",
         reason: BRANCH_STATE_HELPER,
     },
     AllowedEdge {
-        crate_dir: "",
+        crate_dir: "crates/forest/ops",
         from: "commands::status",
         to: "commands::branch_state",
         reason: BRANCH_STATE_HELPER,
     },
     AllowedEdge {
-        crate_dir: "",
+        crate_dir: "crates/forest/ops",
         from: "commands::reset",
         to: "commands::rm",
         reason: "reset observes and executes forest removal through rm's effectful helpers; the removal plan and its decisions live in crates/forest/core/src/plan/rm.rs, and whether those helpers become a shared module is an open follow-up",
@@ -132,10 +158,10 @@ pub struct ModuleId {
 }
 
 /// The identity of a repository-relative `.rs` file, split at its first `src` component:
-/// "src/commands/rm.rs" -> ("", "commands::rm"); "src/commands/mod.rs" -> ("", "commands");
-/// "src/bin/x.rs" -> ("", "bin::x"); "crates/forest/core/src/plan/rm.rs" ->
-/// ("crates/forest/core", "plan::rm"); each crate's "src/lib.rs" is that crate's "crate".
-/// None for other paths.
+/// "src/cli.rs" -> ("", "cli"); "src/bin/git-forest.rs" -> ("", "bin::git-forest");
+/// "crates/forest/ops/src/commands/rm.rs" -> ("crates/forest/ops", "commands::rm");
+/// "crates/forest/ops/src/commands/mod.rs" -> ("crates/forest/ops", "commands"); each crate's
+/// "src/lib.rs" is that crate's "crate". None for other paths.
 pub fn module_id(relative_file: &str) -> Option<ModuleId> {
     let segments: Vec<&str> = relative_file.split('/').collect();
     let src = segments.iter().position(|segment| *segment == "src")?;

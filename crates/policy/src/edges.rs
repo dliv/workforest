@@ -32,15 +32,28 @@ pub enum CrateClass {
 pub const CRATES: &[(&str, CrateClass)] = &[
     ("git-forest", CrateClass::Binary),
     ("git-forest-core", CrateClass::Pure { feature: "forest" }),
+    (
+        "git-forest-ops",
+        CrateClass::Effectful { feature: "forest" },
+    ),
     ("git-forest-policy", CrateClass::Tooling),
     ("git-forest-update-check", CrateClass::Edge),
 ];
 
 /// External crates an Effectful crate may declare as normal or build dependencies, by name only,
 /// each with the reason its code needs it. Features are not pinned: code in an Effectful crate
-/// performs effects by design. Empty until the first Effectful crate exists. Every entry must
-/// be declared by some Effectful crate.
-pub const EFFECTFUL_ALLOWED_CRATES: &[&str] = &[];
+/// performs effects by design. Every entry must be declared by some Effectful crate.
+/// - `anyhow`: errors;
+/// - `chrono`: timestamps in metadata and backup names; the clock is read at the root and
+///   passed in;
+/// - `directories`: the platform fallback for the config and state directories;
+/// - `libc`: the owner check in the config write's permission-denied diagnosis, on Unix;
+/// - `serde`: derives the config schema and result types;
+/// - `toml`: reads and writes `config.toml` and `.forest-meta.toml`.
+///
+/// An HTTP client is deliberately absent: network access belongs to the update-check edge.
+pub const EFFECTFUL_ALLOWED_CRATES: &[&str] =
+    &["anyhow", "chrono", "directories", "libc", "serde", "toml"];
 
 /// External crates an Edge crate may declare as normal or build dependencies, by name only, each
 /// with the reason its code needs it. Features are not pinned: code in an Edge crate performs

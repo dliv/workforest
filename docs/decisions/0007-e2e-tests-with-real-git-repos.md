@@ -9,7 +9,7 @@ git-forest orchestrates git worktrees, branches, and remotes. Mocking git operat
 
 ## Decision
 
-Tests create real git repositories, real worktrees, and real branches. No mocking of git operations. `TestEnv` (`src/testutil.rs`) is the shared test infrastructure.
+Tests create real git repositories, real worktrees, and real branches. No mocking of git operations. `TestEnv` (`crates/forest/ops/src/testutil.rs`) is the shared test infrastructure.
 
 Key infrastructure:
 
@@ -21,9 +21,9 @@ Key infrastructure:
 
 Test examples:
 
-- `src/commands/new.rs` — `execute_creates_forest_dir_and_worktrees` creates real worktrees, verifies real files and meta.
-- `src/commands/rm.rs` — `rm_removes_worktrees` creates forests via `cmd_new`, then removes them, verifying branches are deleted.
-- `src/git.rs` — `ref_exists` tests use real repos with real refs.
+- `crates/forest/ops/src/commands/new.rs` — `execute_creates_forest_dir_and_worktrees` creates real worktrees, verifies real files and meta.
+- `crates/forest/ops/src/commands/rm.rs` — `rm_removes_worktrees` creates forests via `cmd_new`, then removes them, verifying branches are deleted.
+- `crates/forest/ops/src/git.rs` — `ref_exists` tests use real repos with real refs.
 
 ## Consequences
 

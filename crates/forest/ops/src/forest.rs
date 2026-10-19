@@ -25,14 +25,14 @@ pub enum ForestInventoryEntry {
 }
 
 #[cfg(test)]
-pub fn discover_forests(worktree_base: &Path) -> Result<Vec<ForestMeta>> {
+pub(crate) fn discover_forests(worktree_base: &Path) -> Result<Vec<ForestMeta>> {
     Ok(discover_forests_with_dirs(worktree_base)?
         .into_iter()
         .map(|forest| forest.meta)
         .collect())
 }
 
-pub fn discover_forests_with_dirs(worktree_base: &Path) -> Result<Vec<DiscoveredForest>> {
+pub(crate) fn discover_forests_with_dirs(worktree_base: &Path) -> Result<Vec<DiscoveredForest>> {
     let mut forests: Vec<DiscoveredForest> = Vec::new();
 
     let Some(entries) = worktree_base_entries(worktree_base)? else {
@@ -56,7 +56,7 @@ pub fn discover_forests_with_dirs(worktree_base: &Path) -> Result<Vec<Discovered
     Ok(dedupe_discovered_forests(forests))
 }
 
-pub fn scan_forest_inventory(worktree_base: &Path) -> Result<Vec<ForestInventoryEntry>> {
+pub(crate) fn scan_forest_inventory(worktree_base: &Path) -> Result<Vec<ForestInventoryEntry>> {
     let Some(entries) = worktree_base_entries(worktree_base)? else {
         return Ok(Vec::new());
     };
@@ -89,7 +89,7 @@ pub fn scan_forest_inventory(worktree_base: &Path) -> Result<Vec<ForestInventory
     Ok(inventory)
 }
 
-pub fn dedupe_discovered_forests(forests: Vec<DiscoveredForest>) -> Vec<DiscoveredForest> {
+pub(crate) fn dedupe_discovered_forests(forests: Vec<DiscoveredForest>) -> Vec<DiscoveredForest> {
     let mut deduped: Vec<DiscoveredForest> = Vec::new();
     let mut seen_meta_paths: BTreeMap<PathBuf, usize> = BTreeMap::new();
 
@@ -109,7 +109,7 @@ pub fn dedupe_discovered_forests(forests: Vec<DiscoveredForest>) -> Vec<Discover
     deduped
 }
 
-pub fn find_forest(
+pub(crate) fn find_forest(
     worktree_base: &Path,
     name_or_dir: &str,
 ) -> Result<Option<(PathBuf, ForestMeta)>> {
@@ -283,7 +283,7 @@ fn path_is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, ForestMeta)>> {
+pub(crate) fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, ForestMeta)>> {
     let mut current = start.to_path_buf();
     loop {
         let meta_path = current.join(META_FILENAME);
@@ -433,7 +433,7 @@ fn forest_dir_is_under_any_base(forest_dir: &Path, worktree_bases: &[&Path]) -> 
 // themselves are in the core crate's Pure module `git_forest_core::meta`.
 
 /// Validates `meta` and writes it as TOML to `path`.
-pub fn write_meta(meta: &ForestMeta, path: &Path) -> Result<()> {
+pub(crate) fn write_meta(meta: &ForestMeta, path: &Path) -> Result<()> {
     meta.validate()
         .context("forest metadata has invalid disposable root entries")?;
     let content = toml::to_string_pretty(meta).context("failed to serialize forest meta")?;
@@ -443,7 +443,7 @@ pub fn write_meta(meta: &ForestMeta, path: &Path) -> Result<()> {
 }
 
 /// Reads and validates the forest metadata file at `path`.
-pub fn read_meta(path: &Path) -> Result<ForestMeta> {
+pub(crate) fn read_meta(path: &Path) -> Result<ForestMeta> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read forest meta from {}", path.display()))?;
     let meta: ForestMeta = toml::from_str(&content).context("failed to parse forest meta TOML")?;

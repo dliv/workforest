@@ -42,7 +42,7 @@ pub struct InitRepoSummary {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "checks for git directly, until the check is routed through src/git.rs"
+    reason = "checks for git directly, until the check is routed through crates/forest/ops/src/git.rs"
 )]
 pub fn validate_init_inputs(inputs: &InitInputs) -> Result<ResolvedTemplate> {
     if inputs.repos.is_empty() {
