@@ -29,6 +29,6 @@ Concrete implementations:
 - **Good error reporting:** Failures reference the specific plan step (e.g., `CreateWorktree` for a specific repo).
 - **Command pattern as enums:** `CheckoutKind` and `RmOutcome` make operations explicit and exhaustively matchable.
 - Depends on ADR 0002 (plans are data, returned not printed). Enables ADR 0011 (incremental meta writing during execution).
-- The decide steps of `new`, `rm` and `reset` and their renderers live in Pure modules under `crates/forest/core/src/plan/`, so the purity and direction scans fail `just check` if planning or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.
+- The decide steps of `new`, `rm`, `reset` and `ls`, and their renderers, live in Pure modules under `crates/forest/core/src/plan/`, so the purity and direction scans fail `just check` if deciding or rendering reads the filesystem, runs git or imports effectful code; observation and execution stay effectful.
 
 Revisit if: a mutation's later steps depend on what its earlier steps produce, so it cannot be planned up front, or a dry-run is found to predict a different outcome than the run.

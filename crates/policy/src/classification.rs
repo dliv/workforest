@@ -35,6 +35,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
         "crates/forest/core/src/plan/branch_state.rs",
         ModuleClass::Pure,
     ),
+    ("crates/forest/core/src/plan/ls.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/mod.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/new.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/reset.rs", ModuleClass::Pure),
