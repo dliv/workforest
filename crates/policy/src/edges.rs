@@ -33,6 +33,7 @@ pub const CRATES: &[(&str, CrateClass)] = &[
     ("git-forest", CrateClass::Binary),
     ("git-forest-core", CrateClass::Pure { feature: "forest" }),
     ("git-forest-policy", CrateClass::Tooling),
+    ("git-forest-update-check", CrateClass::Edge),
 ];
 
 /// External crates an Effectful crate may declare as normal or build dependencies, by name only,
@@ -43,9 +44,16 @@ pub const EFFECTFUL_ALLOWED_CRATES: &[&str] = &[];
 
 /// External crates an Edge crate may declare as normal or build dependencies, by name only, each
 /// with the reason its code needs it. Features are not pinned: code in an Edge crate performs
-/// effects by design. Empty until the first Edge crate exists. Every entry must be declared by
-/// some Edge crate.
-pub const EDGE_ALLOWED_CRATES: &[&str] = &[];
+/// effects by design. Every entry must be declared by some Edge crate.
+/// - `chrono`: the state file's timestamps and the staleness check, whose clock reads the
+///   update check is sanctioned for;
+/// - `semver`: compares the cached version with the running one;
+/// - `serde`: derives the state file and response types;
+/// - `serde_json`: parses the update server's response;
+/// - `toml`: reads and writes the state file;
+/// - `ureq`: the update server request, the workspace's one HTTP client.
+pub const EDGE_ALLOWED_CRATES: &[&str] =
+    &["chrono", "semver", "serde", "serde_json", "toml", "ureq"];
 
 /// The external crates each class may declare as normal or build dependencies, passed to
 /// `check_edges` together.

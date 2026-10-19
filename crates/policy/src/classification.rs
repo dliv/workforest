@@ -38,6 +38,7 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("crates/forest/core/src/plan/new.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/reset.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/rm.rs", ModuleClass::Pure),
+    ("crates/update-check/src/lib.rs", ModuleClass::Shell),
     ("src/bin/git-forest-beta.rs", ModuleClass::Root),
     ("src/bin/git-forest.rs", ModuleClass::Root),
     ("src/channel.rs", ModuleClass::Pure),
@@ -56,7 +57,6 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("src/git.rs", ModuleClass::Shared),
     ("src/lib.rs", ModuleClass::Root),
     ("src/testutil.rs", ModuleClass::TestSupport),
-    ("src/version_check.rs", ModuleClass::Shell),
 ];
 
 /// An import edge the class rules would refuse but that is sanctioned, between two modules of

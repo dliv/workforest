@@ -1,16 +1,62 @@
+//! The update check: a client of the update server. It caches the latest released version in
+//! its state file, prints an update notice from that cache after a command, and refreshes the
+//! cache in a detached background process. It never names another workspace crate: the
+//! composition root passes the running binary's version, the app and command names, the release
+//! channel, the state file and the enabled flag in one `Settings` value.
+//!
+//! Host protocol: when the cache is missing or stale, `check_cache_and_notify` spawns the host's
+//! own executable with `INTERNAL_VERSION_CHECK_ARG` and passes no settings. The host must
+//! intercept that argument before parsing its command line, rebuild the same settings in that
+//! process and call `run_background_version_check`. A second host must honour this handshake or
+//! supply its own spawning boundary; a custom `state_file` given to the foreground call does not
+//! reach the background process by itself.
 #![expect(
     clippy::disallowed_methods,
     clippy::print_stderr,
-    reason = "self-contained update-check subsystem: reads the clock, resolves and spawns its own executable, makes the update server request and prints notices; its final place in the module structure is an open follow-up"
+    reason = "the update-check edge: reads the clock, resolves and spawns its own executable, makes the update server request and prints its notices"
 )]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ureq::Agent;
 
-use crate::channel;
+/// The argument the background refresh is started with; the host intercepts it before parsing
+/// its command line (see the crate documentation).
+pub const INTERNAL_VERSION_CHECK_ARG: &str = "--internal-version-check";
+
+/// The state file's name; the host chooses its directory.
+pub const STATE_FILE_NAME: &str = "state.toml";
+
+const VERSION_CHECK_BASE_URL: &str = "https://forest.dliv.gg/api/latest";
+
 const CHECK_INTERVAL_HOURS: i64 = 24;
+
+/// Whether the update check runs after a command: the config's `version_check.enabled`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enablement {
+    Enabled,
+    Disabled,
+}
+
+/// What the host tells the update check about itself. The host builds it the same way in the
+/// foreground and in the background process (see the crate documentation).
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// The running binary's version, read by the host package at build time.
+    pub current_version: &'static str,
+    /// The application's name, as notices and the request's user agent show it.
+    pub app_name: &'static str,
+    /// How the user runs the tool, as the upgrade hint shows it.
+    pub command: &'static str,
+    /// The release channel sent to the update server.
+    pub channel: &'static str,
+    /// The state file; None when its directory could not be resolved, which skips every read
+    /// and write of it.
+    pub state_file: Option<PathBuf>,
+    /// Read only by `check_cache_and_notify`; the host checks it before `force_check`.
+    pub enabled: Enablement,
+}
 
 pub struct UpdateNotice {
     pub current: String,
@@ -37,20 +83,15 @@ struct VersionCheckState {
     latest_version: Option<String>,
 }
 
-fn state_file_path() -> Option<PathBuf> {
-    let dir = crate::config::xdg_state_dir().ok()?;
-    Some(dir.join("state.toml"))
-}
-
-fn read_state() -> Option<VersionCheckState> {
-    let path = state_file_path()?;
+fn read_state(state_file: Option<&Path>) -> Option<VersionCheckState> {
+    let path = state_file?;
     let contents = std::fs::read_to_string(path).ok()?;
     let state: StateFile = toml::from_str(&contents).ok()?;
     state.version_check
 }
 
-fn write_state(state: &VersionCheckState) -> Option<()> {
-    let path = state_file_path()?;
+fn write_state(state_file: Option<&Path>, state: &VersionCheckState) -> Option<()> {
+    let path = state_file?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
@@ -63,12 +104,12 @@ fn write_state(state: &VersionCheckState) -> Option<()> {
 
 /// Read-modify-write the state file, applying `f` to the existing state.
 /// Creates a default state if none exists.
-fn update_state(f: impl FnOnce(&mut VersionCheckState)) -> Option<()> {
-    let path = state_file_path()?;
+fn update_state(state_file: Option<&Path>, f: impl FnOnce(&mut VersionCheckState)) -> Option<()> {
+    let path = state_file?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
-    let mut state = read_state().unwrap_or(VersionCheckState {
+    let mut state = read_state(Some(path)).unwrap_or(VersionCheckState {
         last_checked: Utc::now(),
         latest_version: None,
     });
@@ -88,18 +129,17 @@ fn is_stale(last_checked: &DateTime<Utc>) -> bool {
 // --- Network ---
 
 #[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "worker/src/generated/"))]
+#[cfg_attr(test, ts(export_to = "worker/src/generated/"))]
 #[derive(Deserialize)]
 struct VersionResponse {
     version: String,
 }
 
-fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option<String> {
+fn fetch_latest_version(settings: &Settings, debug: bool, timeout: Duration) -> Option<String> {
+    let current = settings.current_version;
     let url = format!(
         "{}?v={}&channel={}",
-        channel::VERSION_CHECK_BASE_URL,
-        current,
-        channel::VERSION_CHANNEL
+        VERSION_CHECK_BASE_URL, current, settings.channel
     );
 
     if debug {
@@ -113,7 +153,7 @@ fn fetch_latest_version(current: &str, debug: bool, timeout: Duration) -> Option
 
     let body = agent
         .get(&url)
-        .header("User-Agent", &format!("{}/{}", channel::APP_NAME, current))
+        .header("User-Agent", &format!("{}/{}", settings.app_name, current))
         .call()
         .ok()?
         .body_mut()
@@ -148,7 +188,7 @@ fn spawn_background_check() {
         Err(_) => return,
     };
     let _ = std::process::Command::new(exe)
-        .arg(channel::INTERNAL_VERSION_CHECK_ARG)
+        .arg(INTERNAL_VERSION_CHECK_ARG)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -158,31 +198,12 @@ fn spawn_background_check() {
 
 /// Entry point for the detached subprocess spawned by `spawn_background_check`.
 /// Fetches the latest version with a generous timeout and writes it to the state file.
-pub fn run_background_version_check() {
-    let current = env!("CARGO_PKG_VERSION");
-    if let Some(latest) = fetch_latest_version(current, false, Duration::from_secs(5)) {
-        update_state(|s| s.latest_version = Some(latest));
-    }
-}
-
-// --- Config integration ---
-
-/// Returns true if version checking is enabled in config.
-/// Returns true if config doesn't exist or can't be read (default-on).
-pub fn is_enabled() -> bool {
-    let path = match crate::config::default_config_path() {
-        Ok(p) => p,
-        Err(_) => return true,
-    };
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
-    // Parse just the raw TOML to check version_check.enabled
-    let raw: Result<crate::config::MultiTemplateConfig, _> = toml::from_str(&contents);
-    match raw {
-        Ok(config) => config.version_check.map(|vc| vc.enabled).unwrap_or(true),
-        Err(_) => true,
+/// It does not read `settings.enabled`.
+pub fn run_background_version_check(settings: &Settings) {
+    if let Some(latest) = fetch_latest_version(settings, false, Duration::from_secs(5)) {
+        update_state(settings.state_file.as_deref(), |s| {
+            s.latest_version = Some(latest)
+        });
     }
 }
 
@@ -191,16 +212,17 @@ pub fn is_enabled() -> bool {
 /// Called after successful commands. Non-blocking: reads from cache and prints
 /// an update notice if one is available, then spawns a background subprocess
 /// to refresh the cache if stale. Never blocks on network I/O.
-pub fn check_cache_and_notify(debug: bool) {
-    if !is_enabled() {
+pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
+    if settings.enabled == Enablement::Disabled {
         if debug {
             eprintln!("[debug] version check: disabled in config");
         }
         return;
     }
 
-    let current = env!("CARGO_PKG_VERSION");
-    let state = read_state();
+    let current = settings.current_version;
+    let state_file = settings.state_file.as_deref();
+    let state = read_state(state_file);
 
     if state.is_none() {
         // First run: show privacy notice, seed state, spawn background check
@@ -209,13 +231,16 @@ pub fn check_cache_and_notify(debug: bool) {
         }
         eprintln!(
             "Note: {} checks for updates daily (current version sent to forest.dliv.gg).",
-            channel::APP_NAME
+            settings.app_name
         );
         eprintln!("Disable: set version_check.enabled = false in config.");
-        write_state(&VersionCheckState {
-            last_checked: Utc::now(),
-            latest_version: None,
-        });
+        write_state(
+            state_file,
+            &VersionCheckState {
+                last_checked: Utc::now(),
+                latest_version: None,
+            },
+        );
         spawn_background_check();
         return;
     }
@@ -227,10 +252,7 @@ pub fn check_cache_and_notify(debug: bool) {
         if version_newer(latest, current) {
             eprintln!(
                 "Update available: {} v{} (current: v{}). Run `{} update` to upgrade.",
-                channel::APP_NAME,
-                latest,
-                current,
-                channel::CMD
+                settings.app_name, latest, current, settings.command
             );
         }
     }
@@ -242,7 +264,7 @@ pub fn check_cache_and_notify(debug: bool) {
                 "[debug] version check: cache stale or incomplete, spawning background check"
             );
         }
-        update_state(|s| s.last_checked = Utc::now());
+        update_state(state_file, |s| s.last_checked = Utc::now());
         spawn_background_check();
     } else if debug {
         eprintln!(
@@ -253,14 +275,18 @@ pub fn check_cache_and_notify(debug: bool) {
 }
 
 /// Called by `git forest version --check`. Forces a synchronous network check.
-pub fn force_check(debug: bool) -> ForceCheckResult {
-    let current = env!("CARGO_PKG_VERSION");
-    match fetch_latest_version(current, debug, Duration::from_secs(5)) {
+/// It does not read `settings.enabled`; the host checks it first.
+pub fn force_check(settings: &Settings, debug: bool) -> ForceCheckResult {
+    let current = settings.current_version;
+    match fetch_latest_version(settings, debug, Duration::from_secs(5)) {
         Some(latest) => {
-            write_state(&VersionCheckState {
-                last_checked: Utc::now(),
-                latest_version: Some(latest.clone()),
-            });
+            write_state(
+                settings.state_file.as_deref(),
+                &VersionCheckState {
+                    last_checked: Utc::now(),
+                    latest_version: Some(latest.clone()),
+                },
+            );
             if version_newer(&latest, current) {
                 ForceCheckResult::UpdateAvailable(UpdateNotice {
                     current: current.to_string(),
@@ -352,6 +378,9 @@ last_checked = "2026-01-01T00:00:00Z"
     #[ignore]
     fn export_bindings() {
         use ts_rs::TS;
-        VersionResponse::export_all(&ts_rs::Config::from_env()).unwrap();
+        VersionResponse::export_all(
+            &ts_rs::Config::from_env().with_out_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+        )
+        .unwrap();
     }
 }

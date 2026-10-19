@@ -14,7 +14,6 @@ pub(crate) mod config;
 mod forest;
 mod git;
 mod testutil;
-pub(crate) mod version_check;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -22,6 +21,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use cli::{Cli, Command};
+use git_forest_update_check as update_check;
 
 /// A failure that ends a command: what `main_entry` renders and maps to an exit code.
 enum Failure {
@@ -170,9 +170,9 @@ pub fn main_entry() -> ExitCode {
     // Intercepted before CLI parsing — not a real subcommand.
     if args
         .iter()
-        .any(|arg| arg == channel::INTERNAL_VERSION_CHECK_ARG)
+        .any(|arg| arg == update_check::INTERNAL_VERSION_CHECK_ARG)
     {
-        version_check::run_background_version_check();
+        update_check::run_background_version_check(&update_check_settings());
         return ExitCode::SUCCESS;
     }
 
@@ -215,13 +215,35 @@ pub fn main_entry() -> ExitCode {
     match &outcome {
         Ok(Completion::Complete) => {
             if should_version_check {
-                version_check::check_cache_and_notify(debug);
+                update_check::check_cache_and_notify(&update_check_settings(), debug);
             }
         }
         Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => {}
         Err(failure) => report_failure(failure, json),
     }
     exit_code(&outcome)
+}
+
+/// The update check's settings: this binary's version, names and channel, the state file in
+/// the state directory, and the config's enabled flag. Built the same way for the background
+/// check, after a command and for `version --check`.
+fn update_check_settings() -> update_check::Settings {
+    let state_file = config::xdg_state_dir()
+        .ok()
+        .map(|dir| dir.join(update_check::STATE_FILE_NAME));
+    let enabled = if config::version_check_enabled(config::default_config_path().ok().as_deref()) {
+        update_check::Enablement::Enabled
+    } else {
+        update_check::Enablement::Disabled
+    };
+    update_check::Settings {
+        current_version: env!("CARGO_PKG_VERSION"),
+        app_name: channel::APP_NAME,
+        command: channel::CMD,
+        channel: channel::VERSION_CHANNEL,
+        state_file,
+        enabled,
+    }
 }
 
 /// `rm` of one forest is incomplete when any cleanup step reported an error.
@@ -576,11 +598,12 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
         Command::Version { check } => {
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
             if check {
-                if !version_check::is_enabled() {
+                let settings = update_check_settings();
+                if settings.enabled == update_check::Enablement::Disabled {
                     eprintln!("Version check is disabled in config.");
                 } else {
-                    match version_check::force_check(cli.debug) {
-                        version_check::ForceCheckResult::UpdateAvailable(notice) => {
+                    match update_check::force_check(&settings, cli.debug) {
+                        update_check::ForceCheckResult::UpdateAvailable(notice) => {
                             eprintln!(
                                 "Update available: {} v{} (current: v{}).",
                                 channel::APP_NAME,
@@ -588,10 +611,10 @@ fn run(cli: Cli, now: chrono::DateTime<chrono::Utc>) -> Result<Completion, Failu
                                 notice.current
                             );
                         }
-                        version_check::ForceCheckResult::UpToDate => {
+                        update_check::ForceCheckResult::UpToDate => {
                             eprintln!("You are up to date.");
                         }
-                        version_check::ForceCheckResult::FetchFailed => {
+                        update_check::ForceCheckResult::FetchFailed => {
                             eprintln!("Could not reach the update server.");
                         }
                     }

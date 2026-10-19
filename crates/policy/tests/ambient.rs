@@ -151,12 +151,11 @@ fn root_manifest_dependencies_are_read() {
         "clap",
         "directories",
         "git_forest_core",
+        "git_forest_update_check",
         "libc",
-        "semver",
         "serde",
         "serde_json",
         "toml",
-        "ureq",
     ]
     .into_iter()
     .filter(|name| !found.contains(*name))

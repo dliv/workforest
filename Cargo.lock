@@ -451,17 +451,15 @@ dependencies = [
  "clap",
  "directories",
  "git-forest-core",
+ "git-forest-update-check",
  "insta",
  "libc",
  "predicates",
- "semver",
  "serde",
  "serde_json",
  "serial_test",
  "tempfile",
  "toml",
- "ts-rs",
- "ureq",
 ]
 
 [[package]]
@@ -480,6 +478,20 @@ name = "git-forest-policy"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "git-forest-update-check"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "ts-rs",
+ "ureq",
 ]
 
 [[package]]

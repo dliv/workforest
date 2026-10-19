@@ -15,6 +15,3 @@ pub const VERSION_CHANNEL: &str = "beta";
 pub const CMD: &str = "git forest";
 #[cfg(feature = "beta")]
 pub const CMD: &str = "git forest-beta";
-
-pub const VERSION_CHECK_BASE_URL: &str = "https://forest.dliv.gg/api/latest";
-pub const INTERNAL_VERSION_CHECK_ARG: &str = "--internal-version-check";

@@ -83,7 +83,11 @@ release-beta version:
 # --- Worker (Cloudflare) ---
 
 generate-types:
-    TS_RS_EXPORT_DIR=. cargo test export_bindings -- --ignored
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    cargo test -p git-forest-update-check --lib export_bindings -- --ignored --color never 2>&1 | tee target/generate-types.log
+    grep -Eq '^test result: ok\. [1-9][0-9]* passed' target/generate-types.log || { echo "generate-types: no export test ran; check the package and test names" >&2; exit 1; }
 
 worker-deploy:
     cd worker && npx wrangler deploy

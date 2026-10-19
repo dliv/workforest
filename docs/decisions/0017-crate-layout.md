@@ -13,7 +13,7 @@ Each role is its own workspace member, and a feature's crates live at `crates/<f
 
 - `crates/forest/core` (`git-forest-core`), Pure: the forest's decisions, types and renderers, meaning the path newtypes, the forest metadata types, and the plan, result and renderer code of `new`, `rm` and `reset`. Present.
 - `crates/forest/ops` (`git-forest-ops`), Effectful: the forest's observe and execute steps, the git wrapper, forest discovery and the metadata file's I/O. To follow.
-- `crates/update-check` (`git-forest-update-check`), Edge: the update server client, its state file and `VersionResponse`. To follow.
+- `crates/update-check` (`git-forest-update-check`), Edge: the update server client, its state file and `VersionResponse`. Present.
 - The repository root (`git-forest`), Binary: `src/lib.rs` and the binaries, `cli`, `channel` and configuration resolution; the composition root.
 - `crates/policy` (`git-forest-policy`), Tooling: the architecture checks.
 
@@ -29,8 +29,8 @@ Reasons:
 - Root code names the core directly (`git_forest_core::paths::...`), and the root does not re-export the core's modules at their old paths, so `crate::` always means the crate the file is in. A path into another workspace crate is not an edge of the direction scan; the edges test checks the crate dependency instead (`docs/architecture.md`, "Crate classes and edges").
 - Reading and writing the metadata file and reading a worktree's branch state are free functions in the root package (`read_meta`, `write_meta`, `read_branch_state`), because an inherent `impl` must live in the crate that defines its type.
 - The edges test gates the crate graph: every member has a class, and a Pure crate depends only on Pure crates of its feature and on the allowed external crates at their pinned features.
-- The stable and beta features and the version stay in the root package.
-- ts-rs is untouched while `version_check` stays in the root package; moving it into `crates/update-check` changes its `export_to` path.
+- The stable and beta features and the version stay in the root package. The update check receives the version, the app and command names, the channel, the state file's path and the enabled flag as one settings value built by the root, with the update server's endpoint and the internal background-check argument as its own constants.
+- ts-rs: `VersionResponse`'s `export_to` keeps `worker/src/generated/`, and the ignored export test anchors its output directory at the repository root (`with_out_dir` from the crate's manifest directory), so it writes the tracked binding from any directory and without `TS_RS_EXPORT_DIR`. `ts(export)` is gone, so a plain `cargo test` writes no binding, and `just generate-types` names the package and fails when no export test ran.
 - `Cargo.lock` changes once for each new member, and that change is committed with it.
 - Where `init` and the configuration file's I/O live stays open until the effects crate is designed: the config file is written by `init` and backed up by `reset`, while configuration is resolved at the composition root.
 
