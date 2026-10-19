@@ -1,8 +1,17 @@
 //! Token-level scans of product sources: the production region of a file,
-//! the crate-internal modules it imports, the effects the purity scan reports in
-//! Pure modules, the dependency crates a file refers to, and trait declarations.
+//! the crate-internal modules it imports, the effects the ambient scan reports
+//! (under the Pure profile in Pure modules, under the Root profile in Root
+//! modules), the dependency crates a file refers to, and trait declarations.
 //! Every scan works on tokens, so comments and string literals can neither hide
 //! nor fake a path.
+//!
+//! The two profiles share every rule except three. The Pure profile reports any
+//! path through `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or
+//! `std::thread`, and standard input. The Root profile reports any path through
+//! `std::fs`, `std::net` or `std::thread`, and any path through `std::env` other
+//! than the namespace itself, `std::env::args_os` and `std::env::ArgsOs`; it does
+//! not report `std::process`, `std::time` or `std::io`, standard input included,
+//! which Clippy bans outside their sanctioned sites.
 
 use std::collections::BTreeSet;
 
@@ -316,16 +325,87 @@ fn after_turbofish(tokens: &[String], index: usize) -> usize {
     index
 }
 
-/// Ambient-effect violations in a Pure module's production tokens: any path into `std::fs`,
-/// `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported
-/// and through aliases; standard input; the effectful `std::path` names
+/// Which forms the ambient scan reports: the Pure profile for Pure modules, the Root profile
+/// for Root modules. They differ only in the `std` modules they forbid, the `std::env` paths
+/// the Root profile sanctions, and standard input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EffectProfile {
+    Pure,
+    Root,
+}
+
+impl EffectProfile {
+    /// The `std` modules any path through which is reported.
+    fn forbidden_modules(self) -> &'static [&'static str] {
+        match self {
+            EffectProfile::Pure => &["fs", "env", "process", "net", "time", "thread"],
+            EffectProfile::Root => &["fs", "env", "net", "thread"],
+        }
+    }
+
+    /// Whether a `std` path that names a forbidden module is sanctioned anyway: under the Root
+    /// profile, the `std::env` namespace itself (the paths through it are checked) and the
+    /// process arguments, `std::env::args_os` and `std::env::ArgsOs`.
+    fn sanctions(self, path: &[String]) -> bool {
+        match self {
+            EffectProfile::Pure => false,
+            EffectProfile::Root => matches!(
+                path.iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                ["std", "env"] | ["std", "env", "args_os" | "ArgsOs"]
+            ),
+        }
+    }
+
+    fn reports_stdin(self) -> bool {
+        match self {
+            EffectProfile::Pure => true,
+            EffectProfile::Root => false,
+        }
+    }
+
+    /// The violations a fully resolved `std` path holds under this profile.
+    fn path_violations(self, path: &[String], violations: &mut BTreeSet<String>) {
+        if self.reports_stdin() && is_stdin_path(path) {
+            violations.insert(STDIN.to_owned());
+        }
+        if self.sanctions(path) {
+            return;
+        }
+        for module in path.iter().skip(1) {
+            if self.forbidden_modules().contains(&module.as_str()) {
+                violations.insert(format!("std::{module}"));
+            }
+        }
+    }
+}
+
+/// Ambient-effect violations in a Pure module's production tokens (the Pure profile): any path
+/// into `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline
+/// or imported and through aliases; standard input; the effectful `std::path` names
 /// (`EFFECTFUL_PATH_NAMES`); `include!`, under its own name or an imported alias, and
 /// `#[path = ...]`; `unsafe`, `extern` and `macro_rules!`; glob imports of `std` or `core`,
 /// importing `std` itself or aliasing `core`; and non-ASCII identifiers. `include_str!`,
 /// `include_bytes!`, `env!` and `option_env!` are compile-time inputs and are not reported.
 pub fn ambient_violations(source: &str) -> Vec<String> {
+    effect_violations(source, EffectProfile::Pure)
+}
+
+/// Ambient-effect violations in a Root module's production tokens (the Root profile): any path
+/// into `std::fs`, `std::net` or `std::thread`; any path into `std::env` other than the
+/// namespace itself, `std::env::args_os` and `std::env::ArgsOs`; and every other form the Pure
+/// profile reports (`ambient_violations`) except `std::process`, `std::time` and standard
+/// input. Process, clock and stream uses are left to Clippy's bans, which allow them only at
+/// sanctioned sites.
+pub fn root_ambient_violations(source: &str) -> Vec<String> {
+    effect_violations(source, EffectProfile::Root)
+}
+
+/// The shared body of both profiles.
+fn effect_violations(source: &str, profile: EffectProfile) -> Vec<String> {
     let tokens = production_tokens(source);
-    let forbidden_modules = ["fs", "env", "process", "net", "time", "thread"];
     let forbidden_imported_macros = ["include"];
     let imports = use_imports(&tokens);
     let aliases = std_aliases(&imports);
@@ -355,20 +435,13 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
             }
         }
         for path in expand_std_paths(&import.path, &aliases) {
-            if is_stdin_path(&path) {
-                violations.insert(STDIN.to_owned());
-            }
             if import.path.last().is_some_and(|segment| segment == "*") {
                 violations.insert("std::*".to_owned());
             }
             if path.len() == 1 {
                 violations.insert("std-root-import".to_owned());
             }
-            for module in path.iter().skip(1) {
-                if forbidden_modules.contains(&module.as_str()) {
-                    violations.insert(format!("std::{module}"));
-                }
-            }
+            profile.path_violations(&path, &mut violations);
         }
     }
 
@@ -447,14 +520,7 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
                 path.push(segment.to_owned());
                 cursor += 1;
             }
-            if is_stdin_path(&path) {
-                violations.insert(STDIN.to_owned());
-            }
-            for module in path.iter().skip(1) {
-                if forbidden_modules.contains(&module.as_str()) {
-                    violations.insert(format!("std::{module}"));
-                }
-            }
+            profile.path_violations(&path, &mut violations);
         }
     }
 

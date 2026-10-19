@@ -1,10 +1,14 @@
 //! Every Rust source file under the `src/` directory of every product crate has exactly one
-//! class, and every file of a Pure crate is classified Pure.
+//! class, and each crate holds only the module classes its crate class allows: a Pure crate
+//! only Pure files, the Binary crate only Root and Pure files, and only the Binary crate Root
+//! files.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use git_forest_policy::classification::{module_id, ModuleClass, ModuleId, MODULES};
+use git_forest_policy::classification::{
+    crate_holds_module_class, module_id, ModuleClass, ModuleId, MODULES,
+};
 use git_forest_policy::edges::{CrateClass, CRATES};
 use git_forest_policy::metadata::{workspace_members, Member};
 use git_forest_policy::repo_root;
@@ -76,11 +80,16 @@ fn every_source_file_has_exactly_one_class() {
             ));
             continue;
         };
-        let in_pure_crate = matches!(class_of_crate(&member.name), Some(CrateClass::Pure { .. }));
-        if in_pure_crate && *class != ModuleClass::Pure {
-            problems.push(format!(
-                "{file} belongs to the Pure crate {} and must be classified Pure, not {class:?}",
-                member.name
+        // A member missing from CRATES has no crate class; the edges test reports it.
+        let Some(crate_class) = class_of_crate(&member.name) else {
+            continue;
+        };
+        if !crate_holds_module_class(crate_class, *class) {
+            problems.push(module_class_problem(
+                file,
+                &member.name,
+                crate_class,
+                *class,
             ));
         }
     }
@@ -99,6 +108,72 @@ fn every_source_file_has_exactly_one_class() {
         "module classification is out of date ({SECTION}):\n  {}",
         problems.join("\n  ")
     );
+}
+
+/// Why a file of the crate `crate_name`, of class `crate_class`, may not be classified
+/// `module_class`, and how to fix it.
+fn module_class_problem(
+    file: &str,
+    crate_name: &str,
+    crate_class: CrateClass,
+    module_class: ModuleClass,
+) -> String {
+    match crate_class {
+        CrateClass::Pure { .. } => format!(
+            "{file} belongs to the Pure crate {crate_name} and must be classified Pure, not \
+             {module_class:?}"
+        ),
+        CrateClass::Binary => format!(
+            "{file} belongs to the Binary crate {crate_name}, which holds only Root and Pure \
+             modules: move the code into a library crate, or classify it Root or Pure, not \
+             {module_class:?}"
+        ),
+        CrateClass::Effectful { .. } => format!(
+            "{file} belongs to the Effectful crate {crate_name}, which may not hold a \
+             {module_class:?} module: the composition root lives in the Binary crate"
+        ),
+        CrateClass::Edge => format!(
+            "{file} belongs to the Edge crate {crate_name}, which may not hold a \
+             {module_class:?} module: the composition root lives in the Binary crate"
+        ),
+        CrateClass::Tooling => format!(
+            "{file} belongs to the Tooling crate {crate_name}, which holds no product module: \
+             remove it from MODULES"
+        ),
+    }
+}
+
+#[test]
+fn crate_classes_hold_only_their_module_classes() {
+    use ModuleClass::{Command, Root, Shared, Shell, TestSupport};
+    let module_classes = [Root, Shell, Command, Shared, ModuleClass::Pure, TestSupport];
+    // Each row: a crate class, then whether it holds Root, Shell, Command, Shared, Pure and
+    // TestSupport modules.
+    let table: [(CrateClass, [bool; 6]); 5] = [
+        (
+            CrateClass::Pure { feature: "widgets" },
+            [false, false, false, false, true, false],
+        ),
+        (
+            CrateClass::Effectful { feature: "widgets" },
+            [false, true, true, true, true, true],
+        ),
+        (CrateClass::Edge, [false, true, true, true, true, true]),
+        (CrateClass::Binary, [true, false, false, false, true, false]),
+        (
+            CrateClass::Tooling,
+            [false, false, false, false, false, false],
+        ),
+    ];
+    for (crate_class, expected) in table {
+        for (module_class, holds) in module_classes.into_iter().zip(expected) {
+            assert_eq!(
+                crate_holds_module_class(crate_class, module_class),
+                holds,
+                "{crate_class:?} holding {module_class:?} ({SECTION})"
+            );
+        }
+    }
 }
 
 #[test]

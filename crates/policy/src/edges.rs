@@ -21,7 +21,8 @@ pub enum CrateClass {
     /// A client of one outside protocol, flat under `crates/`. Depends on no member and on the
     /// external crates in `EDGE_ALLOWED_CRATES`.
     Edge,
-    /// The package that builds the binaries. Depends on any member except Tooling.
+    /// The package that builds the binaries. Holds only Root and Pure modules, so effectful
+    /// code lives in a library crate. Depends on any member except Tooling.
     Binary,
     /// Checks the other members and is never part of the product. Depends on no member, and
     /// no member depends on it.

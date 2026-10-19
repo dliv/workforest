@@ -212,6 +212,30 @@ pub fn crates_allowed_in_pure_modules(crates: &[(&str, CrateClass)]) -> BTreeSet
     external.chain(members).collect()
 }
 
+/// Whether a crate of class `crate_class` may hold a module of class `module_class`: a Pure crate
+/// holds only Pure modules; the Binary crate only Root and Pure modules, so effectful code lives
+/// in a library crate; Effectful and Edge crates hold every class but Root, because the
+/// composition root lives in the Binary crate; a Tooling crate holds no product module (it is
+/// not walked).
+pub fn crate_holds_module_class(crate_class: CrateClass, module_class: ModuleClass) -> bool {
+    use ModuleClass::{Command, Root, Shared, Shell, TestSupport};
+    match (crate_class, module_class) {
+        (CrateClass::Pure { .. }, ModuleClass::Pure) => true,
+        (CrateClass::Pure { .. }, Root | Shell | Command | Shared | TestSupport) => false,
+        (CrateClass::Binary, Root | ModuleClass::Pure) => true,
+        (CrateClass::Binary, Shell | Command | Shared | TestSupport) => false,
+        (
+            CrateClass::Effectful { .. } | CrateClass::Edge,
+            Shell | Command | Shared | ModuleClass::Pure | TestSupport,
+        ) => true,
+        (CrateClass::Effectful { .. } | CrateClass::Edge, Root) => false,
+        (
+            CrateClass::Tooling,
+            Root | Shell | Command | Shared | ModuleClass::Pure | TestSupport,
+        ) => false,
+    }
+}
+
 /// Whether class `from` may import class `to` without an allowlist entry.
 pub fn class_allows(from: ModuleClass, to: ModuleClass) -> bool {
     match from {
