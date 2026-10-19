@@ -36,7 +36,7 @@ pub(crate) fn expand_tilde(path: &str) -> Result<AbsolutePath> {
 // --- Raw deserialization structs (TOML shape) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiTemplateConfig {
+pub(crate) struct MultiTemplateConfig {
     pub default_template: String,
     pub template: BTreeMap<String, TemplateConfig>,
     #[serde(default)]
@@ -54,7 +54,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateConfig {
+pub(crate) struct TemplateConfig {
     pub worktree_base: PathBuf,
     pub base_branch: String,
     pub feature_branch_template: String,
@@ -64,7 +64,7 @@ pub struct TemplateConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoConfig {
+pub(crate) struct RepoConfig {
     pub path: PathBuf,
     #[serde(default)]
     pub name: Option<String>,

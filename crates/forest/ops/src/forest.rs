@@ -7,7 +7,7 @@ use git_forest_core::meta::{ForestMeta, META_FILENAME, STAGED_META_PREFIX};
 use git_forest_core::paths::sanitize_forest_name;
 
 #[derive(Debug)]
-pub struct DiscoveredForest {
+pub(crate) struct DiscoveredForest {
     pub dir: PathBuf,
     pub meta: ForestMeta,
 }
@@ -18,7 +18,7 @@ struct ForestLookup {
 }
 
 #[derive(Debug)]
-pub enum ForestInventoryEntry {
+pub(crate) enum ForestInventoryEntry {
     Discovered(DiscoveredForest),
     MissingMetadata { dir: PathBuf },
     UnreadableMetadata { dir: PathBuf, message: String },
