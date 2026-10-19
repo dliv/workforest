@@ -4,7 +4,10 @@
 use std::path::PathBuf;
 
 use git_forest_policy::classification::PURE_ALLOWED_CRATES;
-use git_forest_policy::edges::{check_edges, CrateClass, CRATES};
+use git_forest_policy::edges::{
+    check_edges, CrateClass, ExternalAllowlists, CRATES, EDGE_ALLOWED_CRATES,
+    EFFECTFUL_ALLOWED_CRATES,
+};
 use git_forest_policy::manifest::manifest_inherits_workspace_lints;
 use git_forest_policy::metadata::{
     parse_members, workspace_members, Dependency, DependencyKind, Features, ListedMember, Member,
@@ -14,6 +17,18 @@ const SECTION: &str = "see docs/architecture.md, section \"Crate classes and edg
 
 const WIDGETS: CrateClass = CrateClass::Pure { feature: "widgets" };
 const GADGETS: CrateClass = CrateClass::Pure { feature: "gadgets" };
+const WIDGETS_OPS: CrateClass = CrateClass::Effectful { feature: "widgets" };
+const GADGETS_OPS: CrateClass = CrateClass::Effectful { feature: "gadgets" };
+
+/// The real Pure list with test-local Effectful and Edge lists: the made-up members are not
+/// the workspace's, so the real Effectful and Edge entries would read as stale here.
+fn allowlists<'a>(effectful: &'a [&'a str], edge: &'a [&'a str]) -> ExternalAllowlists<'a> {
+    ExternalAllowlists {
+        pure: PURE_ALLOWED_CRATES,
+        effectful,
+        edge,
+    }
+}
 
 fn member(name: &str, dir: &str, dependencies: Vec<Dependency>) -> Member {
     Member {
@@ -80,7 +95,15 @@ fn workspace_members_follow_the_crate_rules() {
         "cargo metadata did not list the root package git-forest with its dependencies, so the \
          crate rules would check nothing ({SECTION})"
     );
-    let problems = check_edges(&members, CRATES, PURE_ALLOWED_CRATES);
+    let problems = check_edges(
+        &members,
+        CRATES,
+        ExternalAllowlists {
+            pure: PURE_ALLOWED_CRATES,
+            effectful: EFFECTFUL_ALLOWED_CRATES,
+            edge: EDGE_ALLOWED_CRATES,
+        },
+    );
     assert!(
         problems.is_empty(),
         "the workspace members break the crate rules:\n  {}",
@@ -182,7 +205,7 @@ fn planted_members_report_every_violation() {
         member("torn", "crates/torn", vec![normal("ureq", &[])]),
     ];
 
-    let problems = check_edges(&members, crates, PURE_ALLOWED_CRATES);
+    let problems = check_edges(&members, crates, allowlists(&[], &[]));
 
     let expected = [
         "mystery is not classified",
@@ -285,7 +308,181 @@ fn legitimate_members_report_nothing() {
         member("tools", "crates/tools", vec![normal("serde_json", &[])]),
     ];
 
-    let problems = check_edges(&members, crates, PURE_ALLOWED_CRATES);
+    let problems = check_edges(&members, crates, allowlists(&[], &[]));
+
+    assert!(
+        problems.is_empty(),
+        "legitimate members were refused:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn planted_effectful_and_edge_members_report_every_violation() {
+    let crates: &[(&str, CrateClass)] = &[
+        ("app", CrateClass::Binary),
+        ("alerts", CrateClass::Edge),
+        ("gadgets-core", GADGETS),
+        ("gadgets-ops", GADGETS_OPS),
+        ("widgets-core", WIDGETS),
+        ("widgets-misplaced-ops", WIDGETS_OPS),
+        ("widgets-ops", WIDGETS_OPS),
+    ];
+    let members = vec![
+        member(
+            "app",
+            "",
+            vec![
+                path("widgets-ops", DependencyKind::Normal),
+                path("alerts", DependencyKind::Normal),
+            ],
+        ),
+        member(
+            "alerts",
+            "crates/alerts",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                normal("git2", &[]),
+                normal("ureq", &["json"]),
+                path("widgets-core", DependencyKind::Dev),
+            ],
+        ),
+        member("gadgets-core", "crates/gadgets/core", vec![]),
+        member("gadgets-ops", "crates/gadgets/ops", vec![]),
+        member(
+            "widgets-core",
+            "crates/widgets/core",
+            vec![path("widgets-ops", DependencyKind::Normal)],
+        ),
+        member("widgets-misplaced-ops", "crates/misplaced-ops", vec![]),
+        member(
+            "widgets-ops",
+            "crates/widgets/ops",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                path("alerts", DependencyKind::Normal),
+                path("gadgets-core", DependencyKind::Normal),
+                path("gadgets-ops", DependencyKind::Normal),
+                path("app", DependencyKind::Normal),
+                normal("ureq", &[]),
+                normal("toml", &["preserve_order"]),
+                dependency("ureq", DependencyKind::Dev, false, &[]),
+            ],
+        ),
+    ];
+
+    let problems = check_edges(
+        &members,
+        crates,
+        allowlists(&["toml", "directories"], &["ureq", "semver"]),
+    );
+
+    // toml's feature is not reported: features are not pinned in these classes. The dev
+    // dependencies add nothing.
+    let expected = [
+        "alerts (Edge crate) depends on widgets-core (Pure crate of feature widgets), but an Edge \
+         crate depends on no member",
+        "alerts is an Edge crate and depends on git2, which is not in EDGE_ALLOWED_CRATES",
+        "semver is in EDGE_ALLOWED_CRATES",
+        "widgets-core (Pure crate of feature widgets) depends on widgets-ops (Effectful crate of \
+         feature widgets)",
+        "widgets-misplaced-ops is an Effectful crate of feature widgets at `crates/misplaced-ops`",
+        "widgets-ops (Effectful crate of feature widgets) depends on alerts (Edge crate)",
+        "widgets-ops (Effectful crate of feature widgets) depends on gadgets-core (Pure crate of \
+         feature gadgets)",
+        "widgets-ops (Effectful crate of feature widgets) depends on gadgets-ops (Effectful crate \
+         of feature gadgets)",
+        "widgets-ops (Effectful crate of feature widgets) depends on app (Binary crate)",
+        "widgets-ops is an Effectful crate and depends on ureq, which is not in \
+         EFFECTFUL_ALLOWED_CRATES",
+        "directories is in EFFECTFUL_ALLOWED_CRATES",
+    ];
+    for fragment in expected {
+        let matching = problems
+            .iter()
+            .filter(|problem| problem.contains(fragment))
+            .count();
+        assert_eq!(
+            matching,
+            1,
+            "expected exactly one message containing {fragment:?}, got:\n  {}",
+            problems.join("\n  ")
+        );
+    }
+    assert_eq!(
+        problems.len(),
+        expected.len(),
+        "unexpected messages:\n  {}",
+        problems.join("\n  ")
+    );
+    assert!(
+        problems.iter().all(|problem| problem.ends_with(SECTION)),
+        "every message points at the docs:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn legitimate_effectful_and_edge_members_report_nothing() {
+    let crates: &[(&str, CrateClass)] = &[
+        ("app", CrateClass::Binary),
+        ("alerts", CrateClass::Edge),
+        ("tools", CrateClass::Tooling),
+        ("widgets-core", WIDGETS),
+        ("widgets-ops", WIDGETS_OPS),
+        ("widgets-store", WIDGETS_OPS),
+    ];
+    let members = vec![
+        // Dev-dependencies are exempt from the direction and the allowlists.
+        member(
+            "widgets-ops",
+            "crates/widgets/ops",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                path("widgets-store", DependencyKind::Normal),
+                normal("anyhow", &[]),
+                normal("toml", &["preserve_order"]),
+                dependency("ureq", DependencyKind::Dev, false, &[]),
+                path("alerts", DependencyKind::Dev),
+                path("app", DependencyKind::Dev),
+            ],
+        ),
+        member(
+            "widgets-store",
+            "crates/widgets/store",
+            vec![
+                path("widgets-core", DependencyKind::Normal),
+                normal("anyhow", &[]),
+            ],
+        ),
+        member(
+            "widgets-core",
+            "crates/widgets/core",
+            vec![normal("serde", &["derive"])],
+        ),
+        member(
+            "alerts",
+            "crates/alerts",
+            vec![
+                normal("ureq", &["json"]),
+                path("widgets-core", DependencyKind::Dev),
+                dependency("tempfile", DependencyKind::Dev, false, &[]),
+            ],
+        ),
+        member(
+            "app",
+            "",
+            vec![
+                path("widgets-ops", DependencyKind::Normal),
+                path("widgets-core", DependencyKind::Normal),
+                path("alerts", DependencyKind::Normal),
+                normal("ureq", &[]),
+            ],
+        ),
+        member("tools", "crates/tools", vec![normal("serde_json", &[])]),
+    ];
+
+    let problems = check_edges(&members, crates, allowlists(&["anyhow", "toml"], &["ureq"]));
 
     assert!(
         problems.is_empty(),

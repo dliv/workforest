@@ -14,6 +14,13 @@ pub enum CrateClass {
     /// Only Pure modules, for one feature, at `crates/<feature>/<role>`. Depends only on Pure
     /// crates of the same feature and on the external crates in `PURE_ALLOWED_CRATES`.
     Pure { feature: &'static str },
+    /// A feature's effectful workflow, at `crates/<feature>/<role>`. Depends only on Pure and
+    /// Effectful crates of the same feature and on the external crates in
+    /// `EFFECTFUL_ALLOWED_CRATES`.
+    Effectful { feature: &'static str },
+    /// A client of one outside protocol, flat under `crates/`. Depends on no member and on the
+    /// external crates in `EDGE_ALLOWED_CRATES`.
+    Edge,
     /// The package that builds the binaries. Depends on any member except Tooling.
     Binary,
     /// Checks the other members and is never part of the product. Depends on no member, and
@@ -28,24 +35,53 @@ pub const CRATES: &[(&str, CrateClass)] = &[
     ("git-forest-policy", CrateClass::Tooling),
 ];
 
+/// External crates an Effectful crate may declare as normal or build dependencies, by name only,
+/// each with the reason its code needs it. Features are not pinned: code in an Effectful crate
+/// performs effects by design. Empty until the first Effectful crate exists. Every entry must
+/// be declared by some Effectful crate.
+pub const EFFECTFUL_ALLOWED_CRATES: &[&str] = &[];
+
+/// External crates an Edge crate may declare as normal or build dependencies, by name only, each
+/// with the reason its code needs it. Features are not pinned: code in an Edge crate performs
+/// effects by design. Empty until the first Edge crate exists. Every entry must be declared by
+/// some Edge crate.
+pub const EDGE_ALLOWED_CRATES: &[&str] = &[];
+
+/// The external crates each class may declare as normal or build dependencies, passed to
+/// `check_edges` together.
+#[derive(Clone, Copy, Debug)]
+pub struct ExternalAllowlists<'a> {
+    /// `PURE_ALLOWED_CRATES`: each crate with the features a Pure crate may declare for it.
+    pub pure: &'a [(&'a str, &'a [&'a str])],
+    /// `EFFECTFUL_ALLOWED_CRATES`.
+    pub effectful: &'a [&'a str],
+    /// `EDGE_ALLOWED_CRATES`.
+    pub edge: &'a [&'a str],
+}
+
 /// Whether a member of class `from` may have a normal or build dependency on a member of class
 /// `to`. Dependencies on Tooling are refused for every kind, before this is asked.
 fn internal_dependency_allowed(from: CrateClass, to: CrateClass) -> bool {
+    use CrateClass::{Binary, Edge, Effectful, Pure, Tooling};
     match (from, to) {
-        (CrateClass::Pure { feature: a }, CrateClass::Pure { feature: b }) => a == b,
-        (CrateClass::Pure { .. }, CrateClass::Binary | CrateClass::Tooling) => false,
-        (CrateClass::Binary, CrateClass::Pure { .. } | CrateClass::Binary) => true,
-        (CrateClass::Binary, CrateClass::Tooling) => false,
-        (
-            CrateClass::Tooling,
-            CrateClass::Pure { .. } | CrateClass::Binary | CrateClass::Tooling,
-        ) => false,
+        (Pure { feature: a }, Pure { feature: b }) => a == b,
+        (Pure { .. }, Effectful { .. } | Edge | Binary | Tooling) => false,
+        (Effectful { feature: a }, Pure { feature: b } | Effectful { feature: b }) => a == b,
+        (Effectful { .. }, Edge | Binary | Tooling) => false,
+        (Edge, Pure { .. } | Effectful { .. } | Edge | Binary | Tooling) => false,
+        (Binary, Pure { .. } | Effectful { .. } | Edge | Binary) => true,
+        (Binary, Tooling) => false,
+        (Tooling, Pure { .. } | Effectful { .. } | Edge | Binary | Tooling) => false,
     }
 }
 
 fn direction_rule(class: CrateClass) -> &'static str {
     match class {
         CrateClass::Pure { .. } => "a Pure crate depends only on Pure crates of its own feature",
+        CrateClass::Effectful { .. } => {
+            "an Effectful crate depends only on Pure and Effectful crates of its own feature"
+        }
+        CrateClass::Edge => "an Edge crate depends on no member",
         CrateClass::Binary => "a Binary crate depends on any member except Tooling",
         CrateClass::Tooling => "a Tooling crate depends on no member",
     }
@@ -54,6 +90,8 @@ fn direction_rule(class: CrateClass) -> &'static str {
 fn describe(class: CrateClass) -> String {
     match class {
         CrateClass::Pure { feature } => format!("Pure crate of feature {feature}"),
+        CrateClass::Effectful { feature } => format!("Effectful crate of feature {feature}"),
+        CrateClass::Edge => "Edge crate".to_owned(),
         CrateClass::Binary => "Binary crate".to_owned(),
         CrateClass::Tooling => "Tooling crate".to_owned(),
     }
@@ -112,14 +150,17 @@ fn feature_entry(entry: &str) -> FeatureEntry<'_> {
 }
 
 /// Every way `members` break the crate rules, given each member's class in `crates` and the
-/// external crates, with their pinned features, that Pure crates may declare. A name listed
-/// more than once in `crates` is reported once, and no class rule is applied to it. Each
+/// external crates each class may declare (`allowed`: the Pure crates' with their pinned
+/// features, the Effectful and Edge crates' by name). A name listed more than once in `crates`
+/// is reported once, and no class rule is applied to it. An Effectful or Edge entry that no
+/// member of that class declares as a normal or build dependency is reported as stale. Each
 /// message names the member, the rule and the fix.
 pub fn check_edges(
     members: &[Member],
     crates: &[(&str, CrateClass)],
-    pure_allowed: &[(&str, &[&str])],
+    allowed: ExternalAllowlists<'_>,
 ) -> Vec<String> {
+    let pure_allowed = allowed.pure;
     let is_member = |name: &str| members.iter().any(|member| member.name == name);
 
     let mut problems = Vec::new();
@@ -156,10 +197,14 @@ pub fn check_edges(
             // Reported once above.
             Classification::Repeated => {}
             Classification::Class(CrateClass::Pure { feature }) => {
-                check_pure_layout(member, feature, &mut problems);
+                check_pure_build_script(member, &mut problems);
+                check_feature_placement(member, "a Pure crate", feature, &mut problems);
                 check_pure_forwarding(member, &is_member, pure_allowed, &mut problems);
             }
-            Classification::Class(CrateClass::Binary | CrateClass::Tooling) => {}
+            Classification::Class(CrateClass::Effectful { feature }) => {
+                check_feature_placement(member, "an Effectful crate", feature, &mut problems);
+            }
+            Classification::Class(CrateClass::Edge | CrateClass::Binary | CrateClass::Tooling) => {}
         }
         if !member.inherits_workspace_lints {
             problems.push(format!(
@@ -179,9 +224,35 @@ pub fn check_edges(
                         member.name, dependency.name
                     ));
                 }
-                let is_pure = matches!(class, Classification::Class(CrateClass::Pure { .. }));
-                if is_pure && dependency.kind != DependencyKind::Dev {
-                    check_pure_external(member, dependency, pure_allowed, &mut problems);
+                if dependency.kind != DependencyKind::Dev {
+                    match class {
+                        Classification::Class(CrateClass::Pure { .. }) => {
+                            check_pure_external(member, dependency, pure_allowed, &mut problems);
+                        }
+                        Classification::Class(CrateClass::Effectful { .. }) => {
+                            let listed = ListedClass::Effectful;
+                            check_listed_external(
+                                member,
+                                dependency,
+                                listed,
+                                allowed,
+                                &mut problems,
+                            );
+                        }
+                        Classification::Class(CrateClass::Edge) => {
+                            let listed = ListedClass::Edge;
+                            check_listed_external(
+                                member,
+                                dependency,
+                                listed,
+                                allowed,
+                                &mut problems,
+                            );
+                        }
+                        Classification::Class(CrateClass::Binary | CrateClass::Tooling)
+                        | Classification::Missing
+                        | Classification::Repeated => {}
+                    }
                 }
                 continue;
             }
@@ -212,10 +283,73 @@ pub fn check_edges(
             }
         }
     }
+    for listed in [ListedClass::Effectful, ListedClass::Edge] {
+        check_listed_staleness(members, crates, listed, allowed, &mut problems);
+    }
     problems
 }
 
-fn check_pure_layout(member: &Member, feature: &str, problems: &mut Vec<String>) {
+/// The two classes whose external crates are allowed by name alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListedClass {
+    Effectful,
+    Edge,
+}
+
+impl ListedClass {
+    fn holds(self, class: CrateClass) -> bool {
+        match (self, class) {
+            (ListedClass::Effectful, CrateClass::Effectful { .. }) => true,
+            (ListedClass::Edge, CrateClass::Edge) => true,
+            (
+                ListedClass::Effectful,
+                CrateClass::Pure { .. }
+                | CrateClass::Edge
+                | CrateClass::Binary
+                | CrateClass::Tooling,
+            ) => false,
+            (
+                ListedClass::Edge,
+                CrateClass::Pure { .. }
+                | CrateClass::Effectful { .. }
+                | CrateClass::Binary
+                | CrateClass::Tooling,
+            ) => false,
+        }
+    }
+
+    /// The class as a message names it, with its article.
+    fn noun(self) -> &'static str {
+        match self {
+            ListedClass::Effectful => "an Effectful crate",
+            ListedClass::Edge => "an Edge crate",
+        }
+    }
+
+    /// The class name alone, for "no ... crate declares it".
+    fn name(self) -> &'static str {
+        match self {
+            ListedClass::Effectful => "Effectful",
+            ListedClass::Edge => "Edge",
+        }
+    }
+
+    fn list<'a>(self, allowed: ExternalAllowlists<'a>) -> &'a [&'a str] {
+        match self {
+            ListedClass::Effectful => allowed.effectful,
+            ListedClass::Edge => allowed.edge,
+        }
+    }
+
+    fn list_name(self) -> &'static str {
+        match self {
+            ListedClass::Effectful => "EFFECTFUL_ALLOWED_CRATES",
+            ListedClass::Edge => "EDGE_ALLOWED_CRATES",
+        }
+    }
+}
+
+fn check_pure_build_script(member: &Member, problems: &mut Vec<String>) {
     if member.has_build_script {
         problems.push(format!(
             "{} is a Pure crate with a build script, which runs code at build time: remove the \
@@ -223,6 +357,11 @@ fn check_pure_layout(member: &Member, feature: &str, problems: &mut Vec<String>)
             member.name
         ));
     }
+}
+
+/// A feature crate, Pure or Effectful, lives at `crates/<feature>/<role>`. `kind` names its
+/// class with its article ("a Pure crate").
+fn check_feature_placement(member: &Member, kind: &str, feature: &str, problems: &mut Vec<String>) {
     let segments: Vec<&str> = member.dir.split('/').collect();
     let placed = matches!(
         segments.as_slice(),
@@ -230,10 +369,64 @@ fn check_pure_layout(member: &Member, feature: &str, problems: &mut Vec<String>)
     );
     if !placed {
         problems.push(format!(
-            "{} is a Pure crate of feature {feature} at `{}`, but a feature crate lives at \
+            "{} is {kind} of feature {feature} at `{}`, but a feature crate lives at \
              crates/{feature}/<role>: move it there; {SECTION}",
             member.name, member.dir
         ));
+    }
+}
+
+/// A normal or build dependency of an Effectful or Edge crate on an external crate must be in
+/// that class's list.
+fn check_listed_external(
+    member: &Member,
+    dependency: &Dependency,
+    listed: ListedClass,
+    allowed: ExternalAllowlists<'_>,
+    problems: &mut Vec<String>,
+) {
+    if !listed.list(allowed).contains(&dependency.name.as_str()) {
+        problems.push(format!(
+            "{} is {} and depends on {}, which is not in {} (crates/policy/src/edges.rs): \
+             remove the dependency, or allow the crate there with a reason; {SECTION}",
+            member.name,
+            listed.noun(),
+            dependency.name,
+            listed.list_name()
+        ));
+    }
+}
+
+/// Every entry of an Effectful or Edge list must be declared, as a normal or build dependency,
+/// by some member of that class, so the list holds exactly what those crates need.
+fn check_listed_staleness(
+    members: &[Member],
+    crates: &[(&str, CrateClass)],
+    listed: ListedClass,
+    allowed: ExternalAllowlists<'_>,
+    problems: &mut Vec<String>,
+) {
+    let declared = |name: &str| {
+        members.iter().any(|member| {
+            let in_class = match classification(crates, &member.name) {
+                Classification::Class(class) => listed.holds(class),
+                Classification::Missing | Classification::Repeated => false,
+            };
+            in_class
+                && member.dependencies.iter().any(|dependency| {
+                    dependency.kind != DependencyKind::Dev && dependency.name == name
+                })
+        })
+    };
+    for name in listed.list(allowed) {
+        if !declared(name) {
+            problems.push(format!(
+                "{name} is in {} (crates/policy/src/edges.rs), but no {} crate declares it as a \
+                 normal or build dependency: remove the entry; {SECTION}",
+                listed.list_name(),
+                listed.name()
+            ));
+        }
     }
 }
 
