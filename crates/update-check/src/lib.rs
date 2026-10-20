@@ -76,9 +76,18 @@ pub enum ForceCheckResult {
 
 // --- Config file ---
 
+/// The config file as the update check reads it: its own `[version_check]` table and nothing
+/// else. Serde skips every other key without converting its value, so a value the update check
+/// does not own, such as an integer `toml::Value` cannot hold, cannot change the result.
+#[derive(Deserialize)]
+struct ConfigView {
+    version_check: Option<toml::Table>,
+}
+
 /// The update check's own section of the config file, read leniently: no path, a file that
-/// cannot be read or is not TOML, a missing or non-table `version_check`, and an `enabled` that
-/// is missing or not a boolean all read as enabled. Only `enabled = false` disables the check.
+/// cannot be read or is not TOML, a missing or non-table `version_check` or one TOML values
+/// cannot represent, and an `enabled` that is missing or not a boolean all read as enabled.
+/// Only `enabled = false` disables the check.
 fn config_enablement(config_file: Option<&Path>) -> Enablement {
     let Some(path) = config_file else {
         return Enablement::Enabled;
@@ -86,12 +95,12 @@ fn config_enablement(config_file: Option<&Path>) -> Enablement {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Enablement::Enabled;
     };
-    let Ok(config) = toml::from_str::<toml::Table>(&contents) else {
+    let Ok(config) = toml::from_str::<ConfigView>(&contents) else {
         return Enablement::Enabled;
     };
     let enabled = config
-        .get("version_check")
-        .and_then(toml::Value::as_table)
+        .version_check
+        .as_ref()
         .and_then(|table| table.get("enabled"))
         .and_then(toml::Value::as_bool);
     match enabled {
@@ -413,10 +422,8 @@ last_checked = "2026-01-01T00:00:00Z"
         assert!(!is_stale(&recent));
     }
 
-    #[test]
-    fn config_enablement_reads_only_enabled_false_as_disabled() {
-        let tmp = tempfile::tempdir().unwrap();
-        let forest = r#"default_template = "default"
+    /// A forest config without a `[version_check]` table, ending inside its one repo's table.
+    const FOREST_CONFIG: &str = r#"default_template = "default"
 
 [template.default]
 worktree_base = "/tmp/worktrees"
@@ -426,6 +433,11 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
 "#;
+
+    #[test]
+    fn config_enablement_reads_only_enabled_false_as_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest = FOREST_CONFIG;
         let write = |name: &str, contents: &str| {
             let path = tmp.path().join(name);
             std::fs::write(&path, contents).unwrap();
@@ -480,6 +492,54 @@ path = "/tmp/src/foo-api"
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn config_enablement_skips_keys_it_does_not_own() {
+        // TOML integers are signed 64-bit, and `toml::Value` cannot hold one outside that range.
+        // In a key the update check does not own, such a value must not undo an explicit
+        // opt-out; in its own section it is malformed and reads as enabled.
+        const WIDE: &str = "9223372036854775808";
+        const NEGATIVE_WIDE: &str = "-9223372036854775809";
+        let tmp = tempfile::tempdir().unwrap();
+        let read = |name: &str, contents: String| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            config_enablement(Some(&path))
+        };
+        let opt_out = "\n[version_check]\nenabled = false\n";
+
+        let unowned = [
+            (
+                "in-a-repo.toml",
+                format!("{FOREST_CONFIG}external_id = {WIDE}\n{opt_out}"),
+            ),
+            (
+                "in-a-template.toml",
+                FOREST_CONFIG.replace(
+                    "[[template.default.repos]]",
+                    &format!("external_id = {WIDE}\n\n[[template.default.repos]]"),
+                ) + opt_out,
+            ),
+            (
+                "top-level.toml",
+                format!("external_id = {WIDE}\n{FOREST_CONFIG}{opt_out}"),
+            ),
+            (
+                "top-level-negative.toml",
+                format!("external_id = {NEGATIVE_WIDE}\n{FOREST_CONFIG}{opt_out}"),
+            ),
+            (
+                "in-another-table.toml",
+                format!("{FOREST_CONFIG}\n[other]\nexternal_id = {WIDE}\n{opt_out}"),
+            ),
+        ];
+        for (name, contents) in unowned {
+            assert_eq!(read(name, contents), Enablement::Disabled, "{name}");
+        }
+
+        let own = format!("{FOREST_CONFIG}{opt_out}external_id = {WIDE}\n");
+        assert_eq!(read("in-its-own-section.toml", own), Enablement::Enabled);
     }
 
     #[test]
