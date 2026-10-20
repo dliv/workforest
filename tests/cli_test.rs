@@ -734,6 +734,78 @@ fn ls_shows_new_forest() {
 }
 
 #[test]
+fn init_keeps_the_config_sections_it_does_not_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_home = tmp.path().join("home");
+    let config_dir = fake_home.join(".config").join(bin_name());
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("note = \"kept\"\n{VERSION_CHECK_DISABLED_CONFIG}\n[other]\nx = 1\n"),
+    )
+    .unwrap();
+    let repo = create_repo_with_remote(tmp.path(), "foo-api");
+    let worktree_base = tmp.path().join("worktrees");
+
+    bin_cmd()
+        .args([
+            "init",
+            "--feature-branch-template",
+            "testuser/{name}",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--base-branch",
+            "main",
+            "--worktree-base",
+            worktree_base.to_str().unwrap(),
+            "--force",
+        ])
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success();
+
+    let written = std::fs::read_to_string(&config_path).unwrap();
+    let lines: Vec<&str> = written.lines().collect();
+    for line in [
+        "note = \"kept\"",
+        "[other]",
+        "x = 1",
+        "[version_check]",
+        "enabled = false",
+    ] {
+        assert!(
+            lines.contains(&line),
+            "{line:?} is missing from:\n{written}"
+        );
+    }
+}
+
+#[test]
+fn forest_commands_ignore_a_malformed_version_check_table() {
+    let (tmp, fake_home, _) = setup_new_env();
+    let config_path = expected_config_path(&fake_home);
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("enabled = false"), "{config}");
+    std::fs::write(
+        &config_path,
+        config.replace("enabled = false", "enabled = \"no\""),
+    )
+    .unwrap();
+
+    bin_cmd()
+        .arg("ls")
+        .env("HOME", fake_home.to_str().unwrap())
+        .env("XDG_CONFIG_HOME", fake_home.join(".config"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("failed to parse config").not());
+
+    drop(tmp);
+}
+
+#[test]
 fn ls_succeeds_when_inventory_has_only_findings() {
     let (tmp, fake_home, worktree_base) = setup_new_env();
     let unreadable_dir = worktree_base.join("unreadable");

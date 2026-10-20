@@ -5,9 +5,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::path::{Path, PathBuf};
 
-use git_forest_core::config::{
-    parse_config, render_config, version_check_enabled_in, ResolvedConfig,
-};
+use git_forest_core::config::{parse_config, render_config, ResolvedConfig};
 
 /// The environment variables the config and state locations and `~` expansion read, as the
 /// composition root read them once: each `None` when unset or not Unicode.
@@ -118,19 +116,6 @@ pub(crate) fn load_config(path: &Path, home: Option<&str>) -> Result<ResolvedCon
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;
     parse_config(&contents, home)
-}
-
-/// Whether the update check is enabled: the config's `version_check.enabled`, read leniently.
-/// An unresolved location (`None`), a missing, unreadable or unparsable file, and a config
-/// without a `[version_check]` table all read as enabled.
-pub fn version_check_enabled(config_file: Option<&Path>) -> bool {
-    let Some(path) = config_file else {
-        return true;
-    };
-    match std::fs::read_to_string(path) {
-        Ok(contents) => version_check_enabled_in(&contents),
-        Err(_) => true,
-    }
 }
 
 #[cfg(unix)]
@@ -260,46 +245,6 @@ path = "/tmp/src/repo-a"
     }
 
     // --- Multi-template tests ---
-
-    #[test]
-    fn version_check_enabled_reads_the_flag_leniently() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = r#"
-default_template = "default"
-
-[template.default]
-worktree_base = "/tmp/worktrees"
-base_branch = "dev"
-feature_branch_template = "user/{name}"
-
-[[template.default.repos]]
-path = "/tmp/src/foo-api"
-"#;
-        let write = |name: &str, contents: &str| {
-            let path = tmp.path().join(name);
-            std::fs::write(&path, contents).unwrap();
-            path
-        };
-
-        assert!(super::version_check_enabled(None));
-        assert!(super::version_check_enabled(Some(
-            &tmp.path().join("missing.toml")
-        )));
-        let unparsable = write("unparsable.toml", "default_template = [");
-        assert!(super::version_check_enabled(Some(&unparsable)));
-        let without_table = write("without-table.toml", config);
-        assert!(super::version_check_enabled(Some(&without_table)));
-        let disabled = write(
-            "disabled.toml",
-            &format!("{config}\n[version_check]\nenabled = false\n"),
-        );
-        assert!(!super::version_check_enabled(Some(&disabled)));
-        let enabled = write(
-            "enabled.toml",
-            &format!("{config}\n[version_check]\nenabled = true\n"),
-        );
-        assert!(super::version_check_enabled(Some(&enabled)));
-    }
 
     // --- XDG path tests ---
 

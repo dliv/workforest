@@ -2,7 +2,8 @@
 //! its state file, prints an update notice from that cache after a command, and refreshes the
 //! cache in a detached background process. It never names another workspace crate: the
 //! composition root passes the running binary's version, the app and command names, the release
-//! channel, the state file and the enabled flag in one `Settings` value.
+//! channel, the state file and the config file in one `Settings` value, and the update check reads
+//! its own `[version_check]` table from that config file.
 //!
 //! Host protocol: when the cache is missing or stale, `check_cache_and_notify` spawns the host's
 //! own executable with `INTERNAL_VERSION_CHECK_ARG` and passes no settings. The host must
@@ -32,9 +33,10 @@ const VERSION_CHECK_BASE_URL: &str = "https://forest.dliv.gg/api/latest";
 
 const CHECK_INTERVAL_HOURS: i64 = 24;
 
-/// Whether the update check runs after a command: the config's `version_check.enabled`.
+/// Whether the update check runs, as its own `[version_check]` table in the config file says:
+/// only `enabled = false` disables it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Enablement {
+enum Enablement {
     Enabled,
     Disabled,
 }
@@ -51,11 +53,12 @@ pub struct Settings {
     pub command: &'static str,
     /// The release channel sent to the update server.
     pub channel: &'static str,
+    /// The config file, from which the update check reads its own `[version_check]` table;
+    /// None when its location could not be resolved, which reads as enabled.
+    pub config_file: Option<PathBuf>,
     /// The state file; None when its directory could not be resolved, which skips every read
     /// and write of it.
     pub state_file: Option<PathBuf>,
-    /// Read only by `check_cache_and_notify`; the host checks it before `force_check`.
-    pub enabled: Enablement,
 }
 
 pub struct UpdateNotice {
@@ -64,9 +67,37 @@ pub struct UpdateNotice {
 }
 
 pub enum ForceCheckResult {
+    /// The config's `[version_check] enabled = false`; nothing was fetched.
+    Disabled,
     UpdateAvailable(UpdateNotice),
     UpToDate,
     FetchFailed,
+}
+
+// --- Config file ---
+
+/// The update check's own section of the config file, read leniently: no path, a file that
+/// cannot be read or is not TOML, a missing or non-table `version_check`, and an `enabled` that
+/// is missing or not a boolean all read as enabled. Only `enabled = false` disables the check.
+fn config_enablement(config_file: Option<&Path>) -> Enablement {
+    let Some(path) = config_file else {
+        return Enablement::Enabled;
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Enablement::Enabled;
+    };
+    let Ok(config) = toml::from_str::<toml::Table>(&contents) else {
+        return Enablement::Enabled;
+    };
+    let enabled = config
+        .get("version_check")
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("enabled"))
+        .and_then(toml::Value::as_bool);
+    match enabled {
+        Some(false) => Enablement::Disabled,
+        Some(true) | None => Enablement::Enabled,
+    }
 }
 
 // --- State file ---
@@ -198,7 +229,7 @@ fn spawn_background_check() {
 
 /// Entry point for the detached subprocess spawned by `spawn_background_check`.
 /// Fetches the latest version with a generous timeout and writes it to the state file.
-/// It does not read `settings.enabled`.
+/// It reads no config: the foreground call that spawned it already did.
 pub fn run_background_version_check(settings: &Settings) {
     if let Some(latest) = fetch_latest_version(settings, false, Duration::from_secs(5)) {
         update_state(settings.state_file.as_deref(), |s| {
@@ -213,11 +244,14 @@ pub fn run_background_version_check(settings: &Settings) {
 /// an update notice if one is available, then spawns a background subprocess
 /// to refresh the cache if stale. Never blocks on network I/O.
 pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
-    if settings.enabled == Enablement::Disabled {
-        if debug {
-            eprintln!("[debug] version check: disabled in config");
+    match config_enablement(settings.config_file.as_deref()) {
+        Enablement::Disabled => {
+            if debug {
+                eprintln!("[debug] version check: disabled in config");
+            }
+            return;
         }
-        return;
+        Enablement::Enabled => {}
     }
 
     let current = settings.current_version;
@@ -274,9 +308,14 @@ pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
     }
 }
 
-/// Called by `git forest version --check`. Forces a synchronous network check.
-/// It does not read `settings.enabled`; the host checks it first.
+/// Called by `git forest version --check`. Forces a synchronous network check, unless the
+/// config's `[version_check] enabled = false` disables the check, which it reports without
+/// fetching.
 pub fn force_check(settings: &Settings, debug: bool) -> ForceCheckResult {
+    match config_enablement(settings.config_file.as_deref()) {
+        Enablement::Disabled => return ForceCheckResult::Disabled,
+        Enablement::Enabled => {}
+    }
     let current = settings.current_version;
     match fetch_latest_version(settings, debug, Duration::from_secs(5)) {
         Some(latest) => {
@@ -372,6 +411,99 @@ last_checked = "2026-01-01T00:00:00Z"
     fn staleness_check_recent() {
         let recent = Utc::now() - chrono::Duration::hours(1);
         assert!(!is_stale(&recent));
+    }
+
+    #[test]
+    fn config_enablement_reads_only_enabled_false_as_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let forest = r#"default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "user/{name}"
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#;
+        let write = |name: &str, contents: &str| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        };
+        let read = |path: &Path| config_enablement(Some(path));
+
+        assert_eq!(config_enablement(None), Enablement::Enabled);
+        assert_eq!(read(&tmp.path().join("missing.toml")), Enablement::Enabled);
+        assert_eq!(read(tmp.path()), Enablement::Enabled);
+        let enabled = [
+            ("not-toml.toml", "default_template = [".to_string()),
+            ("without-table.toml", forest.to_string()),
+            (
+                "without-enabled.toml",
+                format!("{forest}\n[version_check]\n"),
+            ),
+            (
+                "enabled-true.toml",
+                format!("{forest}\n[version_check]\nenabled = true\n"),
+            ),
+            (
+                "enabled-string.toml",
+                format!("{forest}\n[version_check]\nenabled = \"no\"\n"),
+            ),
+            ("not-a-table.toml", "version_check = 5\n".to_string()),
+        ];
+        for (name, contents) in enabled {
+            assert_eq!(read(&write(name, &contents)), Enablement::Enabled, "{name}");
+        }
+        let disabled = [
+            (
+                "disabled.toml",
+                format!("{forest}\n[version_check]\nenabled = false\n"),
+            ),
+            (
+                "disabled-without-forest-keys.toml",
+                format!(
+                    "{}\n[version_check]\nenabled = false\n",
+                    forest.replace("default_template = \"default\"\n", "")
+                ),
+            ),
+            (
+                "disabled-alone.toml",
+                "[version_check]\nenabled = false\n".to_string(),
+            ),
+        ];
+        for (name, contents) in disabled {
+            assert_eq!(
+                read(&write(name, &contents)),
+                Enablement::Disabled,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_cache_and_notify_honors_a_disabled_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_file = tmp.path().join("config.toml");
+        std::fs::write(&config_file, "[version_check]\nenabled = false\n").unwrap();
+        let state_file = tmp.path().join("state").join("state.toml");
+        let settings = Settings {
+            current_version: "0.0.0",
+            app_name: "git-forest",
+            command: "git forest",
+            channel: "stable",
+            config_file: Some(config_file),
+            state_file: Some(state_file.clone()),
+        };
+
+        check_cache_and_notify(&settings, false);
+
+        assert!(
+            !state_file.exists(),
+            "a disabled check must not write {}",
+            state_file.display()
+        );
     }
 
     #[test]

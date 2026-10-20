@@ -4,7 +4,7 @@ pub mod channel;
 mod cli;
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
@@ -183,7 +183,7 @@ pub fn main_entry() -> ExitCode {
         .iter()
         .any(|arg| arg == update_check::INTERNAL_VERSION_CHECK_ARG)
     {
-        let settings = update_check_settings(resolved_config_file.as_deref(), resolved_state_file);
+        let settings = update_check_settings(resolved_config_file, resolved_state_file);
         update_check::run_background_version_check(&settings);
         return ExitCode::SUCCESS;
     }
@@ -234,8 +234,7 @@ pub fn main_entry() -> ExitCode {
     match &outcome {
         Ok(Completion::Complete) => {
             if should_version_check {
-                let settings =
-                    update_check_settings(resolved_config_file.as_deref(), resolved_state_file);
+                let settings = update_check_settings(resolved_config_file, resolved_state_file);
                 update_check::check_cache_and_notify(&settings, debug);
             }
         }
@@ -245,25 +244,20 @@ pub fn main_entry() -> ExitCode {
     exit_code(&outcome)
 }
 
-/// The update check's settings: this binary's version, names and channel, the state file, and
-/// the enabled flag read from the config file. Built the same way for the background check,
-/// after a command and for `version --check`.
+/// The update check's settings: this binary's version, names and channel, the config file and
+/// the state file. Built the same way for the background check, after a command and for
+/// `version --check`; the update check reads its own section of the config file.
 fn update_check_settings(
-    config_file: Option<&Path>,
+    config_file: Option<PathBuf>,
     state_file: Option<PathBuf>,
 ) -> update_check::Settings {
-    let enabled = if config::version_check_enabled(config_file) {
-        update_check::Enablement::Enabled
-    } else {
-        update_check::Enablement::Disabled
-    };
     update_check::Settings {
         current_version: env!("CARGO_PKG_VERSION"),
         app_name: channel::APP_NAME,
         command: channel::CMD,
         channel: channel::VERSION_CHANNEL,
+        config_file,
         state_file,
-        enabled,
     }
 }
 
@@ -635,28 +629,24 @@ fn run(
         Command::Version { check } => {
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
             if check {
-                let settings = update_check_settings(
-                    config_file.as_ref().ok().map(PathBuf::as_path),
-                    state_file.ok(),
-                );
-                if settings.enabled == update_check::Enablement::Disabled {
-                    eprintln!("Version check is disabled in config.");
-                } else {
-                    match update_check::force_check(&settings, cli.debug) {
-                        update_check::ForceCheckResult::UpdateAvailable(notice) => {
-                            eprintln!(
-                                "Update available: {} v{} (current: v{}).",
-                                channel::APP_NAME,
-                                notice.latest,
-                                notice.current
-                            );
-                        }
-                        update_check::ForceCheckResult::UpToDate => {
-                            eprintln!("You are up to date.");
-                        }
-                        update_check::ForceCheckResult::FetchFailed => {
-                            eprintln!("Could not reach the update server.");
-                        }
+                let settings = update_check_settings(config_file.ok(), state_file.ok());
+                match update_check::force_check(&settings, cli.debug) {
+                    update_check::ForceCheckResult::Disabled => {
+                        eprintln!("Version check is disabled in config.");
+                    }
+                    update_check::ForceCheckResult::UpdateAvailable(notice) => {
+                        eprintln!(
+                            "Update available: {} v{} (current: v{}).",
+                            channel::APP_NAME,
+                            notice.latest,
+                            notice.current
+                        );
+                    }
+                    update_check::ForceCheckResult::UpToDate => {
+                        eprintln!("You are up to date.");
+                    }
+                    update_check::ForceCheckResult::FetchFailed => {
+                        eprintln!("Could not reach the update server.");
                     }
                 }
             }

@@ -19,9 +19,11 @@ Current code already uses a single-file pattern:
 - `write_config_atomic()` (`crates/forest/ops/src/config.rs`) uses temp-file + rename for atomic writes.
 - `--force` is only required when overwriting an existing template name, not when adding new ones.
 
+Each section of the file is owned by its reader. The forest's `default_template` and `[template.*]` are parsed by the core's schema (`crates/forest/core/src/config.rs`), which keeps every other top-level key and table and writes them back when `init` rewrites the file, re-serialized as parsed (keys in sorted order, comments and formatting dropped, as the rewrite does for the forest's own keys), so an empty `[version_check]` stays empty and extra keys in it survive. The update check's `[version_check]` is read by the update-check edge (`crates/update-check/src/lib.rs`) from the config path in its settings, and a missing or malformed table reads as enabled.
+
 ## Consequences
 
-- **One `toml::from_str` call** for parsing, not N-file scanning.
+- **One parse per reader**, not N-file scanning: the forest parses the file once, and the update check parses it separately for its own table.
 - **Atomic writes** via temp-file + rename — no multi-file transactional logic needed.
 - **Agent-friendly (ADR 0001):** One file to read, parse, and patch.
 - **Deterministic output:** `BTreeMap` gives stable key ordering across serialization cycles.

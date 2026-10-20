@@ -1,6 +1,12 @@
 //! The config file's format: its schema, parsing and rendering, and `~` expansion with the home
 //! directory passed in. Reading and writing the file stay in the forest ops crate
 //! (`git-forest-ops`).
+//!
+//! Each section of the file is owned by its reader: the forest's `default_template` and
+//! `[template.*]` here, the update check's `[version_check]` in the update-check edge, which
+//! reads it itself. Every other top-level key and table is kept and written back, re-serialized
+//! as parsed (keys in sorted order, comments and formatting dropped, as the rewrite does for the
+//! forest's own keys).
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -39,19 +45,9 @@ pub fn expand_tilde(path: &str, home: Option<&str>) -> Result<AbsolutePath> {
 struct MultiTemplateConfig {
     default_template: String,
     template: BTreeMap<String, TemplateConfig>,
-    #[serde(default)]
-    version_check: Option<VersionCheckConfig>,
-}
-
-/// The update check's `[version_check]` table as the forest's schema parses it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionCheckConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
+    /// Every top-level key and table the forest does not own, kept to be written back.
+    #[serde(flatten)]
+    rest: toml::Table,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,13 +73,14 @@ struct RepoConfig {
 
 // --- Resolved types (post-parse) ---
 
-/// The config file, parsed: the default template's name, every template resolved, and the update
-/// check's table as parsed.
+/// The config file, parsed: the default template's name, every template resolved, and every
+/// other top-level key and table as parsed, which the forest does not read and writes back.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub default_template: String,
     pub templates: BTreeMap<String, ResolvedTemplate>,
-    pub version_check: Option<VersionCheckConfig>,
+    /// The sections the forest does not own, the update check's `[version_check]` among them.
+    pub rest: toml::Table,
 }
 
 impl ResolvedConfig {
@@ -209,7 +206,7 @@ pub fn parse_config(contents: &str, home: Option<&str>) -> Result<ResolvedConfig
     let resolved = ResolvedConfig {
         default_template: raw.default_template.clone(),
         templates,
-        version_check: raw.version_check.clone(),
+        rest: raw.rest.clone(),
     };
 
     // Validate default_template references an existing key
@@ -231,7 +228,7 @@ pub fn parse_config(contents: &str, home: Option<&str>) -> Result<ResolvedConfig
 pub fn render_config(config: &ResolvedConfig) -> Result<String> {
     let raw = MultiTemplateConfig {
         default_template: config.default_template.clone(),
-        version_check: config.version_check.clone(),
+        rest: config.rest.clone(),
         template: config
             .templates
             .iter()
@@ -260,17 +257,6 @@ pub fn render_config(config: &ResolvedConfig) -> Result<String> {
     };
 
     toml::to_string_pretty(&raw).context("failed to serialize config")
-}
-
-/// Whether the update check is enabled by `contents`, the config file's text, read leniently:
-/// the whole schema is deserialized, and a file that does not deserialize or has no
-/// `[version_check]` table reads as enabled.
-pub fn version_check_enabled_in(contents: &str) -> bool {
-    let raw: Result<MultiTemplateConfig, _> = toml::from_str(contents);
-    match raw {
-        Ok(config) => config.version_check.map(|vc| vc.enabled).unwrap_or(true),
-        Err(_) => true,
-    }
 }
 
 #[cfg(test)]
@@ -682,7 +668,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "default".to_string(),
             templates: BTreeMap::new(),
-            version_check: None,
+            rest: toml::Table::new(),
         };
         let result = config.resolve_template(None);
         assert!(result.is_err());
@@ -759,7 +745,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "a".to_string(),
             templates,
-            version_check: None,
+            rest: toml::Table::new(),
         };
         let bases = config.all_worktree_bases();
         assert_eq!(bases.len(), 1);
@@ -791,7 +777,7 @@ path = "/tmp/src/foo"
         let config = ResolvedConfig {
             default_template: "a".to_string(),
             templates,
-            version_check: None,
+            rest: toml::Table::new(),
         };
         let bases = config.all_worktree_bases();
         assert_eq!(bases.len(), 2);
@@ -849,16 +835,17 @@ feature_branch_template = "user/{name}"
 path = "/tmp/src/foo-api"
 "#;
         let config = parse_config(toml, Some(TEST_HOME)).unwrap();
-        assert!(config.version_check.is_none());
+        assert!(config.rest.is_empty());
     }
 
-    #[test]
-    fn config_with_version_check_enabled() {
-        let toml = r#"
+    /// A config with sections the forest does not own: a top-level key, an `[other]` table, and a
+    /// `[version_check]` table that is malformed for the update check and irrelevant here.
+    const FOREIGN_SECTIONS_CONFIG: &str = r#"
+note = "kept"
 default_template = "default"
 
 [version_check]
-enabled = false
+enabled = "no"
 
 [template.default]
 worktree_base = "/tmp/worktrees"
@@ -867,30 +854,61 @@ feature_branch_template = "user/{name}"
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
+
+[other]
+x = 1
 "#;
-        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
-        let vc = config.version_check.unwrap();
-        assert!(!vc.enabled);
+
+    #[test]
+    fn config_keeps_the_sections_it_does_not_own() {
+        let config = parse_config(FOREIGN_SECTIONS_CONFIG, Some(TEST_HOME)).unwrap();
+
+        let tmpl = config.resolve_template(None).unwrap();
+        assert_eq!(*tmpl.worktree_base, *PathBuf::from("/tmp/worktrees"));
+        assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
+        let expected: toml::Table = toml::from_str(
+            r#"
+note = "kept"
+
+[other]
+x = 1
+
+[version_check]
+enabled = "no"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.rest, expected);
     }
 
     #[test]
-    fn config_with_version_check_defaults_to_enabled() {
-        let toml = r#"
-default_template = "default"
+    fn render_config_writes_back_the_sections_it_does_not_own() {
+        let config = parse_config(FOREIGN_SECTIONS_CONFIG, Some(TEST_HOME)).unwrap();
 
-[version_check]
+        assert_eq!(
+            render_config(&config).unwrap(),
+            r#"default_template = "default"
+note = "kept"
 
 [template.default]
 worktree_base = "/tmp/worktrees"
 base_branch = "dev"
 feature_branch_template = "user/{name}"
+disposable_root_entries = []
 
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
-"#;
-        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
-        let vc = config.version_check.unwrap();
-        assert!(vc.enabled);
+name = "foo-api"
+base_branch = "dev"
+remote = "origin"
+
+[other]
+x = 1
+
+[version_check]
+enabled = "no"
+"#
+        );
     }
 
     #[test]
@@ -910,7 +928,7 @@ path = "/tmp/src/foo-api"
         let config = ResolvedConfig {
             default_template: "default".to_string(),
             templates: BTreeMap::from([("default".to_string(), template)]),
-            version_check: Some(VersionCheckConfig { enabled: false }),
+            rest: toml::from_str("[version_check]\nenabled = false\n").unwrap(),
         };
 
         assert_eq!(

@@ -173,7 +173,7 @@ pub fn merge_init(
     let mut config = existing.unwrap_or_else(|| ResolvedConfig {
         default_template: template_name.to_string(),
         templates: BTreeMap::new(),
-        version_check: None,
+        rest: toml::Table::new(),
     });
 
     // Only require --force when overwriting an existing template
@@ -516,7 +516,7 @@ mod tests {
             *config.templates["first"].worktree_base,
             *PathBuf::from("/wt/first")
         );
-        assert!(config.version_check.is_none());
+        assert!(config.rest.is_empty());
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod tests {
                 ("a".to_string(), template_at("/wt/a")),
                 ("b".to_string(), template_at("/wt/b")),
             ]),
-            version_check: None,
+            rest: toml::Table::new(),
         };
 
         let added = merge_init(Some(existing()), "c", template_at("/wt/c"), false).unwrap();
