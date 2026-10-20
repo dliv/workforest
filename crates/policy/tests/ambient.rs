@@ -77,8 +77,9 @@ fn root_modules_have_no_forbidden_effects() {
     assert!(
         problems.is_empty(),
         "Root modules compose: they may not touch the filesystem, the network, threads or the \
-         environment beyond the process arguments; move the effect into a Shared module of an \
-         effectful crate and pass the data in ({ROOT_SECTION}):\n  {}",
+         environment beyond the process arguments and the variables and working directory the \
+         composition root reads by name; move the effect into a Shared module of an effectful \
+         crate and pass the data in ({ROOT_SECTION}):\n  {}",
         problems.join("\n  ")
     );
 }
@@ -105,15 +106,9 @@ fn root_profile_reports_forbidden_forms() {
             "std::thread",
         ),
         ("fn f() { let _ = std::env::temp_dir(); }", "std::env"),
-        ("fn f() { let _ = std::env::current_dir(); }", "std::env"),
-        (
-            r#"use std::env::var as read_var; fn f() { let _ = read_var("HOME"); }"#,
-            "std::env",
-        ),
-        (
-            r#"use std::env; fn f() { let _ = env::var("HOME"); }"#,
-            "std::env",
-        ),
+        ("fn f() { let _ = std::env::home_dir(); }", "std::env"),
+        ("fn f() { let _ = std::env::vars(); }", "std::env"),
+        (r#"fn f() { std::env::set_var("X", "1"); }"#, "std::env"),
         (
             "fn f(p: &std::path::Path) -> bool { p.exists() }",
             "path effect exists",
@@ -139,12 +134,17 @@ fn root_profile_reports_forbidden_forms() {
     }
 }
 
-/// Process, clock and stream uses pass the Root profile because Clippy bans them outside
-/// their sanctioned sites, which the positive control counts.
+/// Process, clock and stream uses, and the environment reads the composition root makes once by
+/// name, pass the Root profile because Clippy bans them outside their sanctioned sites, which
+/// the positive control counts.
 #[test]
 fn root_profile_permits_sanctioned_forms() {
     let sources = [
         "fn f() { let _ = std::env::args_os(); }",
+        "fn f() { let _ = std::env::current_dir(); }",
+        r#"use std::env::var as read_var; fn f() { let _ = read_var("HOME"); }"#,
+        r#"use std::env; fn f() { let _ = env::var("HOME"); }"#,
+        r#"fn f() { let _ = std::env::var_os("PWD"); }"#,
         "use std::env::args_os; fn f() { let _ = args_os(); }",
         "use std::env::args_os as argv; fn f() { let _ = argv(); }",
         "use std::env; fn f() { let _ = env::args_os(); }",

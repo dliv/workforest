@@ -15,7 +15,9 @@ pub use exec::{cmd_exec, format_exec_human, ExecFailureCode, ExecProgress, ExecR
 pub use init::{cmd_init, format_init_human, InitInputs, RepoInput};
 pub use ls::{cmd_ls, format_ls_human};
 pub use new::{cmd_new_at, format_new_human, NewInputs};
-pub use reset::{cmd_reset, format_reset_human, format_reset_summary, ResetProgress, ResetResult};
+pub use reset::{
+    cmd_reset, format_reset_human, format_reset_summary, ResetPaths, ResetProgress, ResetResult,
+};
 pub use rm::{
     cmd_rm_all_with_options, cmd_rm_with_options, format_repo_done, format_rm_all_human,
     format_rm_all_summary, format_rm_human, format_rm_summary, RmAllProgress, RmAllResult,

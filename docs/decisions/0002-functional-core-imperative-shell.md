@@ -20,7 +20,7 @@ Concrete types: `NewResult` (`crates/forest/core/src/plan/new.rs`), `RmResult` (
 
 The module docstring in `crates/forest/ops/src/commands/mod.rs` explicitly references this decision.
 
-The call graph is shallow: `main → command → helpers`. IO lives at the edges (CLI parsing at the top, output dispatch at the bottom). No traits, DI, or ports-and-adapters machinery needed.
+The call graph is shallow: `main → command → helpers`. IO lives at the edges: at the top, `main_entry` parses the CLI and reads the environment variables and the working directory once, passing them to the commands as data; at the bottom, output dispatch happens. Command logic reads neither the environment nor the working directory itself. No traits, DI, or ports-and-adapters machinery needed.
 
 ## Consequences
 

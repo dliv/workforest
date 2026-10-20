@@ -151,16 +151,29 @@ fn report_failure(failure: &Failure, json: bool) {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "composition root: reads process arguments and the clock once, and owns the exit code"
+    reason = "composition root: reads process arguments, the environment, the working directory and the clock once, and owns the exit code"
 )]
 pub fn main_entry() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
 
+    // The environment and the working directory, read once, before the background-check
+    // intercept so that the background child reads them as the parent does, and passed to the
+    // commands as data. The working directory's error is raised only by name-less resolution.
+    let environment = config::Environment {
+        home: std::env::var("HOME").ok(),
+        xdg_config_home: std::env::var("XDG_CONFIG_HOME").ok(),
+        xdg_state_home: std::env::var("XDG_STATE_HOME").ok(),
+    };
+    let working_directory = forest::WorkingDirectory {
+        current: std::env::current_dir(),
+        pwd: std::env::var_os("PWD").map(PathBuf::from),
+    };
+
     // The config and state file locations, resolved once. A command that needs one raises its
     // resolution error itself; the update check uses whichever resolved.
-    let config_file = config::default_config_path(channel::APP_NAME);
-    let state_file =
-        config::xdg_state_dir(channel::APP_NAME).map(|dir| dir.join(update_check::STATE_FILE_NAME));
+    let config_file = config::default_config_path(channel::APP_NAME, &environment);
+    let state_file = config::xdg_state_dir(channel::APP_NAME, &environment)
+        .map(|dir| dir.join(update_check::STATE_FILE_NAME));
     let resolved_config_file = config_file.as_ref().ok().cloned();
     let resolved_state_file = state_file.as_ref().ok().cloned();
 
@@ -210,7 +223,14 @@ pub fn main_entry() -> ExitCode {
     };
 
     let now = chrono::Utc::now();
-    let outcome = run(cli, now, config_file, state_file);
+    let outcome = run(
+        cli,
+        now,
+        config_file,
+        state_file,
+        environment.home,
+        working_directory,
+    );
     match &outcome {
         Ok(Completion::Complete) => {
             if should_version_check {
@@ -296,6 +316,8 @@ fn run(
     now: chrono::DateTime<chrono::Utc>,
     config_file: Result<PathBuf>,
     state_file: Result<PathBuf>,
+    home: Option<String>,
+    working_directory: forest::WorkingDirectory,
 ) -> Result<Completion, Failure> {
     let completion = match cli.command {
         Command::Init {
@@ -380,7 +402,7 @@ fn run(
                 repos: repo_inputs,
             };
 
-            let result = commands::cmd_init(inputs, &config_path, force)?;
+            let result = commands::cmd_init(inputs, &config_path, force, home.as_deref())?;
             output(&result, cli.json, commands::format_init_human)?;
             Completion::Complete
         }
@@ -393,7 +415,7 @@ fn run(
             no_fetch,
             dry_run,
         } => {
-            let config = config::load_default_config(&config_file?)?;
+            let config = config::load_default_config(&config_file?, home.as_deref())?;
             let tmpl = config.resolve_template(template.as_deref())?;
 
             // Parse --repo-branch strings ("repo=branch") into tuples
@@ -432,7 +454,7 @@ fn run(
             discard_root_entries,
             dry_run,
         } => {
-            let config = config::load_default_config(&config_file?)?;
+            let config = config::load_default_config(&config_file?, home.as_deref())?;
             let bases = config.all_worktree_bases();
             let rm_options = commands::RmOptions {
                 require_utf8_json_paths: cli.json,
@@ -470,7 +492,8 @@ fn run(
                 };
                 rm_all_completion(&result)
             } else {
-                let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
+                let (dir, meta) =
+                    forest::resolve_forest_multi(&bases, name.as_deref(), working_directory)?;
                 let result = if cli.json || dry_run {
                     let r = commands::cmd_rm_with_options(&dir, &meta, rm_options.clone(), None)?;
                     output(&r, cli.json, commands::format_rm_human)?;
@@ -503,28 +526,17 @@ fn run(
             config_only,
             dry_run,
         } => {
+            let paths = commands::ResetPaths {
+                config_path: config_file,
+                state_path: state_file,
+                home,
+            };
             let result = if cli.json {
-                let r = commands::cmd_reset(
-                    confirm,
-                    config_only,
-                    dry_run,
-                    config_file,
-                    state_file,
-                    now,
-                    None,
-                )?;
+                let r = commands::cmd_reset(confirm, config_only, dry_run, paths, now, None)?;
                 output(&r, true, commands::format_reset_human)?;
                 r
             } else if dry_run || !confirm {
-                let r = commands::cmd_reset(
-                    confirm,
-                    config_only,
-                    dry_run,
-                    config_file,
-                    state_file,
-                    now,
-                    None,
-                )?;
+                let r = commands::cmd_reset(confirm, config_only, dry_run, paths, now, None)?;
                 let text = commands::format_reset_human(&r);
                 if !text.is_empty() {
                     println!("{}", text);
@@ -539,8 +551,7 @@ fn run(
                     confirm,
                     config_only,
                     dry_run,
-                    config_file,
-                    state_file,
+                    paths,
                     now,
                     Some(&|progress| match progress {
                         commands::ResetProgress::ForestStarting { name, path } => {
@@ -562,24 +573,26 @@ fn run(
             reset_completion(&result)
         }
         Command::Ls => {
-            let config = config::load_default_config(&config_file?)?;
+            let config = config::load_default_config(&config_file?, home.as_deref())?;
             let bases = config.all_worktree_bases();
             let result = commands::cmd_ls(&bases, now)?;
             output(&result, cli.json, commands::format_ls_human)?;
             Completion::Complete
         }
         Command::Status { name } => {
-            let config = config::load_default_config(&config_file?)?;
+            let config = config::load_default_config(&config_file?, home.as_deref())?;
             let bases = config.all_worktree_bases();
-            let (dir, meta) = forest::resolve_forest_multi(&bases, name.as_deref())?;
+            let (dir, meta) =
+                forest::resolve_forest_multi(&bases, name.as_deref(), working_directory)?;
             let result = commands::cmd_status(&dir, &meta)?;
             output(&result, cli.json, commands::format_status_human)?;
             Completion::Complete
         }
         Command::Exec { name, cmd } => {
-            let config = config::load_default_config(&config_file?)?;
+            let config = config::load_default_config(&config_file?, home.as_deref())?;
             let bases = config.all_worktree_bases();
-            let (dir, meta) = forest::resolve_forest_multi(&bases, Some(name.as_str()))?;
+            let (dir, meta) =
+                forest::resolve_forest_multi(&bases, Some(name.as_str()), working_directory)?;
             // Under --json the child's stdout goes to stderr, so stdout holds only the document.
             let child_stdout_to_stderr = || std::process::Stdio::from(std::io::stderr());
             let child_stdout: &dyn Fn() -> std::process::Stdio = if cli.json {

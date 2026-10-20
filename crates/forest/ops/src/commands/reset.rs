@@ -10,6 +10,19 @@ use git_forest_core::plan::reset::{
 };
 pub use git_forest_core::plan::reset::{format_reset_human, format_reset_summary, ResetResult};
 
+/// What a reset acts on, as the composition root resolved it: the config and state file
+/// paths, each resolution error kept for the reset to report, and the home directory the
+/// config's `~` paths expand with.
+#[derive(Debug)]
+pub struct ResetPaths {
+    /// The config file, or the error resolving its location.
+    pub config_path: Result<PathBuf>,
+    /// The update check's state file, or the error resolving its location.
+    pub state_path: Result<PathBuf>,
+    /// `HOME`, for the config's `~` paths; `None` when unset or not Unicode.
+    pub home: Option<String>,
+}
+
 pub enum ResetProgress<'a> {
     ForestStarting { name: &'a str, path: &'a Path },
     ForestDone(&'a ForestResetEntry),
@@ -50,16 +63,8 @@ impl ResetRun {
 // --- Planning (read-only) ---
 
 /// Plans a reset: observes the config, the state file and the forests, then decides.
-fn plan_reset(
-    config_only: bool,
-    run: ResetRun,
-    config_path: Result<PathBuf>,
-    state_path: Result<PathBuf>,
-) -> Result<ResetPlan> {
-    decide_reset_plan(
-        config_only,
-        observe_reset(config_only, run, config_path, state_path),
-    )
+fn plan_reset(config_only: bool, run: ResetRun, paths: ResetPaths) -> Result<ResetPlan> {
+    decide_reset_plan(config_only, observe_reset(config_only, run, paths))
 }
 
 // --- Observation (read-only) ---
@@ -68,16 +73,17 @@ fn plan_reset(
 /// the composition root resolved, and, unless `config_only`, the forests under the config's
 /// worktree bases. Every read error, and either path's resolution error, is kept for
 /// `decide_reset_plan`.
-fn observe_reset(
-    config_only: bool,
-    run: ResetRun,
-    config_path: Result<PathBuf>,
-    state_path: Result<PathBuf>,
-) -> ResetObservation {
+fn observe_reset(config_only: bool, run: ResetRun, paths: ResetPaths) -> ResetObservation {
+    let ResetPaths {
+        config_path,
+        state_path,
+        home,
+    } = paths;
     let files = match (&config_path, &state_path) {
         (Ok(config_path), Ok(state_path)) => Some(observe_reset_files(
             config_path,
             state_path,
+            home.as_deref(),
             config_only,
             run,
         )),
@@ -93,18 +99,20 @@ fn observe_reset(
 fn observe_reset_files(
     config_path: &Path,
     state_path: &Path,
+    home: Option<&str>,
     config_only: bool,
     run: ResetRun,
 ) -> ResetFilesObservation {
     let config_exists = config_path.exists();
     let state_exists = state_path.exists();
-    let config =
-        (!config_only && config_exists).then(|| match crate::config::load_config(config_path) {
+    let config = (!config_only && config_exists).then(|| {
+        match crate::config::load_config(config_path, home) {
             Ok(config) => {
                 ConfigObservation::Scanned(observe_discovery(config.all_worktree_bases(), run))
             }
             Err(error) => ConfigObservation::Unparsable(error.to_string()),
-        });
+        }
+    });
     ResetFilesObservation {
         config_exists,
         state_exists,
@@ -348,19 +356,19 @@ fn backup_file(
 // --- Orchestrator ---
 
 /// Resets git-forest: removes the forests (unless `config_only`), backs up the config file at
-/// `config_path` and deletes the state file at `state_path`. The composition root resolves both
-/// paths; an error resolving either is reported by the reset, like any other read error.
+/// `paths.config_path` and deletes the state file at `paths.state_path`. The composition root
+/// resolves both paths; an error resolving either is reported by the reset, like any other
+/// read error.
 pub fn cmd_reset(
     confirm: bool,
     config_only: bool,
     dry_run: bool,
-    config_path: Result<PathBuf>,
-    state_path: Result<PathBuf>,
+    paths: ResetPaths,
     now: chrono::DateTime<chrono::Utc>,
     on_progress: Option<&dyn Fn(ResetProgress)>,
 ) -> Result<ResetResult> {
     let run = ResetRun::from_flags(confirm, dry_run);
-    let plan = plan_reset(config_only, run, config_path, state_path)?;
+    let plan = plan_reset(config_only, run, paths)?;
 
     Ok(match run {
         ResetRun::DryRun => plan_to_dry_run(&plan),
@@ -375,7 +383,6 @@ mod tests {
     use crate::forest::write_meta;
     use git_forest_core::paths::RepoName;
     use git_forest_core::plan::reset::RepoResetEntry;
-    use serial_test::serial;
     use std::path::PathBuf;
 
     /// The application name the tests' config and state directories use.
@@ -391,38 +398,13 @@ mod tests {
         Ok(root.join("state").join(APP_NAME).join("state.toml"))
     }
 
-    // Reset no longer reads XDG_CONFIG_HOME or XDG_STATE_HOME, but this guard keeps the tests'
-    // git subprocesses from reading the developer's $XDG_CONFIG_HOME/git/config, and #[serial]
-    // keeps the environment mutation from racing; both go when the environment is passed in.
-    /// RAII guard that sets XDG env vars for the test and restores them on drop.
-    struct XdgEnvGuard {
-        saved_config: Option<String>,
-        saved_state: Option<String>,
-    }
-
-    impl XdgEnvGuard {
-        fn set(config: impl AsRef<std::path::Path>, state: impl AsRef<std::path::Path>) -> Self {
-            let saved_config = std::env::var("XDG_CONFIG_HOME").ok();
-            let saved_state = std::env::var("XDG_STATE_HOME").ok();
-            std::env::set_var("XDG_CONFIG_HOME", config.as_ref());
-            std::env::set_var("XDG_STATE_HOME", state.as_ref());
-            Self {
-                saved_config,
-                saved_state,
-            }
-        }
-    }
-
-    impl Drop for XdgEnvGuard {
-        fn drop(&mut self) {
-            match &self.saved_config {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-            match &self.saved_state {
-                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                None => std::env::remove_var("XDG_STATE_HOME"),
-            }
+    /// What a reset in `root` acts on, as the composition root resolves it. The home is unset:
+    /// the tests' configs hold absolute paths.
+    fn reset_paths(root: &std::path::Path) -> ResetPaths {
+        ResetPaths {
+            config_path: resolved_config_path(root),
+            state_path: resolved_state_path(root),
+            home: None,
         }
     }
 
@@ -688,20 +670,16 @@ name = "{}"
     }
 
     // --- Integration tests ---
-    // These tests mutate XDG env vars (process-global), so they must run serially.
 
     #[test]
-    #[serial]
     fn reset_nothing_to_do() {
         let tmp = tempfile::tempdir().unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         );
@@ -710,7 +688,6 @@ name = "{}"
     }
 
     #[test]
-    #[serial]
     fn reset_deletes_config_and_state() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -732,14 +709,11 @@ path = "/tmp/nonexistent-repo"
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
         std::fs::write(state_dir.join("state.toml"), "").unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             true,
             true,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -755,7 +729,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_confirm_required_without_flags() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -774,14 +747,11 @@ path = "/tmp/nonexistent-repo"
 "#;
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             false,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -791,7 +761,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_dry_run_no_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -810,14 +779,11 @@ path = "/tmp/nonexistent-repo"
 "#;
         std::fs::write(config_dir.join("config.toml"), config_content).unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -827,7 +793,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_removes_forests() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -866,14 +831,11 @@ path = "/tmp/nonexistent-repo"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -887,7 +849,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn observe_reset_reads_dry_run_facts_only_for_a_preview() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree_base = tmp.path().join("worktrees");
@@ -912,17 +873,10 @@ path = "/tmp/nonexistent-repo"
             "nonexistent-repo",
         );
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let reads_dry_run_facts = |run: ResetRun| {
-            let files = observe_reset(
-                false,
-                run,
-                resolved_config_path(tmp.path()),
-                resolved_state_path(tmp.path()),
-            )
-            .files
-            .expect("both paths resolve");
+            let files = observe_reset(false, run, reset_paths(tmp.path()))
+                .files
+                .expect("both paths resolve");
             let Some(ConfigObservation::Scanned(discovery)) = files.config else {
                 panic!("the config's worktree base is scanned");
             };
@@ -937,7 +891,6 @@ path = "/tmp/nonexistent-repo"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_preserves_metadata_when_parent_prevents_final_directory_removal() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -976,7 +929,6 @@ path = "/tmp/nonexistent-repo"
         );
         let config_path = config_dir.join("config.toml");
         std::fs::write(&config_path, &config_content).unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let original_permissions = std::fs::metadata(&worktree_base).unwrap().permissions();
         std::fs::set_permissions(&worktree_base, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -991,8 +943,7 @@ path = "/tmp/nonexistent-repo"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1011,8 +962,7 @@ path = "/tmp/nonexistent-repo"
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1022,7 +972,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_corrupt_metadata_blocks_config_and_state_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree_base = tmp.path().join("worktrees");
@@ -1043,14 +992,12 @@ path = "/tmp/nonexistent-repo"
         let state_path = tmp.path().join("state").join(APP_NAME).join("state.toml");
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(&state_path, "").unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1069,8 +1016,7 @@ path = "/tmp/nonexistent-repo"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1084,7 +1030,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_staged_metadata_blocks_config_and_state_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree_base = tmp.path().join("worktrees");
@@ -1101,14 +1046,12 @@ path = "/tmp/nonexistent-repo"
             "repo-a",
         );
         let config_path = tmp.path().join("config").join(APP_NAME).join("config.toml");
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1126,7 +1069,6 @@ path = "/tmp/nonexistent-repo"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_inaccessible_worktree_base_blocks_config_and_state_cleanup() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1157,7 +1099,6 @@ path = "/tmp/nonexistent-repo"
         let state_path = tmp.path().join("state").join(APP_NAME).join("state.toml");
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(&state_path, "").unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let original_permissions = std::fs::metadata(&blocked_parent).unwrap().permissions();
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1170,8 +1111,7 @@ path = "/tmp/nonexistent-repo"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1191,7 +1131,6 @@ path = "/tmp/nonexistent-repo"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_dangling_worktree_base_symlink_blocks_config_and_state_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree_target = tmp.path().join("worktrees");
@@ -1221,7 +1160,6 @@ path = "/tmp/nonexistent-repo"
         let state_path = tmp.path().join("state").join(APP_NAME).join("state.toml");
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(&state_path, "").unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
         let offline_target = tmp.path().join("worktrees-offline");
         std::fs::rename(&worktree_target, &offline_target).unwrap();
 
@@ -1229,8 +1167,7 @@ path = "/tmp/nonexistent-repo"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1248,7 +1185,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_uses_discovered_forest_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -1286,14 +1222,12 @@ path = "/tmp/nonexistent-repo"
             worktree_base.display()
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1307,7 +1241,6 @@ path = "/tmp/nonexistent-repo"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_deduplicates_symlinked_worktree_bases() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -1356,14 +1289,12 @@ path = "/tmp/nonexistent-repo"
             worktree_base_alias.display()
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1378,7 +1309,6 @@ path = "/tmp/nonexistent-repo"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_refuses_symlinked_forest_before_mutation() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -1413,15 +1343,13 @@ path = "/tmp/nonexistent-repo"
         std::fs::create_dir_all(&state_dir).unwrap();
         let state_file = state_dir.join("state.toml");
         std::fs::write(&state_file, "").unwrap();
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
         let branch_ref = "refs/heads/testuser/reset-symlink";
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1438,8 +1366,7 @@ path = "/tmp/nonexistent-repo"
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1462,7 +1389,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_config_only_leaves_forests() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -1501,14 +1427,11 @@ path = "/tmp/nonexistent-repo"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             true,
             true,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1521,7 +1444,6 @@ path = "/tmp/nonexistent-repo"
     }
 
     #[test]
-    #[serial]
     fn reset_unparseable_config_warns() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config").join(APP_NAME);
@@ -1529,14 +1451,11 @@ path = "/tmp/nonexistent-repo"
 
         std::fs::write(config_dir.join("config.toml"), "this is not valid toml [[[").unwrap();
 
-        let _env = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
-
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1556,7 +1475,6 @@ path = "/tmp/nonexistent-repo"
     /// After reset, git worktree registrations should be cleaned up so that
     /// creating a new forest with the same repo reuses the branch name cleanly.
     #[test]
-    #[serial]
     fn reset_cleans_up_git_worktree_registrations() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -1609,15 +1527,12 @@ name = "repo-a"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
-
         // 3. Reset — should delete forest directory AND clean up worktree registrations
         let reset_result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1635,7 +1550,6 @@ name = "repo-a"
     }
 
     #[test]
-    #[serial]
     fn reset_deletes_forest_created_branches() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -1674,14 +1588,12 @@ name = "repo-a"
         let base = env.worktree_base();
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-reset-branch");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let reset_result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1697,7 +1609,6 @@ name = "repo-a"
     }
 
     #[test]
-    #[serial]
     fn reset_preserves_metadata_when_branch_deletion_fails() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -1746,14 +1657,12 @@ name = "repo-a"
         let state_file = state_dir.join("state.toml");
         std::fs::write(&state_file, "").unwrap();
         let config_file = tmp_root.join("config").join(APP_NAME).join("config.toml");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1783,7 +1692,6 @@ name = "repo-a"
     }
 
     #[test]
-    #[serial]
     fn reset_dry_run_reports_planned_branch_deletion_in_json() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -1809,14 +1717,12 @@ name = "repo-a"
         let base = env.worktree_base();
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-reset-dry-run");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let result = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -1836,7 +1742,6 @@ name = "repo-a"
     }
 
     #[test]
-    #[serial]
     fn reset_dry_run_reports_source_missing_as_top_level_error() {
         use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
         use git_forest_core::paths::{AbsolutePath, ForestName};
@@ -1884,14 +1789,12 @@ name = "repo-missing-source"
             tmp.path().join("src").join("missing-source").display(),
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
-        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let result = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1912,8 +1815,7 @@ name = "repo-missing-source"
             false,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -1933,7 +1835,6 @@ name = "repo-missing-source"
     }
 
     #[test]
-    #[serial]
     fn reset_source_missing_and_worktree_missing_matches_dry_run() {
         use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
         use git_forest_core::paths::{AbsolutePath, ForestName};
@@ -1982,14 +1883,12 @@ name = "repo-missing-both"
         );
         let config_file = config_dir.join("config.toml");
         std::fs::write(&config_file, &config_content).unwrap();
-        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -2002,8 +1901,7 @@ name = "repo-missing-both"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -2016,7 +1914,6 @@ name = "repo-missing-both"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_source_missing_and_dangling_symlink_worktree_blocks() {
         use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
         use git_forest_core::paths::{AbsolutePath, ForestName};
@@ -2068,14 +1965,12 @@ name = "repo-dangling"
         );
         let config_file = config_dir.join("config.toml");
         std::fs::write(&config_file, &config_content).unwrap();
-        let _env_guard = XdgEnvGuard::set(tmp.path().join("config"), tmp.path().join("state"));
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -2087,8 +1982,7 @@ name = "repo-dangling"
             true,
             false,
             false,
-            resolved_config_path(tmp.path()),
-            resolved_state_path(tmp.path()),
+            reset_paths(tmp.path()),
             chrono::Utc::now(),
             None,
         )
@@ -2101,7 +1995,6 @@ name = "repo-dangling"
 
     #[cfg(unix)]
     #[test]
-    #[serial]
     fn reset_dry_run_blocks_source_present_dangling_symlink_worktree() {
         use crate::testutil::TestEnv;
         use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
@@ -2134,14 +2027,12 @@ name = "repo-dangling"
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-source-present-dangling");
         let config_file = tmp_root.join("config").join(APP_NAME).join("config.toml");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2157,8 +2048,7 @@ name = "repo-dangling"
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2170,7 +2060,6 @@ name = "repo-dangling"
     }
 
     #[test]
-    #[serial]
     fn reset_dry_run_blocks_source_present_corrupt_worktree_dir() {
         use crate::testutil::TestEnv;
         use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta, META_FILENAME};
@@ -2202,14 +2091,12 @@ name = "repo-dangling"
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-source-present-corrupt");
         let config_file = tmp_root.join("config").join(APP_NAME).join("config.toml");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let dry_run = cmd_reset(
             false,
             false,
             true,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2225,8 +2112,7 @@ name = "repo-dangling"
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2238,7 +2124,6 @@ name = "repo-dangling"
     }
 
     #[test]
-    #[serial]
     fn reset_preserves_metadata_for_locked_missing_worktree_metadata() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -2271,14 +2156,12 @@ name = "repo-dangling"
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-locked-missing");
         let config_file = tmp_root.join("config").join(APP_NAME).join("config.toml");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2304,7 +2187,6 @@ name = "repo-dangling"
     }
 
     #[test]
-    #[serial]
     fn reset_reports_already_missing_branch_without_failing() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -2337,14 +2219,12 @@ name = "repo-dangling"
 
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-missing-branch");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2359,7 +2239,6 @@ name = "repo-dangling"
     }
 
     #[test]
-    #[serial]
     fn reset_keeps_branches_not_created_by_forest() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -2386,14 +2265,12 @@ name = "repo-dangling"
         let base = env.worktree_base();
         let tmp_root = base.parent().unwrap();
         write_reset_config(tmp_root, &base, &repo, "repo-existing-branch");
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
 
         let result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )
@@ -2413,7 +2290,6 @@ name = "repo-dangling"
     /// After reset, re-creating a forest with the same name should succeed.
     /// This is the end-to-end repro of the bug: reset → re-init → new fails.
     #[test]
-    #[serial]
     fn reset_then_recreate_forest_succeeds() {
         use crate::commands::new::{cmd_new, NewInputs};
         use crate::testutil::TestEnv;
@@ -2457,14 +2333,11 @@ name = "repo-b"
         );
         std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
 
-        let _env_guard = XdgEnvGuard::set(tmp_root.join("config"), tmp_root.join("state"));
-
         let reset_result = cmd_reset(
             true,
             false,
             false,
-            resolved_config_path(tmp_root),
-            resolved_state_path(tmp_root),
+            reset_paths(tmp_root),
             chrono::Utc::now(),
             None,
         )

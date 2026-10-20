@@ -8,20 +8,29 @@ use git_forest_core::paths::{
     validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName,
 };
 
-/// Expands a leading `~` or `~/` with `HOME` and requires the result to be absolute.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "HOME read below the root, until the home directory is passed in from src/lib.rs"
-)]
-pub(crate) fn expand_tilde(path: &str) -> Result<AbsolutePath> {
+/// The environment variables the config and state locations and `~` expansion read, as the
+/// composition root read them once: each `None` when unset or not Unicode.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Environment {
+    /// `HOME`.
+    pub home: Option<String>,
+    /// `XDG_CONFIG_HOME`.
+    pub xdg_config_home: Option<String>,
+    /// `XDG_STATE_HOME`.
+    pub xdg_state_home: Option<String>,
+}
+
+/// Expands a leading `~` or `~/` with `home`, the home directory the composition root read
+/// (`None` when `HOME` is unset), and requires the result to be absolute.
+pub(crate) fn expand_tilde(path: &str, home: Option<&str>) -> Result<AbsolutePath> {
     let result = if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = home {
             PathBuf::from(home).join(rest)
         } else {
             bail!("cannot expand ~/: HOME environment variable is not set");
         }
     } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = home {
             PathBuf::from(home)
         } else {
             bail!("cannot expand ~: HOME environment variable is not set");
@@ -118,53 +127,50 @@ impl ResolvedConfig {
 /// Returns the XDG config directory for the application `app_name`.
 ///
 /// Resolution order:
-/// 1. `$XDG_CONFIG_HOME/<app_name>/` (if env var set)
-/// 2. `~/.config/<app_name>/` (Unix/macOS default)
-/// 3. `directories` crate fallback (Windows)
-pub(crate) fn xdg_config_dir(app_name: &str) -> Result<PathBuf> {
-    xdg_dir(app_name, "XDG_CONFIG_HOME", ".config", |proj| {
-        proj.config_dir().to_path_buf()
-    })
+/// 1. `$XDG_CONFIG_HOME/<app_name>/` (if set and not empty)
+/// 2. `~/.config/<app_name>/` (Unix/macOS default, with `HOME` even when empty)
+/// 3. `directories` crate fallback (Windows, or when `HOME` is unset)
+pub(crate) fn xdg_config_dir(app_name: &str, environment: &Environment) -> Result<PathBuf> {
+    xdg_dir(
+        app_name,
+        environment.xdg_config_home.as_deref(),
+        environment.home.as_deref(),
+        ".config",
+        |proj| proj.config_dir().to_path_buf(),
+    )
 }
 
 /// Returns the XDG state directory for the application `app_name`.
 ///
 /// Resolution order:
-/// 1. `$XDG_STATE_HOME/<app_name>/` (if env var set)
-/// 2. `~/.local/state/<app_name>/` (Unix/macOS default)
-/// 3. `directories` crate fallback (Windows)
-pub fn xdg_state_dir(app_name: &str) -> Result<PathBuf> {
-    xdg_dir(app_name, "XDG_STATE_HOME", ".local/state", |proj| {
-        proj.state_dir()
-            .unwrap_or_else(|| proj.data_local_dir())
-            .to_path_buf()
-    })
+/// 1. `$XDG_STATE_HOME/<app_name>/` (if set and not empty)
+/// 2. `~/.local/state/<app_name>/` (Unix/macOS default, with `HOME` even when empty)
+/// 3. `directories` crate fallback (Windows, or when `HOME` is unset)
+pub fn xdg_state_dir(app_name: &str, environment: &Environment) -> Result<PathBuf> {
+    xdg_dir(
+        app_name,
+        environment.xdg_state_home.as_deref(),
+        environment.home.as_deref(),
+        ".local/state",
+        |proj| {
+            proj.state_dir()
+                .unwrap_or_else(|| proj.data_local_dir())
+                .to_path_buf()
+        },
+    )
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "environment read below the root, until XDG locations are passed in from src/lib.rs"
-)]
+/// The directory of `app_name` under `explicit` (the XDG variable) when it is set and not
+/// empty, else under `home` joined with `default_suffix` on Unix, else from `fallback`.
 fn xdg_dir(
     app_name: &str,
-    env_var: &str,
+    explicit: Option<&str>,
+    home: Option<&str>,
     default_suffix: &str,
     fallback: fn(&directories::ProjectDirs) -> PathBuf,
-) -> Result<PathBuf> {
-    xdg_dir_with_env(app_name, env_var, default_suffix, fallback, |key| {
-        std::env::var(key).ok()
-    })
-}
-
-fn xdg_dir_with_env(
-    app_name: &str,
-    env_var: &str,
-    default_suffix: &str,
-    fallback: fn(&directories::ProjectDirs) -> PathBuf,
-    env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<PathBuf> {
     // 1. Explicit env var
-    if let Some(val) = env_lookup(env_var) {
+    if let Some(val) = explicit {
         if !val.is_empty() {
             return Ok(PathBuf::from(val).join(app_name));
         }
@@ -173,14 +179,14 @@ fn xdg_dir_with_env(
     // 2. Unix/macOS default: ~/.<suffix>/git-forest/
     #[cfg(unix)]
     {
-        if let Some(home) = env_lookup("HOME") {
+        if let Some(home) = home {
             return Ok(PathBuf::from(home).join(default_suffix).join(app_name));
         }
     }
 
     // 3. directories crate fallback (Windows, or if HOME is unset)
     #[cfg(not(unix))]
-    let _ = default_suffix;
+    let _ = (home, default_suffix);
     let proj = directories::ProjectDirs::from("", "", app_name)
         .context("could not determine config directory")?;
     Ok(fallback(&proj))
@@ -189,25 +195,26 @@ fn xdg_dir_with_env(
 // --- Config loading ---
 
 /// The config file of the application `app_name`, in its XDG config directory.
-pub fn default_config_path(app_name: &str) -> Result<PathBuf> {
-    Ok(xdg_config_dir(app_name)?.join("config.toml"))
+pub fn default_config_path(app_name: &str, environment: &Environment) -> Result<PathBuf> {
+    Ok(xdg_config_dir(app_name, environment)?.join("config.toml"))
 }
 
 /// Loads the config file at `path`, which the composition root resolved, with a hint to run
-/// `init` when it does not exist.
-pub fn load_default_config(path: &Path) -> Result<ResolvedConfig> {
+/// `init` when it does not exist; its `~` paths expand with `home`.
+pub fn load_default_config(path: &Path, home: Option<&str>) -> Result<ResolvedConfig> {
     ensure!(
         path.exists(),
         "config not found at {}\n  hint: run `git forest init` to create one",
         path.display()
     );
-    load_config(path)
+    load_config(path, home)
 }
 
-pub(crate) fn load_config(path: &Path) -> Result<ResolvedConfig> {
+/// Reads and parses the config file at `path`; its `~` paths expand with `home`.
+pub(crate) fn load_config(path: &Path, home: Option<&str>) -> Result<ResolvedConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;
-    parse_config(&contents)
+    parse_config(&contents, home)
 }
 
 /// Whether the update check is enabled: the config's `version_check.enabled`, read leniently.
@@ -229,14 +236,15 @@ pub fn version_check_enabled(config_file: Option<&Path>) -> bool {
     }
 }
 
-pub(crate) fn parse_config(contents: &str) -> Result<ResolvedConfig> {
+/// Parses the config file's `contents`; its `~` paths expand with `home`.
+pub(crate) fn parse_config(contents: &str, home: Option<&str>) -> Result<ResolvedConfig> {
     let raw: MultiTemplateConfig =
         toml::from_str(contents).context("failed to parse config TOML")?;
 
     let mut templates = BTreeMap::new();
 
     for (tmpl_name, tmpl_config) in &raw.template {
-        let worktree_base = expand_tilde(tmpl_config.worktree_base.to_str().unwrap_or(""))
+        let worktree_base = expand_tilde(tmpl_config.worktree_base.to_str().unwrap_or(""), home)
             .with_context(|| format!("template {:?}: invalid worktree_base", tmpl_name))?;
 
         if tmpl_config.repos.is_empty() {
@@ -254,7 +262,7 @@ pub(crate) fn parse_config(contents: &str) -> Result<ResolvedConfig> {
         let mut names = HashSet::new();
 
         for repo in &tmpl_config.repos {
-            let path = expand_tilde(repo.path.to_str().unwrap_or(""))
+            let path = expand_tilde(repo.path.to_str().unwrap_or(""), home)
                 .with_context(|| format!("template {:?}: invalid repo path", tmpl_name))?;
 
             let name_str = repo.name.clone().unwrap_or_else(|| {
@@ -455,35 +463,39 @@ pub(crate) fn write_config_atomic(path: &Path, config: &ResolvedConfig) -> Resul
 mod tests {
     use super::*;
 
+    /// A fixed fake home directory, so that every expected path proves the passed value is used.
+    const TEST_HOME: &str = "/home/tester";
+
     #[test]
     fn expand_tilde_replaces_home() {
-        let home = std::env::var("HOME").unwrap();
-        let result = expand_tilde("~/src/foo").unwrap();
-        assert_eq!(*result, *PathBuf::from(&home).join("src/foo"));
+        let result = expand_tilde("~/src/foo", Some(TEST_HOME)).unwrap();
+        assert_eq!(*result, *PathBuf::from(TEST_HOME).join("src/foo"));
     }
 
     #[test]
     fn expand_tilde_bare_tilde() {
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(*expand_tilde("~").unwrap(), *PathBuf::from(&home));
+        assert_eq!(
+            *expand_tilde("~", Some(TEST_HOME)).unwrap(),
+            *PathBuf::from(TEST_HOME)
+        );
     }
 
     #[test]
     fn expand_tilde_leaves_absolute_unchanged() {
-        let result = expand_tilde("/usr/local/bin").unwrap();
+        let result = expand_tilde("/usr/local/bin", Some(TEST_HOME)).unwrap();
         assert_eq!(*result, *PathBuf::from("/usr/local/bin"));
     }
 
     #[test]
     fn expand_tilde_relative_path_errors() {
-        let result = expand_tilde("foo/bar");
+        let result = expand_tilde("foo/bar", Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not absolute"));
     }
 
     #[test]
     fn expand_tilde_returns_absolute_path() {
-        let result = expand_tilde("/some/absolute/path").unwrap();
+        let result = expand_tilde("/some/absolute/path", Some(TEST_HOME)).unwrap();
         assert!(result.is_absolute());
     }
 
@@ -508,7 +520,7 @@ remote = "upstream"
 path = "/tmp/src/foo-web"
 name = "foo-web"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(*tmpl.worktree_base, *PathBuf::from("/tmp/worktrees"));
         assert_eq!(tmpl.base_branch, "dev");
@@ -540,7 +552,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(tmpl.repos[0].name.as_str(), "foo-api");
         assert_eq!(tmpl.repos[0].base_branch, "dev");
@@ -574,7 +586,7 @@ path = "/tmp/src/foo-api"
             );
 
             assert!(
-                parse_config(&toml).is_err(),
+                parse_config(&toml, Some(TEST_HOME)).is_err(),
                 "expected disposable root entries to be rejected: {entries}"
             );
         }
@@ -595,13 +607,14 @@ disposable_root_entries = [".idea", ".claude"]
 [[template.default.repos]]
 path = "/tmp/src/repo-a"
 "#,
+            Some(TEST_HOME),
         )
         .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.toml");
 
         write_config_atomic(&path, &parsed).unwrap();
-        let reparsed = load_config(&path).unwrap();
+        let reparsed = load_config(&path, Some(TEST_HOME)).unwrap();
 
         assert_eq!(
             reparsed
@@ -617,7 +630,6 @@ path = "/tmp/src/repo-a"
 
     #[test]
     fn tilde_expansion_on_worktree_base() {
-        let home = std::env::var("HOME").unwrap();
         let toml = r#"
 default_template = "default"
 
@@ -629,14 +641,16 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
-        assert_eq!(*tmpl.worktree_base, *PathBuf::from(&home).join("worktrees"));
+        assert_eq!(
+            *tmpl.worktree_base,
+            *PathBuf::from(TEST_HOME).join("worktrees")
+        );
     }
 
     #[test]
     fn tilde_expansion_on_repo_path() {
-        let home = std::env::var("HOME").unwrap();
         let toml = r#"
 default_template = "default"
 
@@ -648,11 +662,11 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "~/src/foo-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(
             *tmpl.repos[0].path,
-            *PathBuf::from(&home).join("src/foo-api")
+            *PathBuf::from(TEST_HOME).join("src/foo-api")
         );
     }
 
@@ -669,7 +683,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/my-cool-repo"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(tmpl.repos[0].name.as_str(), "my-cool-repo");
     }
@@ -691,7 +705,7 @@ path = "/tmp/src/foo"
 path = "/tmp/src/bar"
 base_branch = "main"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(tmpl.repos[0].base_branch, "develop");
         assert_eq!(tmpl.repos[1].base_branch, "main");
@@ -710,7 +724,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(tmpl.repos[0].remote, "origin");
     }
@@ -733,7 +747,7 @@ name = "foo"
 path = "/tmp/src/bar"
 name = "foo"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -749,7 +763,7 @@ default_template = "default"
 [template.default]
 worktree_base = "/tmp/worktrees"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
     }
 
@@ -766,7 +780,7 @@ feature_branch_template = "user/feature"
 [[template.default.repos]]
 path = "/tmp/src/foo"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -801,7 +815,7 @@ feature_branch_template = "user/{name}"
 [[template.project_b.repos]]
 path = "/tmp/src/project_b-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         assert_eq!(config.templates.len(), 2);
 
         let project_a = config.resolve_template(Some("project_a")).unwrap();
@@ -835,7 +849,7 @@ feature_branch_template = "user/{name}"
 [[template.project_b.repos]]
 path = "/tmp/src/bar"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(None).unwrap();
         assert_eq!(tmpl.base_branch, "dev"); // project_a is the default
     }
@@ -861,7 +875,7 @@ feature_branch_template = "user/{name}"
 [[template.project_b.repos]]
 path = "/tmp/src/bar"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let tmpl = config.resolve_template(Some("project_b")).unwrap();
         assert_eq!(tmpl.base_branch, "main");
     }
@@ -879,7 +893,7 @@ feature_branch_template = "user/{name}"
 [[template.project_a.repos]]
 path = "/tmp/src/foo"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let result = config.resolve_template(Some("nonexistent"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -915,7 +929,7 @@ feature_branch_template = "user/{name}"
 [[template.project_a.repos]]
 path = "/tmp/src/foo"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("default_template"), "error: {}", err);
@@ -939,7 +953,7 @@ feature_branch_template = "user/{name}"
 path = "/tmp/src/foo"
 "#;
         // This should parse since "" is a valid TOML key and default_template matches
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_ok());
     }
 
@@ -1018,7 +1032,7 @@ base_branch = "dev"
 feature_branch_template = "user/{name}"
 repos = []
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("at least one repo"), "error: {}", err);
@@ -1031,7 +1045,7 @@ repos = []
 default_template = "default"
 template = "not a table"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
     }
 
@@ -1040,7 +1054,7 @@ template = "not a table"
         let toml = r#"
 default_template = "default"
 "#;
-        let result = parse_config(toml);
+        let result = parse_config(toml, Some(TEST_HOME));
         assert!(result.is_err());
     }
 
@@ -1058,7 +1072,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         assert!(config.version_check.is_none());
     }
 
@@ -1078,7 +1092,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let vc = config.version_check.unwrap();
         assert!(!vc.enabled);
     }
@@ -1098,7 +1112,7 @@ feature_branch_template = "user/{name}"
 [[template.default.repos]]
 path = "/tmp/src/foo-api"
 "#;
-        let config = parse_config(toml).unwrap();
+        let config = parse_config(toml, Some(TEST_HOME)).unwrap();
         let vc = config.version_check.unwrap();
         assert!(vc.enabled);
     }
@@ -1147,17 +1161,12 @@ path = "/tmp/src/foo-api"
 
     #[test]
     fn xdg_config_dir_respects_env_var() {
-        let result = super::xdg_dir_with_env(
-            "git-forest",
-            "XDG_CONFIG_HOME",
-            ".config",
-            |proj| proj.config_dir().to_path_buf(),
-            |key| match key {
-                "XDG_CONFIG_HOME" => Some("/tmp/test-xdg-config".to_string()),
-                _ => None,
-            },
-        )
-        .unwrap();
+        let environment = Environment {
+            home: Some(TEST_HOME.to_string()),
+            xdg_config_home: Some("/tmp/test-xdg-config".to_string()),
+            xdg_state_home: None,
+        };
+        let result = super::xdg_config_dir("git-forest", &environment).unwrap();
         assert_eq!(
             result,
             PathBuf::from("/tmp/test-xdg-config").join("git-forest")
@@ -1166,21 +1175,12 @@ path = "/tmp/src/foo-api"
 
     #[test]
     fn xdg_state_dir_respects_env_var() {
-        let result = super::xdg_dir_with_env(
-            "git-forest",
-            "XDG_STATE_HOME",
-            ".local/state",
-            |proj| {
-                proj.state_dir()
-                    .unwrap_or_else(|| proj.data_local_dir())
-                    .to_path_buf()
-            },
-            |key| match key {
-                "XDG_STATE_HOME" => Some("/tmp/test-xdg-state".to_string()),
-                _ => None,
-            },
-        )
-        .unwrap();
+        let environment = Environment {
+            home: Some(TEST_HOME.to_string()),
+            xdg_config_home: None,
+            xdg_state_home: Some("/tmp/test-xdg-state".to_string()),
+        };
+        let result = super::xdg_state_dir("git-forest", &environment).unwrap();
         assert_eq!(
             result,
             PathBuf::from("/tmp/test-xdg-state").join("git-forest")
@@ -1190,17 +1190,12 @@ path = "/tmp/src/foo-api"
     #[cfg(unix)]
     #[test]
     fn xdg_config_dir_defaults_to_dot_config() {
-        let result = super::xdg_dir_with_env(
-            "git-forest",
-            "XDG_CONFIG_HOME",
-            ".config",
-            |proj| proj.config_dir().to_path_buf(),
-            |key| match key {
-                "HOME" => Some("/home/testuser".to_string()),
-                _ => None,
-            },
-        )
-        .unwrap();
+        let environment = Environment {
+            home: Some("/home/testuser".to_string()),
+            xdg_config_home: None,
+            xdg_state_home: None,
+        };
+        let result = super::xdg_config_dir("git-forest", &environment).unwrap();
         assert_eq!(
             result,
             PathBuf::from("/home/testuser/.config").join("git-forest")
@@ -1210,21 +1205,12 @@ path = "/tmp/src/foo-api"
     #[cfg(unix)]
     #[test]
     fn xdg_state_dir_defaults_to_dot_local_state() {
-        let result = super::xdg_dir_with_env(
-            "git-forest",
-            "XDG_STATE_HOME",
-            ".local/state",
-            |proj| {
-                proj.state_dir()
-                    .unwrap_or_else(|| proj.data_local_dir())
-                    .to_path_buf()
-            },
-            |key| match key {
-                "HOME" => Some("/home/testuser".to_string()),
-                _ => None,
-            },
-        )
-        .unwrap();
+        let environment = Environment {
+            home: Some("/home/testuser".to_string()),
+            xdg_config_home: None,
+            xdg_state_home: None,
+        };
+        let result = super::xdg_state_dir("git-forest", &environment).unwrap();
         assert_eq!(
             result,
             PathBuf::from("/home/testuser/.local/state").join("git-forest")
@@ -1233,7 +1219,12 @@ path = "/tmp/src/foo-api"
 
     #[test]
     fn default_config_path_ends_with_config_toml() {
-        let path = super::default_config_path("git-forest").unwrap();
+        let environment = Environment {
+            home: Some(TEST_HOME.to_string()),
+            xdg_config_home: Some("/tmp/test-xdg-config".to_string()),
+            xdg_state_home: None,
+        };
+        let path = super::default_config_path("git-forest", &environment).unwrap();
         assert!(path.ends_with("git-forest/config.toml"));
     }
 

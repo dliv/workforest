@@ -22,7 +22,7 @@ The Atmos CLI (Go) explicitly migrated from `~/Library/Application Support` to `
 
 ## Decision
 
-Use XDG Base Directory Specification paths on Unix/macOS. Respect `XDG_CONFIG_HOME` and `XDG_STATE_HOME` environment variables. Fall back to `~/.config/git-forest/` and `~/.local/state/git-forest/` when unset. Keep platform-specific paths on Windows via the `directories` crate.
+Use XDG Base Directory Specification paths on Unix/macOS. Respect `XDG_CONFIG_HOME` and `XDG_STATE_HOME` environment variables. Fall back to `~/.config/git-forest/` and `~/.local/state/git-forest/` when unset. Keep platform-specific paths on Windows via the `directories` crate. The composition root (`src/lib.rs`) reads `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` once and passes them to the location functions in `crates/forest/ops/src/config.rs` as data.
 
 | File | Env override | Default (Unix/macOS) |
 |---|---|---|
@@ -39,5 +39,6 @@ No legacy migration logic. The project is pre-1.0 with no external users.
 - **No space in path.** `~/.config/git-forest/` doesn't require quoting in shell commands.
 - **ADR 0006 unchanged.** Still a single config file — only the directory location changes.
 - **`directories` crate retained.** Still used for Windows defaults.
+- **Recorded gap: no home.** With `HOME` unset and a file's XDG variable unset or empty, its location falls back to the `directories` crate, which reads the user database and, on macOS, lands in `~/Library/Application Support/git-forest/`, the location this decision moved away from. Not changed.
 
 Revisit if: a macOS packaging or sandboxing requirement demands the platform's application directories, or the developer CLI tools listed above move off XDG paths on macOS.

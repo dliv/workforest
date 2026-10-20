@@ -297,9 +297,23 @@ pub(crate) fn detect_current_forest(start: &Path) -> Result<Option<(PathBuf, For
     Ok(None)
 }
 
+/// The process's working directory as the composition root read it once: `current`, the
+/// physical directory or the error reading it (kept for the one call that needs it), and
+/// `pwd` from `PWD`.
+#[derive(Debug)]
+pub struct WorkingDirectory {
+    /// The physical working directory, or the error reading it.
+    pub current: std::io::Result<PathBuf>,
+    /// `PWD`, the shell's logical working directory, when set.
+    pub pwd: Option<PathBuf>,
+}
+
+/// The forest named `name` under any of `worktree_bases`, or, without a name, the forest
+/// containing `working_directory`, which only name-less resolution reads.
 pub fn resolve_forest_multi(
     worktree_bases: &[&Path],
     name: Option<&str>,
+    working_directory: WorkingDirectory,
 ) -> Result<(PathBuf, ForestMeta)> {
     match name {
         Some(n) => resolve_forest_by_name_or_dir(worktree_bases, n)?.ok_or_else(|| {
@@ -309,7 +323,7 @@ pub fn resolve_forest_multi(
             )
         }),
         None => {
-            let cwd = current_dir_preserving_symlinks()?;
+            let cwd = logical_working_directory(working_directory)?;
             resolve_current_forest(worktree_bases, &cwd)?
                 .ok_or_else(|| anyhow::anyhow!("not inside a forest directory\n  hint: specify a forest name, or cd into a forest directory"))
         }
@@ -357,13 +371,12 @@ fn resolve_forest_by_name_or_dir(
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "working-directory read below the root, until it is passed in from src/lib.rs"
-)]
-fn current_dir_preserving_symlinks() -> Result<PathBuf> {
-    let physical = std::env::current_dir()?;
-    let Some(logical) = std::env::var_os("PWD").map(PathBuf::from) else {
+/// The directory name-less resolution starts from: the physical working directory, or `PWD`
+/// when it is absolute and names the same directory, which keeps a path through a symlink. The
+/// physical directory's read error is raised here, for name-less resolution only.
+fn logical_working_directory(working_directory: WorkingDirectory) -> Result<PathBuf> {
+    let physical = working_directory.current?;
+    let Some(logical) = working_directory.pwd else {
         return Ok(physical);
     };
 
@@ -476,6 +489,14 @@ mod tests {
         };
         std::fs::create_dir_all(dir).unwrap();
         write_meta(&meta, &dir.join(META_FILENAME)).unwrap();
+    }
+
+    /// A working directory for named resolution, which does not read it.
+    fn unread_working_directory() -> WorkingDirectory {
+        WorkingDirectory {
+            current: Ok(PathBuf::from("/nonexistent-working-directory")),
+            pwd: None,
+        }
     }
 
     #[test]
@@ -866,7 +887,8 @@ mod tests {
         std::fs::create_dir_all(&base_a).unwrap();
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
-        let (path, meta) = resolve_forest_multi(&bases, Some("my-feature")).unwrap();
+        let (path, meta) =
+            resolve_forest_multi(&bases, Some("my-feature"), unread_working_directory()).unwrap();
         assert_eq!(meta.name.as_str(), "my-feature");
         assert_eq!(path, base_b.join("my-feature"));
     }
@@ -886,7 +908,8 @@ mod tests {
         std::os::unix::fs::symlink(&alpha_target, base_a.join("dup")).unwrap();
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
-        let (dir, meta) = resolve_forest_multi(&bases, Some("dup")).unwrap();
+        let (dir, meta) =
+            resolve_forest_multi(&bases, Some("dup"), unread_working_directory()).unwrap();
 
         assert_eq!(dir, dup_dir);
         assert_eq!(meta.name.as_str(), "dup");
@@ -904,7 +927,8 @@ mod tests {
         write_test_meta(&readable_target, "dup", ForestMode::Feature);
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
-        let (dir, meta) = resolve_forest_multi(&bases, Some("dup")).unwrap();
+        let (dir, meta) =
+            resolve_forest_multi(&bases, Some("dup"), unread_working_directory()).unwrap();
 
         assert_eq!(dir, readable_target);
         assert_eq!(meta.name.as_str(), "dup");
@@ -923,7 +947,8 @@ mod tests {
         std::os::unix::fs::symlink(&dup_dir, base_a.join("dup")).unwrap();
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
-        let (dir, meta) = resolve_forest_multi(&bases, Some("dup")).unwrap();
+        let (dir, meta) =
+            resolve_forest_multi(&bases, Some("dup"), unread_working_directory()).unwrap();
 
         assert_eq!(dir, dup_dir);
         assert_eq!(meta.name.as_str(), "dup");
@@ -938,9 +963,75 @@ mod tests {
         std::fs::create_dir_all(&base_b).unwrap();
 
         let bases: Vec<&Path> = vec![base_a.as_path(), base_b.as_path()];
-        let result = resolve_forest_multi(&bases, Some("nonexistent"));
+        let result = resolve_forest_multi(&bases, Some("nonexistent"), unread_working_directory());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn resolve_forest_multi_resolves_the_given_working_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let forest_dir = base.join("feat");
+        write_test_meta(&forest_dir, "feat", ForestMode::Feature);
+        let subdir = forest_dir.join("foo-api");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let bases = vec![base.as_path()];
+        let at = |current: std::io::Result<PathBuf>| WorkingDirectory { current, pwd: None };
+
+        let (dir, meta) = resolve_forest_multi(&bases, None, at(Ok(subdir))).unwrap();
+        assert_eq!(dir, forest_dir);
+        assert_eq!(meta.name.as_str(), "feat");
+
+        let error = resolve_forest_multi(&bases, None, at(Ok(outside))).unwrap_err();
+        assert!(
+            error.to_string().contains("not inside a forest directory"),
+            "error: {error}"
+        );
+
+        let gone = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the working directory is gone",
+            ))
+        };
+        let error = resolve_forest_multi(&bases, None, at(gone())).unwrap_err();
+        assert_eq!(error.to_string(), "the working directory is gone");
+
+        let (dir, meta) = resolve_forest_multi(&bases, Some("feat"), at(gone())).unwrap();
+        assert_eq!(dir, forest_dir);
+        assert_eq!(meta.name.as_str(), "feat");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_forest_multi_keeps_pwd_only_when_it_names_the_working_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("wt");
+        let linked_base = tmp.path().join("wt-link");
+        let physical = base.join("feat");
+        write_test_meta(&physical, "feat", ForestMode::Feature);
+        std::os::unix::fs::symlink(&base, &linked_base).unwrap();
+        let logical = linked_base.join("feat");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let bases = vec![base.as_path(), linked_base.as_path()];
+        let resolve = |pwd: Option<PathBuf>| {
+            let working_directory = WorkingDirectory {
+                current: Ok(physical.clone()),
+                pwd,
+            };
+            resolve_forest_multi(&bases, None, working_directory)
+                .unwrap()
+                .0
+        };
+
+        assert_eq!(resolve(Some(logical.clone())), logical);
+        assert_eq!(resolve(Some(elsewhere)), physical);
+        assert_eq!(resolve(Some(PathBuf::from("wt-link/feat"))), physical);
+        assert_eq!(resolve(None), physical);
     }
 
     fn sample_meta() -> ForestMeta {

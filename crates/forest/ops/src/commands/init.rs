@@ -10,22 +10,23 @@ use git_forest_core::plan::init::{
 };
 pub use git_forest_core::plan::init::{format_init_human, InitInputs, RepoInput};
 
-/// Reads what `init` needs once the inputs are valid: the worktree base, expanded, and for each
-/// `--repo` path in input order whether it expands, whether something is there and whether git
-/// finds a repository there. Every path is observed; every error is kept for `decide_init`.
-fn observe_init(inputs: &InitInputs) -> InitObservation {
+/// Reads what `init` needs once the inputs are valid: the worktree base, expanded with `home`,
+/// and for each `--repo` path in input order whether it expands, whether something is there and
+/// whether git finds a repository there. Every path is observed; every error is kept for
+/// `decide_init`.
+fn observe_init(inputs: &InitInputs, home: Option<&str>) -> InitObservation {
     InitObservation {
-        worktree_base: expand_tilde(&inputs.worktree_base),
+        worktree_base: expand_tilde(&inputs.worktree_base, home),
         repos: inputs
             .repos
             .iter()
-            .map(|repo_input| observe_repo_path(&repo_input.path))
+            .map(|repo_input| observe_repo_path(&repo_input.path, home))
             .collect(),
     }
 }
 
-fn observe_repo_path(path: &str) -> RepoPathObservation {
-    let path = match expand_tilde(path) {
+fn observe_repo_path(path: &str, home: Option<&str>) -> RepoPathObservation {
+    let path = match expand_tilde(path, home) {
         Ok(path) => path,
         Err(error) => return RepoPathObservation::Unexpanded(error),
     };
@@ -43,18 +44,26 @@ fn observe_repo_path(path: &str) -> RepoPathObservation {
 }
 
 /// Resolves the template `init` adds: the input checks, then the observation, then the
-/// decision over it.
-fn plan_init(inputs: &InitInputs) -> Result<ResolvedTemplate> {
+/// decision over it. `~` paths expand with `home`.
+fn plan_init(inputs: &InitInputs, home: Option<&str>) -> Result<ResolvedTemplate> {
     validate_init_inputs(inputs)?;
-    decide_init(inputs, observe_init(inputs))
+    decide_init(inputs, observe_init(inputs, home))
 }
 
-pub fn cmd_init(inputs: InitInputs, config_path: &Path, force: bool) -> Result<InitResult> {
-    let template = plan_init(&inputs)?;
+/// Adds the template the inputs describe to the config file at `config_path`, which the
+/// composition root resolved, creating the file when it does not exist; `~` paths, in the
+/// inputs and in the existing config, expand with `home`.
+pub fn cmd_init(
+    inputs: InitInputs,
+    config_path: &Path,
+    force: bool,
+    home: Option<&str>,
+) -> Result<InitResult> {
+    let template = plan_init(&inputs, home)?;
     let template_name = inputs.template_name.clone();
 
     let mut config = if config_path.exists() {
-        crate::config::load_config(config_path)?
+        crate::config::load_config(config_path, home)?
     } else {
         ResolvedConfig {
             default_template: template_name.clone(),
@@ -101,6 +110,9 @@ mod tests {
     use git_forest_core::paths::DisposableRootEntry;
     use std::path::PathBuf;
 
+    /// A fixed fake home directory, so that an expanded `~` proves the passed value is used.
+    const TEST_HOME: &str = "/home/tester";
+
     fn create_test_git_repo(base: &Path, name: &str) -> PathBuf {
         let repo_dir = base.join(name);
         std::fs::create_dir_all(&repo_dir).unwrap();
@@ -142,7 +154,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let template = plan_init(&inputs).unwrap();
+        let template = plan_init(&inputs, Some(TEST_HOME)).unwrap();
         assert_eq!(template.repos.len(), 1);
         assert_eq!(template.repos[0].name.as_str(), "my-repo");
         assert_eq!(template.repos[0].base_branch, "dev");
@@ -162,7 +174,7 @@ mod tests {
             DisposableRootEntry::new(".claude".to_string()).unwrap(),
         ];
 
-        let template = plan_init(&inputs).unwrap();
+        let template = plan_init(&inputs, Some(TEST_HOME)).unwrap();
 
         assert_eq!(
             template.disposable_root_entries,
@@ -182,7 +194,7 @@ mod tests {
         inputs.disposable_root_entries =
             vec![DisposableRootEntry::new("repo-a".to_string()).unwrap()];
 
-        let error = plan_init(&inputs).unwrap_err().to_string();
+        let error = plan_init(&inputs, Some(TEST_HOME)).unwrap_err().to_string();
 
         assert!(error.contains("reserved"), "error: {error}");
     }
@@ -191,7 +203,7 @@ mod tests {
     fn validate_init_empty_repos() {
         let inputs = make_init_inputs(vec![]);
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("--repo"));
     }
@@ -217,7 +229,7 @@ mod tests {
             },
         ]);
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate"));
     }
@@ -234,7 +246,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not a git"));
     }
@@ -257,7 +269,7 @@ mod tests {
             }],
         };
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -283,11 +295,10 @@ mod tests {
             }],
         };
 
-        let template = plan_init(&inputs).unwrap();
-        let home = std::env::var("HOME").unwrap();
+        let template = plan_init(&inputs, Some(TEST_HOME)).unwrap();
         assert_eq!(
             *template.worktree_base,
-            *PathBuf::from(&home).join("worktrees")
+            *PathBuf::from(TEST_HOME).join("worktrees")
         );
     }
 
@@ -303,14 +314,14 @@ mod tests {
             base_branch: None,
         }]);
 
-        let result = cmd_init(inputs, &config_path, false).unwrap();
+        let result = cmd_init(inputs, &config_path, false, Some(TEST_HOME)).unwrap();
         assert_eq!(result.config_path, config_path);
         assert_eq!(result.template_name, "default");
         assert_eq!(result.repos.len(), 1);
         assert!(config_path.exists());
 
         // Verify it's valid TOML that can be parsed back
-        let loaded = crate::config::load_config(&config_path).unwrap();
+        let loaded = crate::config::load_config(&config_path, Some(TEST_HOME)).unwrap();
         let tmpl = loaded.resolve_template(None).unwrap();
         assert_eq!(tmpl.repos[0].name.as_str(), "my-repo");
     }
@@ -329,9 +340,9 @@ mod tests {
             }])
         };
 
-        cmd_init(make(), &config_path, false).unwrap();
+        cmd_init(make(), &config_path, false, Some(TEST_HOME)).unwrap();
         // Second call with force should succeed
-        cmd_init(make(), &config_path, true).unwrap();
+        cmd_init(make(), &config_path, true, Some(TEST_HOME)).unwrap();
     }
 
     #[test]
@@ -348,9 +359,9 @@ mod tests {
             }])
         };
 
-        cmd_init(make(), &config_path, false).unwrap();
+        cmd_init(make(), &config_path, false, Some(TEST_HOME)).unwrap();
         // Second call without force should fail
-        let result = cmd_init(make(), &config_path, false);
+        let result = cmd_init(make(), &config_path, false, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -363,7 +374,7 @@ mod tests {
             base_branch: None,
         }]);
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -390,7 +401,7 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_a, &config_path, false).unwrap();
+        cmd_init(inputs_a, &config_path, false, Some(TEST_HOME)).unwrap();
 
         // Second template — should work without --force
         let inputs_b = InitInputs {
@@ -405,10 +416,10 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_b, &config_path, false).unwrap();
+        cmd_init(inputs_b, &config_path, false, Some(TEST_HOME)).unwrap();
 
         // Verify both templates exist
-        let loaded = crate::config::load_config(&config_path).unwrap();
+        let loaded = crate::config::load_config(&config_path, Some(TEST_HOME)).unwrap();
         assert_eq!(loaded.templates.len(), 2);
         assert!(loaded.templates.contains_key("alpha"));
         assert!(loaded.templates.contains_key("beta"));
@@ -432,9 +443,9 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs, &config_path, false).unwrap();
+        cmd_init(inputs, &config_path, false, Some(TEST_HOME)).unwrap();
 
-        let loaded = crate::config::load_config(&config_path).unwrap();
+        let loaded = crate::config::load_config(&config_path, Some(TEST_HOME)).unwrap();
         assert_eq!(loaded.default_template, "my-project");
     }
 
@@ -457,7 +468,7 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_a, &config_path, false).unwrap();
+        cmd_init(inputs_a, &config_path, false, Some(TEST_HOME)).unwrap();
 
         let inputs_b = InitInputs {
             template_name: "second".to_string(),
@@ -471,9 +482,9 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_b, &config_path, false).unwrap();
+        cmd_init(inputs_b, &config_path, false, Some(TEST_HOME)).unwrap();
 
-        let loaded = crate::config::load_config(&config_path).unwrap();
+        let loaded = crate::config::load_config(&config_path, Some(TEST_HOME)).unwrap();
         assert_eq!(loaded.default_template, "first");
     }
 
@@ -497,7 +508,7 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_a, &config_path, false).unwrap();
+        cmd_init(inputs_a, &config_path, false, Some(TEST_HOME)).unwrap();
 
         // Add template "beta"
         let inputs_b = InitInputs {
@@ -512,7 +523,7 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_b, &config_path, false).unwrap();
+        cmd_init(inputs_b, &config_path, false, Some(TEST_HOME)).unwrap();
 
         // Overwrite "alpha" with repo-b using --force
         let inputs_replace = InitInputs {
@@ -527,9 +538,9 @@ mod tests {
                 base_branch: None,
             }],
         };
-        cmd_init(inputs_replace, &config_path, true).unwrap();
+        cmd_init(inputs_replace, &config_path, true, Some(TEST_HOME)).unwrap();
 
-        let loaded = crate::config::load_config(&config_path).unwrap();
+        let loaded = crate::config::load_config(&config_path, Some(TEST_HOME)).unwrap();
         assert_eq!(loaded.templates.len(), 2);
         let alpha = loaded.resolve_template(Some("alpha")).unwrap();
         assert_eq!(alpha.repos[0].name.as_str(), "repo-b");
@@ -557,7 +568,7 @@ mod tests {
             }],
         };
 
-        let result = cmd_init(inputs, &config_path, false).unwrap();
+        let result = cmd_init(inputs, &config_path, false, Some(TEST_HOME)).unwrap();
         assert_eq!(result.template_name, "my-project");
     }
 
@@ -579,7 +590,7 @@ mod tests {
             }],
         };
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -602,7 +613,7 @@ mod tests {
             }],
         };
 
-        let result = plan_init(&inputs);
+        let result = plan_init(&inputs, Some(TEST_HOME));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("whitespace"));
     }
