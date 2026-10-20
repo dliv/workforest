@@ -12,8 +12,9 @@
 //! than the namespace itself, the process arguments the root parses
 //! (`std::env::args_os` and `std::env::ArgsOs`) and the variables and working
 //! directory it reads once and passes in (`std::env::var`, `std::env::var_os` and
-//! `std::env::current_dir`, pinned to their sites by Clippy's bans and the counted
-//! positive control); it does not report `std::process`, `std::time` or `std::io`,
+//! `std::env::current_dir`, which Clippy's bans allow only in functions carrying a
+//! sanctioned exemption and the positive control counts per file, not per
+//! function); it does not report `std::process`, `std::time` or `std::io`,
 //! standard input included, which Clippy bans outside their sanctioned sites.
 
 use std::collections::BTreeSet;
@@ -351,8 +352,9 @@ impl EffectProfile {
     /// profile, the `std::env` namespace itself (the paths through it are checked), the process
     /// arguments the root parses (`std::env::args_os` and `std::env::ArgsOs`), and the variables
     /// and working directory it reads once and passes in (`std::env::var`, `std::env::var_os`
-    /// and `std::env::current_dir`). The sanction is by name; Clippy's bans and the positive
-    /// control's count pin those reads to their sites.
+    /// and `std::env::current_dir`). The sanction is by name; Clippy's bans allow those reads
+    /// only in functions carrying a sanctioned exemption, and the positive control counts them
+    /// per file, not per function, so which function holds them is checked by reading it.
     fn sanctions(self, path: &[String]) -> bool {
         match self {
             EffectProfile::Pure => false,
