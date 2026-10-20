@@ -1599,11 +1599,12 @@ mod tests {
     use crate::commands::cmd_ls;
     use crate::commands::cmd_new;
     use crate::commands::NewInputs;
-    use crate::config::{ResolvedRepo, ResolvedTemplate};
+    use crate::config::ResolvedTemplate;
     use crate::forest::{read_meta, write_meta};
     use crate::testutil::{make_meta, make_repo, TestEnv};
     use git_forest_core::meta::ForestMode;
     use git_forest_core::paths::{AbsolutePath, DisposableRootEntry, ForestName, RepoName};
+    use git_forest_core::plan::new::ResolvedRepo;
     use git_forest_core::plan::rm::{validate_json_output_paths, ForestRootCleanupKind};
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {

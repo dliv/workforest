@@ -1,7 +1,7 @@
 //! The forest's effects: each command's observe and execute steps, the git wrapper, forest
-//! discovery and metadata I/O, and the config file's I/O. Decisions live in `git-forest-core`;
-//! the composition root reads the environment and the working directory, resolves the file
-//! locations and passes them in.
+//! discovery and metadata I/O, and the config file's I/O, whose format is the core's. Decisions
+//! live in `git-forest-core`; the composition root reads the environment and the working
+//! directory, resolves the file locations and passes them in.
 #![cfg_attr(
     test,
     allow(

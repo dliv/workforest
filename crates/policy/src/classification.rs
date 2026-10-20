@@ -28,6 +28,7 @@ pub enum ModuleClass {
 /// Every .rs file under the `src/` directory of every workspace member except Tooling, by
 /// repository-relative path, with its class.
 pub const MODULES: &[(&str, ModuleClass)] = &[
+    ("crates/forest/core/src/config.rs", ModuleClass::Pure),
     ("crates/forest/core/src/lib.rs", ModuleClass::Pure),
     ("crates/forest/core/src/meta.rs", ModuleClass::Pure),
     ("crates/forest/core/src/paths.rs", ModuleClass::Pure),
@@ -140,7 +141,12 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
 /// - `clap`: src/cli.rs and crates/forest/core/src/meta.rs derive argument types with clap's
 ///   derive macros; parsing the arguments, which reads the process's arguments, happens only
 ///   in src/lib.rs; `derive`, for those macros;
-/// - `serde` derives serialization; `derive`, for its derive macros.
+/// - `serde` derives serialization; `derive`, for its derive macros;
+/// - `toml` parses and renders the config file's format in crates/forest/core/src/config.rs;
+///   `display`, `parse`, `serde` and `std`, declared with `default-features = false` so that the
+///   features the edges test checks are the ones enabled; its `debug` feature, which prints
+///   parser events to standard error through `anstream` and reads the color variables
+///   `CLICOLOR`, `CLICOLOR_FORCE`, `NO_COLOR` and `TERM`, is deliberately not pinned.
 ///
 /// The purity scan reads the names, and every entry must still be used by a Pure module. The
 /// edges test reads the features: a Pure crate may declare only the pinned ones. Default
@@ -150,6 +156,7 @@ pub const PURE_ALLOWED_CRATES: &[(&str, &[&str])] = &[
     ("chrono", &["serde"]),
     ("clap", &["derive"]),
     ("serde", &["derive"]),
+    ("toml", &["display", "parse", "serde", "std"]),
 ];
 
 /// A module's identity: the crate it belongs to and its path inside that crate.

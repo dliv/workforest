@@ -49,12 +49,10 @@ pub const CRATES: &[(&str, CrateClass)] = &[
 ///   passed in;
 /// - `directories`: the platform fallback for the config and state directories;
 /// - `libc`: the owner check in the config write's permission-denied diagnosis, on Unix;
-/// - `serde`: derives the config schema;
-/// - `toml`: reads and writes `config.toml` and `.forest-meta.toml`.
+/// - `toml`: reads and writes `.forest-meta.toml`; `config.toml`'s format is the core's.
 ///
 /// An HTTP client is deliberately absent: network access belongs to the update-check edge.
-pub const EFFECTFUL_ALLOWED_CRATES: &[&str] =
-    &["anyhow", "chrono", "directories", "libc", "serde", "toml"];
+pub const EFFECTFUL_ALLOWED_CRATES: &[&str] = &["anyhow", "chrono", "directories", "libc", "toml"];
 
 /// External crates an Edge crate may declare as normal or build dependencies, by name only, each
 /// with the reason its code needs it. Features are not pinned: code in an Edge crate performs

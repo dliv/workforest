@@ -266,12 +266,13 @@ pub fn cmd_new_at(
 mod tests {
     use super::*;
     use crate::commands::cmd_ls;
-    use crate::config::{ResolvedRepo, ResolvedTemplate};
+    use crate::config::ResolvedTemplate;
     use crate::forest::read_meta;
     use crate::testutil::TestEnv;
     use git_forest_core::meta::ForestMode;
     use git_forest_core::paths::{AbsolutePath, DisposableRootEntry, RepoName};
     use git_forest_core::plan::new::compute_target_branch;
+    use git_forest_core::plan::new::ResolvedRepo;
     use std::path::PathBuf;
 
     fn make_new_inputs(name: &str, mode: ForestMode) -> NewInputs {
@@ -443,7 +444,7 @@ mod tests {
             base_branch: "main".to_string(),
             feature_branch_template: "testuser/{name}".to_string(),
             disposable_root_entries: vec![],
-            repos: vec![crate::config::ResolvedRepo {
+            repos: vec![ResolvedRepo {
                 path: AbsolutePath::new(PathBuf::from("/nonexistent/repo")).unwrap(),
                 name: RepoName::new("missing".to_string()).unwrap(),
                 base_branch: "main".to_string(),

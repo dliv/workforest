@@ -9,6 +9,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["display", "parse", "serde", "std"] }
 
 [dev-dependencies]
 insta = "1"

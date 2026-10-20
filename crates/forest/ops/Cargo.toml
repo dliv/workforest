@@ -9,7 +9,6 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 git-forest-core = { path = "../core" }
-serde = { version = "1", features = ["derive"] }
 toml = "1"
 
 [target.'cfg(unix)'.dependencies]

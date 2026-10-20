@@ -20,7 +20,7 @@ After Contracts 1 (AbsolutePath) and Contracts 2 (RepoName, ForestName, BranchNa
 | Location | Assertion | Why kept |
 |----------|-----------|----------|
 | `crates/forest/core/src/paths.rs` — `sanitize_forest_name()` | Result has no `/` | Postcondition on a pure helper. Defense-in-depth. |
-| `crates/forest/ops/src/config.rs` — `parse_config()` | Repo names unique | Collection-level invariant — no single-value newtype can express set membership. |
+| `crates/forest/core/src/config.rs` — `parse_config()` | Repo names unique | Collection-level invariant — no single-value newtype can express set membership. |
 | `crates/forest/ops/src/commands/exec.rs` — `cmd_exec()` | `forest_dir.is_absolute()` | Precondition at a `&Path` boundary where the caller passes `&Path`, not `&AbsolutePath`. |
 | `crates/forest/ops/src/commands/status.rs` — `cmd_status()` | `forest_dir.is_absolute()` | Same. |
 | `crates/forest/core/src/plan/new.rs` — `decide_forest()` | One observation per template repo | Collection-level invariant across two lists: the shell builds the observation from the template's repos, the decision zips the two, and no type ties their lengths. |

@@ -1,13 +1,14 @@
 //! Configuring a template: the input and result types, the input checks, the pure decision over
 //! what the forest ops crate's (`git-forest-ops`) `commands::init` observes of each `--repo` path,
-//! and the human renderer. Adding the template to the config file and writing it stay in the
-//! forest ops crate.
+//! the merge of the new template into the config, and the human renderer. The merge is decided
+//! here; only reading and writing the config file stay in the forest ops crate.
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
+use crate::config::ResolvedConfig;
 use crate::meta::META_FILENAME;
 use crate::paths::{validate_disposable_root_entries, AbsolutePath, DisposableRootEntry, RepoName};
 use crate::plan::new::{ResolvedRepo, ResolvedTemplate};
@@ -159,6 +160,32 @@ pub fn decide_init(inputs: &InitInputs, observation: InitObservation) -> Result<
         disposable_root_entries: inputs.disposable_root_entries.clone(),
         repos: resolved_repos,
     })
+}
+
+/// Adds `template` under `template_name` to the `existing` config, or starts a new config whose
+/// default template it is. Replacing a template of the same name requires `force`.
+pub fn merge_init(
+    existing: Option<ResolvedConfig>,
+    template_name: &str,
+    template: ResolvedTemplate,
+    force: bool,
+) -> Result<ResolvedConfig> {
+    let mut config = existing.unwrap_or_else(|| ResolvedConfig {
+        default_template: template_name.to_string(),
+        templates: BTreeMap::new(),
+        version_check: None,
+    });
+
+    // Only require --force when overwriting an existing template
+    if config.templates.contains_key(template_name) && !force {
+        bail!(
+            "template {:?} already exists in config\n  hint: use --force to overwrite, or choose a different name",
+            template_name
+        );
+    }
+
+    config.templates.insert(template_name.to_string(), template);
+    Ok(config)
 }
 
 pub fn format_init_human(result: &InitResult) -> String {
@@ -466,6 +493,62 @@ mod tests {
         assert!(
             error.contains("disposable root entry .forest-meta.toml is reserved"),
             "{error}"
+        );
+    }
+
+    fn template_at(worktree_base: &str) -> ResolvedTemplate {
+        ResolvedTemplate {
+            worktree_base: abs(worktree_base),
+            base_branch: "dev".to_string(),
+            feature_branch_template: "testuser/{name}".to_string(),
+            disposable_root_entries: vec![],
+            repos: vec![],
+        }
+    }
+
+    #[test]
+    fn merge_init_starts_a_config_with_the_template_as_default() {
+        let config = merge_init(None, "first", template_at("/wt/first"), false).unwrap();
+
+        assert_eq!(config.default_template, "first");
+        assert_eq!(config.templates.keys().collect::<Vec<_>>(), ["first"]);
+        assert_eq!(
+            *config.templates["first"].worktree_base,
+            *PathBuf::from("/wt/first")
+        );
+        assert!(config.version_check.is_none());
+    }
+
+    #[test]
+    fn merge_init_adds_templates_and_replaces_one_only_with_force() {
+        let existing = || ResolvedConfig {
+            default_template: "a".to_string(),
+            templates: BTreeMap::from([
+                ("a".to_string(), template_at("/wt/a")),
+                ("b".to_string(), template_at("/wt/b")),
+            ]),
+            version_check: None,
+        };
+
+        let added = merge_init(Some(existing()), "c", template_at("/wt/c"), false).unwrap();
+        assert_eq!(added.default_template, "a");
+        assert_eq!(added.templates.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
+
+        let refused = merge_init(Some(existing()), "a", template_at("/wt/new-a"), false);
+        assert_eq!(
+            error_text(refused),
+            "template \"a\" already exists in config\n  hint: use --force to overwrite, or choose a different name"
+        );
+
+        let replaced = merge_init(Some(existing()), "a", template_at("/wt/new-a"), true).unwrap();
+        assert_eq!(replaced.default_template, "a");
+        assert_eq!(
+            *replaced.templates["a"].worktree_base,
+            *PathBuf::from("/wt/new-a")
+        );
+        assert_eq!(
+            *replaced.templates["b"].worktree_base,
+            *PathBuf::from("/wt/b")
         );
     }
 }

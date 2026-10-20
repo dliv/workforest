@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-use crate::config::{ResolvedRepo, ResolvedTemplate};
+use crate::config::ResolvedTemplate;
 use chrono::{DateTime, Utc};
 use git_forest_core::meta::{ForestMeta, ForestMode, RepoMeta};
 use git_forest_core::paths::{AbsolutePath, ForestName, RepoName};
+use git_forest_core::plan::new::ResolvedRepo;
 
 pub struct TestEnv {
     dir: TempDir,

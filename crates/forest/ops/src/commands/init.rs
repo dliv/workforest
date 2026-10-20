@@ -1,11 +1,11 @@
-use anyhow::{bail, Result};
-use std::collections::BTreeMap;
+use anyhow::Result;
 use std::path::Path;
 
-use crate::config::{expand_tilde, ResolvedConfig, ResolvedTemplate};
+use crate::config::ResolvedTemplate;
 use crate::git::is_git_repository;
+use git_forest_core::config::expand_tilde;
 use git_forest_core::plan::init::{
-    decide_init, validate_init_inputs, InitObservation, InitRepoSummary, InitResult,
+    decide_init, merge_init, validate_init_inputs, InitObservation, InitRepoSummary, InitResult,
     RepoPathObservation,
 };
 pub use git_forest_core::plan::init::{format_init_human, InitInputs, RepoInput};
@@ -62,23 +62,11 @@ pub fn cmd_init(
     let template = plan_init(&inputs, home)?;
     let template_name = inputs.template_name.clone();
 
-    let mut config = if config_path.exists() {
-        crate::config::load_config(config_path, home)?
+    let existing = if config_path.exists() {
+        Some(crate::config::load_config(config_path, home)?)
     } else {
-        ResolvedConfig {
-            default_template: template_name.clone(),
-            templates: BTreeMap::new(),
-            version_check: None,
-        }
+        None
     };
-
-    // Only require --force when overwriting an existing template
-    if config.templates.contains_key(&template_name) && !force {
-        bail!(
-            "template {:?} already exists in config\n  hint: use --force to overwrite, or choose a different name",
-            template_name
-        );
-    }
 
     let worktree_base = template.worktree_base.clone();
     let disposable_root_entries = template.disposable_root_entries.clone();
@@ -92,7 +80,7 @@ pub fn cmd_init(
         })
         .collect();
 
-    config.templates.insert(template_name.clone(), template);
+    let config = merge_init(existing, &template_name, template, force)?;
     crate::config::write_config_atomic(config_path, &config)?;
 
     Ok(InitResult {
