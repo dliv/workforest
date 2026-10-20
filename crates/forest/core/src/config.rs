@@ -6,7 +6,9 @@
 //! `[template.*]` here, the update check's `[version_check]` in the update-check edge, which
 //! reads it itself. Every other top-level key and table is kept and written back, re-serialized
 //! as parsed (keys in sorted order, comments and formatting dropped, as the rewrite does for the
-//! forest's own keys).
+//! forest's own keys). A kept value must be one TOML can hold: an integer outside TOML's signed
+//! 64-bit range in a key the forest does not own fails the parse, while an unknown key inside the
+//! forest's own tables is skipped unread.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -909,6 +911,50 @@ x = 1
 enabled = "no"
 "#
         );
+    }
+
+    #[test]
+    fn out_of_range_integers_fail_in_foreign_keys_and_are_skipped_in_forest_tables() {
+        // TOML integers are signed 64-bit. A key the forest does not own is kept to be written
+        // back, so a value outside that range makes the file fail to load; an unknown key inside
+        // the forest's own tables is skipped unread.
+        const WIDE: &str = "9223372036854775808";
+        const NEGATIVE_WIDE: &str = "-9223372036854775809";
+        let forest = r#"default_template = "default"
+
+[template.default]
+worktree_base = "/tmp/worktrees"
+base_branch = "dev"
+feature_branch_template = "user/{name}"
+
+[[template.default.repos]]
+path = "/tmp/src/foo-api"
+"#;
+
+        let foreign = [
+            format!("external_id = {WIDE}\n{forest}"),
+            format!("external_id = {NEGATIVE_WIDE}\n{forest}"),
+            format!("{forest}\n[other]\nexternal_id = {WIDE}\n"),
+        ];
+        for contents in foreign {
+            let err = parse_config(&contents, Some(TEST_HOME)).unwrap_err();
+            assert!(
+                format!("{err:#}").starts_with("failed to parse config TOML"),
+                "{contents}"
+            );
+        }
+
+        let unknown_forest_keys = [
+            format!("{forest}external_id = {WIDE}\n"),
+            forest.replace(
+                "[[template.default.repos]]",
+                &format!("external_id = {WIDE}\n\n[[template.default.repos]]"),
+            ),
+        ];
+        for contents in unknown_forest_keys {
+            let config = parse_config(&contents, Some(TEST_HOME)).unwrap();
+            assert!(config.rest.is_empty(), "{contents}");
+        }
     }
 
     #[test]
