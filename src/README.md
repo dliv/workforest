@@ -18,10 +18,11 @@ channel and binary package remain here. The
 the dispatch rule: at most one command operation per arm, with no new business
 predicates over forest, repository or config state.
 
-The [update checker](../crates/update-check/README.md) currently owns its own
-client and background spawn, and this host intercepts its internal argument.
-That current handshake and the planned ownership change are distinguished in
-the edge README and [planned follow-ups](../docs/architecture.md#planned-follow-ups).
+The [update checker](../crates/update-check/README.md) owns cache and protocol
+work; this application supplies its configured HTTP agent and clock, and owns
+the one-shot background child and its private argument. The edge README and
+[ADR 0019](../docs/decisions/0019-app-owned-update-check-resources.md) describe
+the contract and its proof.
 
 [Process tests](../tests/README.md) prove the assembled command-line contract.
 [Policy](../crates/policy/README.md) checks Root source restrictions and class

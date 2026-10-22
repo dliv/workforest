@@ -59,6 +59,14 @@ fn planted_effects_are_all_reported() {
 }
 
 #[test]
+fn pure_profile_forbids_resolving_the_executable() {
+    assert_eq!(
+        ambient_violations("fn f() { let _ = std::env::current_exe(); }"),
+        vec!["std::env"]
+    );
+}
+
+#[test]
 fn root_modules_have_no_forbidden_effects() {
     let mut scanned = 0;
     let mut problems = Vec::new();
@@ -77,8 +85,8 @@ fn root_modules_have_no_forbidden_effects() {
     assert!(
         problems.is_empty(),
         "Root modules compose: they may not touch the filesystem, the network, threads or the \
-         environment beyond the process arguments and the variables and working directory the \
-         composition root reads by name; move the effect into a Shared module of an effectful \
+         environment beyond the process arguments, the variables and working directory passed \
+         in, and the executable path used by the refresh launcher; move the effect into a Shared module of an effectful \
          crate and pass the data in ({ROOT_SECTION}):\n  {}",
         problems.join("\n  ")
     );
@@ -134,20 +142,21 @@ fn root_profile_reports_forbidden_forms() {
     }
 }
 
-/// Process, clock and stream uses, and the environment reads the composition root makes once by
-/// name, pass the Root profile because Clippy bans them outside their sanctioned sites, which
-/// the positive control counts.
+/// Process, clock and stream uses, and sanctioned environment calls pass the Root profile
+/// because Clippy bans them outside their sanctioned sites, which the positive control counts.
 #[test]
 fn root_profile_permits_sanctioned_forms() {
     let sources = [
         "fn f() { let _ = std::env::args_os(); }",
         "fn f() { let _ = std::env::current_dir(); }",
+        "fn f() { let _ = std::env::current_exe(); }",
         r#"use std::env::var as read_var; fn f() { let _ = read_var("HOME"); }"#,
         r#"use std::env; fn f() { let _ = env::var("HOME"); }"#,
         r#"fn f() { let _ = std::env::var_os("PWD"); }"#,
         "use std::env::args_os; fn f() { let _ = args_os(); }",
         "use std::env::args_os as argv; fn f() { let _ = argv(); }",
         "use std::env; fn f() { let _ = env::args_os(); }",
+        "use std::env as process_env; fn f() { let _ = process_env::current_exe(); }",
         "use std::env::ArgsOs; fn f(_: ArgsOs) {}",
         r#"fn f() {
     let _ = std::process::Command::new("brew");
@@ -267,6 +276,7 @@ fn root_manifest_dependencies_are_read() {
         "git_forest_update_check",
         "serde",
         "serde_json",
+        "ureq",
     ]
     .into_iter()
     .filter(|name| !found.contains(*name))

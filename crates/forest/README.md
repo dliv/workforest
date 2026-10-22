@@ -38,7 +38,9 @@ visibility contract and the permanent `reset -> rm` helper-sharing boundary.
   effects as well as result data.
 - [second_root.rs](ops/tests/second_root.rs) drives the public ops API with
   explicit environment, home, working directory and time values. It does not
-  cover the update-check handshake or most init/reset paths.
+  cover most init/reset paths. The separate
+  [update-check host proof](../update-check/README.md#proofs-and-generated-contract)
+  exercises edge resources and a real test-owned parent/child pair.
 - [Process tests](../../tests/README.md) exercise the built CLI's output,
   exits, dry-runs and partial failures. [Policy checks](../policy/README.md)
   protect the package and purity boundaries.
@@ -47,6 +49,6 @@ visibility contract and the permanent `reset -> rm` helper-sharing boundary.
 
 No second feature or extra abstraction is assumed. Use the placement record
 when new behavior arrives and preserve the public ops seam when another host
-needs it. The separately planned update-check ownership change belongs to
-the [edge and composition root](../../docs/architecture.md#planned-follow-ups),
+needs it. Update-check resource and process ownership belongs to the
+[edge and composition root](../../docs/decisions/0019-app-owned-update-check-resources.md),
 not to a new forest subfeature.

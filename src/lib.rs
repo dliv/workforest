@@ -4,14 +4,19 @@ pub mod channel;
 mod cli;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, ExitCode, Stdio};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 use git_forest_ops::{commands, config, forest};
 use git_forest_update_check as update_check;
+use ureq::Agent;
+
+const INTERNAL_VERSION_CHECK_ARG: &str = "--internal-version-check";
+const VERSION_CHECK_ENDPOINT: &str = "https://forest.dliv.gg/api/latest";
 
 /// A failure that ends a command: what `main_entry` renders and maps to an exit code.
 enum Failure {
@@ -151,7 +156,7 @@ fn report_failure(failure: &Failure, json: bool) {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "composition root: reads process arguments, the environment, the working directory and the clock once, and owns the exit code"
+    reason = "composition root: reads process arguments, environment and working directory once, and owns the exit code"
 )]
 pub fn main_entry() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -179,12 +184,10 @@ pub fn main_entry() -> ExitCode {
 
     // Internal subprocess entry point for non-blocking version check.
     // Intercepted before CLI parsing — not a real subcommand.
-    if args
-        .iter()
-        .any(|arg| arg == update_check::INTERNAL_VERSION_CHECK_ARG)
-    {
+    if args.iter().any(|arg| arg == INTERNAL_VERSION_CHECK_ARG) {
         let settings = update_check_settings(resolved_config_file, resolved_state_file);
-        update_check::run_background_version_check(&settings);
+        let agent = version_check_agent();
+        update_check::run_background_version_check(&settings, &agent, version_check_clock);
         return ExitCode::SUCCESS;
     }
 
@@ -222,7 +225,7 @@ pub fn main_entry() -> ExitCode {
         | Command::Update => false,
     };
 
-    let now = chrono::Utc::now();
+    let now = version_check_clock();
     let outcome = run(
         cli,
         now,
@@ -235,7 +238,12 @@ pub fn main_entry() -> ExitCode {
         Ok(Completion::Complete) => {
             if should_version_check {
                 let settings = update_check_settings(resolved_config_file, resolved_state_file);
-                update_check::check_cache_and_notify(&settings, debug);
+                match update_check::check_cache_and_notify(&settings, debug, version_check_clock) {
+                    update_check::RefreshDisposition::NoRefresh => {}
+                    update_check::RefreshDisposition::RefreshRequested => {
+                        spawn_background_check(current_executable());
+                    }
+                }
             }
         }
         Ok(Completion::Incomplete) | Ok(Completion::ConfirmRequired) => {}
@@ -244,8 +252,8 @@ pub fn main_entry() -> ExitCode {
     exit_code(&outcome)
 }
 
-/// The update check's settings: this binary's version, names and channel, the config file and
-/// the state file. Built the same way for the background check, after a command and for
+/// The update check's host-owned settings: this binary's version, names, channel, endpoint and
+/// file paths. Built the same way for the background check, after a command and for
 /// `version --check`; the update check reads its own section of the config file.
 fn update_check_settings(
     config_file: Option<PathBuf>,
@@ -256,8 +264,60 @@ fn update_check_settings(
         app_name: channel::APP_NAME,
         command: channel::CMD,
         channel: channel::VERSION_CHANNEL,
+        endpoint: VERSION_CHECK_ENDPOINT.to_owned(),
         config_file,
         state_file,
+    }
+}
+
+/// The clock resource the app supplies to update-check workflows. Forest commands still receive
+/// their own once-per-command snapshot from `main_entry`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "composition root: supplies the update check's application-owned clock"
+)]
+fn version_check_clock() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
+/// Builds the configured HTTP client owned by this application.
+fn version_check_agent() -> Agent {
+    let config = Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build();
+    config.into()
+}
+
+/// Resolve this host's executable for its one-shot background refresh.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "composition root: resolves its executable for the app-owned refresh launcher"
+)]
+fn current_executable() -> std::io::Result<PathBuf> {
+    std::env::current_exe()
+}
+
+/// Starts the already-configured child request and deliberately drops the handle without waiting.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "composition root: owns the one-shot background refresh process"
+)]
+fn launch_background_check(executable: &Path) -> std::io::Result<()> {
+    let child = ProcessCommand::new(executable)
+        .arg(INTERNAL_VERSION_CHECK_ARG)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    drop(child);
+    Ok(())
+}
+
+/// A requested refresh is best effort: executable lookup and spawn failures do not affect the
+/// command that just completed.
+fn spawn_background_check(executable: std::io::Result<PathBuf>) {
+    if let Ok(executable) = executable {
+        let _ = launch_background_check(&executable);
     }
 }
 
@@ -630,7 +690,8 @@ fn run(
             println!("{} {}", channel::APP_NAME, env!("CARGO_PKG_VERSION"));
             if check {
                 let settings = update_check_settings(config_file.ok(), state_file.ok());
-                match update_check::force_check(&settings, cli.debug) {
+                let agent = version_check_agent();
+                match update_check::force_check(&settings, &agent, cli.debug, version_check_clock) {
                     update_check::ForceCheckResult::Disabled => {
                         eprintln!("Version check is disabled in config.");
                     }
@@ -722,4 +783,19 @@ fn output<T: serde::Serialize>(result: &T, json: bool, human_fn: fn(&T) -> Strin
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_refresh_lookup_and_spawn_failures_are_best_effort() {
+        spawn_background_check(Err(std::io::Error::other("injected lookup failure")));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing/executable");
+        assert!(launch_background_check(&missing).is_err());
+        spawn_background_check(Ok(missing));
+    }
 }

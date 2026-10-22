@@ -9,7 +9,7 @@ its [composition code under `src/`](../src/README.md).
 | Area | Responsibility |
 | --- | --- |
 | [forest](forest/README.md) | The feature: pure decisions in `core`, git/filesystem workflows in `ops` |
-| [update-check](update-check/README.md) | The outbound update protocol and today's cache/background handshake |
+| [update-check](update-check/README.md) | The outbound update protocol and cache; hosts supply resources and process lifetime |
 | [policy](policy/README.md) | Tooling that checks classification, dependencies, effects and traits |
 
 [ADR 0017](../docs/decisions/0017-crate-layout.md) owns the package layout

@@ -10,9 +10,10 @@
 //! `std::thread`, and standard input. The Root profile reports any path through
 //! `std::fs`, `std::net` or `std::thread`, and any path through `std::env` other
 //! than the namespace itself, the process arguments the root parses
-//! (`std::env::args_os` and `std::env::ArgsOs`) and the variables and working
-//! directory it reads once and passes in (`std::env::var`, `std::env::var_os` and
-//! `std::env::current_dir`, which Clippy's bans allow only in functions carrying a
+//! (`std::env::args_os` and `std::env::ArgsOs`), the variables and working
+//! directory it reads and passes in (`std::env::var`, `std::env::var_os` and
+//! `std::env::current_dir`), and the executable path used by the app-owned refresh
+//! launcher (`std::env::current_exe`, which Clippy's bans allow only in functions carrying a
 //! sanctioned exemption and the positive control counts per file, not per
 //! function); it does not report `std::process`, `std::time` or `std::io`,
 //! standard input included, which Clippy bans outside their sanctioned sites.
@@ -331,8 +332,9 @@ fn after_turbofish(tokens: &[String], index: usize) -> usize {
 
 /// Which forms the ambient scan reports: the Pure profile for Pure modules, the Root profile
 /// for Root modules. They differ only in the `std` modules they forbid, the `std::env` paths
-/// the Root profile sanctions (the process arguments, and the variables and working directory
-/// the composition root reads once), and standard input.
+/// the Root profile sanctions (the process arguments, the variables and working directory the
+/// composition root reads and passes in, and the executable path used by the refresh launcher),
+/// and standard input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EffectProfile {
     Pure,
@@ -350,9 +352,10 @@ impl EffectProfile {
 
     /// Whether a `std` path that names a forbidden module is sanctioned anyway: under the Root
     /// profile, the `std::env` namespace itself (the paths through it are checked), the process
-    /// arguments the root parses (`std::env::args_os` and `std::env::ArgsOs`), and the variables
-    /// and working directory it reads once and passes in (`std::env::var`, `std::env::var_os`
-    /// and `std::env::current_dir`). The sanction is by name; Clippy's bans allow those reads
+    /// arguments the root parses (`std::env::args_os` and `std::env::ArgsOs`), the variables
+    /// and working directory it reads and passes in (`std::env::var`, `std::env::var_os`
+    /// and `std::env::current_dir`), and the executable path used by the app-owned refresh
+    /// launcher (`std::env::current_exe`). The sanction is by name; Clippy's bans allow those calls
     /// only in functions carrying a sanctioned exemption, and the positive control counts them
     /// per file, not per function, so which function holds them is checked by reading it.
     fn sanctions(self, path: &[String]) -> bool {
@@ -367,7 +370,7 @@ impl EffectProfile {
                     | [
                         "std",
                         "env",
-                        "args_os" | "ArgsOs" | "var" | "var_os" | "current_dir"
+                        "args_os" | "ArgsOs" | "var" | "var_os" | "current_dir" | "current_exe"
                     ]
             ),
         }
@@ -409,9 +412,10 @@ pub fn ambient_violations(source: &str) -> Vec<String> {
 
 /// Ambient-effect violations in a Root module's production tokens (the Root profile): any path
 /// into `std::fs`, `std::net` or `std::thread`; any path into `std::env` other than the
-/// namespace itself, the process arguments (`std::env::args_os` and `std::env::ArgsOs`) and the
-/// variables and working directory the composition root reads once and passes in
-/// (`std::env::var`, `std::env::var_os` and `std::env::current_dir`); and every other form the
+/// namespace itself, the process arguments (`std::env::args_os` and `std::env::ArgsOs`), the
+/// variables and working directory the composition root reads and passes in
+/// (`std::env::var`, `std::env::var_os` and `std::env::current_dir`), and the executable path
+/// used by the app-owned refresh launcher (`std::env::current_exe`); and every other form the
 /// Pure profile reports (`ambient_violations`) except `std::process`, `std::time` and standard
 /// input. Process, clock, stream and those environment uses are left to Clippy's bans, which
 /// allow them only at sanctioned sites.

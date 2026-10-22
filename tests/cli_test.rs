@@ -120,7 +120,6 @@ impl ForestCmd {
 
     /// Points XDG_STATE_HOME at `dir`, which the test guards itself: the goldens disable the
     /// check in their config and assert that `dir` never appears.
-    #[cfg(feature = "stable")]
     fn state_home(&mut self, dir: impl AsRef<std::path::Path>) -> &mut Self {
         self.cmd.env("XDG_STATE_HOME", dir.as_ref());
         self.guard = StateGuard::ChosenByTest;
@@ -1749,6 +1748,61 @@ fn read_version_state(fake_home: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+fn xdg_version_state_file(state_home: &std::path::Path) -> std::path::PathBuf {
+    state_home.join(bin_name()).join("state.toml")
+}
+
+fn write_xdg_version_state(
+    state_home: &std::path::Path,
+    last_checked: &str,
+    latest_version: &str,
+) -> std::path::PathBuf {
+    let path = xdg_version_state_file(state_home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "[version_check]\nlast_checked = \"{last_checked}\"\nlatest_version = \"{latest_version}\"\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn read_version_state_field(path: &std::path::Path, field: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        if name.trim() != field {
+            return None;
+        }
+        value
+            .trim()
+            .strip_prefix('"')?
+            .strip_suffix('"')
+            .map(str::to_owned)
+    })
+}
+
+fn wait_for_version_state_field(
+    path: &std::path::Path,
+    field: &str,
+    timeout: std::time::Duration,
+) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(value) = read_version_state_field(path, field) {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {field} in {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn version_check_fresh_cache_no_notice() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1991,6 +2045,94 @@ fn internal_version_check_flag_exits_cleanly() {
     assert!(
         output.stderr.is_empty(),
         "subprocess should produce no stderr"
+    );
+}
+
+#[test]
+#[ignore = "requires the public update endpoint and a successful background refresh; run with --ignored"]
+fn update_check_live_cli_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_home = tmp.path().join("first-state");
+    let config_home = tmp.path().join("config");
+    let state_file = xdg_version_state_file(&state_home);
+
+    let mut first_run = bin_cmd();
+    let output = first_run
+        .args(["init", "--show-path"])
+        .state_home(&state_home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "eligible command failed: {output:?}"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        config_home
+            .join(bin_name())
+            .join("config.toml")
+            .display()
+            .to_string()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        format!(
+            "Note: {} checks for updates daily (current version sent to forest.dliv.gg).\n\
+             Disable: set version_check.enabled = false in config.\n",
+            bin_name()
+        )
+    );
+
+    let first_observed_timestamp = wait_for_version_state_field(
+        &state_file,
+        "last_checked",
+        std::time::Duration::from_secs(2),
+    );
+    let latest = wait_for_version_state_field(
+        &state_file,
+        "latest_version",
+        std::time::Duration::from_secs(8),
+    );
+    assert!(!latest.is_empty(), "the refreshed version must be nonempty");
+    assert_eq!(
+        read_version_state_field(&state_file, "last_checked").as_deref(),
+        Some(first_observed_timestamp.as_str()),
+        "background refresh must preserve the first observed cache timestamp"
+    );
+
+    let child_state_home = tmp.path().join("child-state");
+    let child_state_file =
+        write_xdg_version_state(&child_state_home, "2001-01-01T00:00:00Z", "0.0.0-sentinel");
+    let mut direct_child = bin_cmd();
+    let child_output = direct_child
+        .arg("--internal-version-check")
+        .state_home(&child_state_home)
+        .output()
+        .unwrap();
+    assert!(
+        child_output.status.success(),
+        "direct refresh child failed: {child_output:?}"
+    );
+    assert!(
+        child_output.stdout.is_empty(),
+        "child stdout must stay silent"
+    );
+    assert!(
+        child_output.stderr.is_empty(),
+        "child stderr must stay silent"
+    );
+    let child_latest = wait_for_version_state_field(
+        &child_state_file,
+        "latest_version",
+        std::time::Duration::from_secs(8),
+    );
+    assert_ne!(child_latest, "0.0.0-sentinel");
+    assert_eq!(
+        read_version_state_field(&child_state_file, "last_checked").as_deref(),
+        Some("2001-01-01T00:00:00Z"),
+        "direct child refresh must preserve the existing timestamp"
     );
 }
 

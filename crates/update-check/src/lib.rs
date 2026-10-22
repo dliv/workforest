@@ -1,35 +1,21 @@
-//! The update check: a client of the update server. It caches the latest released version in
-//! its state file, prints an update notice from that cache after a command, and refreshes the
-//! cache in a detached background process. It never names another workspace crate: the
-//! composition root passes the running binary's version, the app and command names, the release
-//! channel, the state file and the config file in one `Settings` value, and the update check reads
-//! its own `[version_check]` table from that config file.
-//!
-//! Host protocol: when the cache is missing or stale, `check_cache_and_notify` spawns the host's
-//! own executable with `INTERNAL_VERSION_CHECK_ARG` and passes no settings. The host must
-//! intercept that argument before parsing its command line, rebuild the same settings in that
-//! process and call `run_background_version_check`. A second host must honour this handshake or
-//! supply its own spawning boundary; a custom `state_file` given to the foreground call does not
-//! reach the background process by itself.
+//! The update check: a client of the update server. It owns the cache and protocol workflow,
+//! including reading its `[version_check]` table, printing notices and deciding whether a
+//! refresh is needed. The host supplies its concrete HTTP agent, endpoint, and clock through
+//! `Settings` and the public function arguments. `check_cache_and_notify` returns a disposition;
+//! the host decides how to launch a requested one-shot refresh. This crate creates no process or
+//! runtime, so a second host can call the same cache and refresh workflows directly.
 #![expect(
     clippy::disallowed_methods,
     clippy::print_stderr,
-    reason = "the update-check edge: reads the clock, resolves and spawns its own executable, makes the update server request and prints its notices"
+    reason = "the update-check edge: makes the update server request through a host-supplied agent and prints its notices"
 )]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use ureq::Agent;
-
-/// The argument the background refresh is started with; the host intercepts it before parsing
-/// its command line (see the crate documentation).
-pub const INTERNAL_VERSION_CHECK_ARG: &str = "--internal-version-check";
 
 /// The state file's name; the host chooses its directory.
 pub const STATE_FILE_NAME: &str = "state.toml";
-
-const VERSION_CHECK_BASE_URL: &str = "https://forest.dliv.gg/api/latest";
 
 const CHECK_INTERVAL_HOURS: i64 = 24;
 
@@ -41,8 +27,7 @@ enum Enablement {
     Disabled,
 }
 
-/// What the host tells the update check about itself. The host builds it the same way in the
-/// foreground and in the background process (see the crate documentation).
+/// Host-owned settings used by the update-check cache and protocol workflows.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// The running binary's version, read by the host package at build time.
@@ -53,6 +38,8 @@ pub struct Settings {
     pub command: &'static str,
     /// The release channel sent to the update server.
     pub channel: &'static str,
+    /// The update endpoint selected by trusted host code.
+    pub endpoint: String,
     /// The config file, from which the update check reads its own `[version_check]` table;
     /// None when its location could not be resolved, which reads as enabled.
     pub config_file: Option<PathBuf>,
@@ -72,6 +59,13 @@ pub enum ForceCheckResult {
     UpdateAvailable(UpdateNotice),
     UpToDate,
     FetchFailed,
+}
+
+/// Whether the host should launch its own background refresh after displaying cached information.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshDisposition {
+    NoRefresh,
+    RefreshRequested,
 }
 
 // --- Config file ---
@@ -144,13 +138,17 @@ fn write_state(state_file: Option<&Path>, state: &VersionCheckState) -> Option<(
 
 /// Read-modify-write the state file, applying `f` to the existing state.
 /// Creates a default state if none exists.
-fn update_state(state_file: Option<&Path>, f: impl FnOnce(&mut VersionCheckState)) -> Option<()> {
+fn update_state(
+    state_file: Option<&Path>,
+    now: &impl Fn() -> DateTime<Utc>,
+    f: impl FnOnce(&mut VersionCheckState),
+) -> Option<()> {
     let path = state_file?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
     let mut state = read_state(Some(path)).unwrap_or(VersionCheckState {
-        last_checked: Utc::now(),
+        last_checked: now(),
         latest_version: None,
     });
     f(&mut state);
@@ -161,8 +159,8 @@ fn update_state(state_file: Option<&Path>, f: impl FnOnce(&mut VersionCheckState
     std::fs::write(path, content).ok()
 }
 
-fn is_stale(last_checked: &DateTime<Utc>) -> bool {
-    let elapsed = Utc::now().signed_duration_since(last_checked);
+fn is_stale(last_checked: &DateTime<Utc>, now: &impl Fn() -> DateTime<Utc>) -> bool {
+    let elapsed = now().signed_duration_since(last_checked);
     elapsed.num_hours() >= CHECK_INTERVAL_HOURS
 }
 
@@ -175,21 +173,16 @@ struct VersionResponse {
     version: String,
 }
 
-fn fetch_latest_version(settings: &Settings, debug: bool, timeout: Duration) -> Option<String> {
+fn fetch_latest_version(settings: &Settings, agent: &Agent, debug: bool) -> Option<String> {
     let current = settings.current_version;
     let url = format!(
         "{}?v={}&channel={}",
-        VERSION_CHECK_BASE_URL, current, settings.channel
+        settings.endpoint, current, settings.channel
     );
 
     if debug {
         eprintln!("[debug] version check: fetching {}", url);
     }
-
-    let config = Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build();
-    let agent: Agent = config.into();
 
     let body = agent
         .get(&url)
@@ -220,28 +213,16 @@ fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-// --- Background subprocess ---
-
-fn spawn_background_check() {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let _ = std::process::Command::new(exe)
-        .arg(INTERNAL_VERSION_CHECK_ARG)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    // Child handle is dropped — parent does not wait
-}
-
-/// Entry point for the detached subprocess spawned by `spawn_background_check`.
-/// Fetches the latest version with a generous timeout and writes it to the state file.
-/// It reads no config: the foreground call that spawned it already did.
-pub fn run_background_version_check(settings: &Settings) {
-    if let Some(latest) = fetch_latest_version(settings, false, Duration::from_secs(5)) {
-        update_state(settings.state_file.as_deref(), |s| {
+/// Performs one background refresh using the host's configured HTTP agent and clock.
+/// A successful response updates the cached version; fetch and persistence failures remain best
+/// effort and do not change the caller's process status.
+pub fn run_background_version_check(
+    settings: &Settings,
+    agent: &Agent,
+    now: impl Fn() -> DateTime<Utc>,
+) {
+    if let Some(latest) = fetch_latest_version(settings, agent, false) {
+        update_state(settings.state_file.as_deref(), &now, |s| {
             s.latest_version = Some(latest)
         });
     }
@@ -249,16 +230,19 @@ pub fn run_background_version_check(settings: &Settings) {
 
 // --- Public API ---
 
-/// Called after successful commands. Non-blocking: reads from cache and prints
-/// an update notice if one is available, then spawns a background subprocess
-/// to refresh the cache if stale. Never blocks on network I/O.
-pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
+/// Reads the cached notice and reports whether the host should launch a refresh.
+/// It never performs network I/O or starts a process.
+pub fn check_cache_and_notify(
+    settings: &Settings,
+    debug: bool,
+    now: impl Fn() -> DateTime<Utc>,
+) -> RefreshDisposition {
     match config_enablement(settings.config_file.as_deref()) {
         Enablement::Disabled => {
             if debug {
                 eprintln!("[debug] version check: disabled in config");
             }
-            return;
+            return RefreshDisposition::NoRefresh;
         }
         Enablement::Enabled => {}
     }
@@ -268,7 +252,7 @@ pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
     let state = read_state(state_file);
 
     if state.is_none() {
-        // First run: show privacy notice, seed state, spawn background check
+        // First run: show the privacy notice, seed state and request a background refresh.
         if debug {
             eprintln!("[debug] version check: state file not found, first run");
         }
@@ -280,12 +264,11 @@ pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
         write_state(
             state_file,
             &VersionCheckState {
-                last_checked: Utc::now(),
+                last_checked: now(),
                 latest_version: None,
             },
         );
-        spawn_background_check();
-        return;
+        return RefreshDisposition::RefreshRequested;
     }
 
     let cached = state.unwrap();
@@ -301,37 +284,45 @@ pub fn check_cache_and_notify(settings: &Settings, debug: bool) {
     }
 
     // Refresh if stale (>= 24h) or if latest_version is still None (previous bg check failed)
-    if cached.latest_version.is_none() || is_stale(&cached.last_checked) {
+    if cached.latest_version.is_none() || is_stale(&cached.last_checked, &now) {
         if debug {
             eprintln!(
                 "[debug] version check: cache stale or incomplete, spawning background check"
             );
         }
-        update_state(state_file, |s| s.last_checked = Utc::now());
-        spawn_background_check();
+        update_state(state_file, &now, |s| s.last_checked = now());
+        RefreshDisposition::RefreshRequested
     } else if debug {
         eprintln!(
             "[debug] version check: cache fresh, latest={:?}",
             cached.latest_version
         );
+        RefreshDisposition::NoRefresh
+    } else {
+        RefreshDisposition::NoRefresh
     }
 }
 
 /// Called by `git forest version --check`. Forces a synchronous network check, unless the
 /// config's `[version_check] enabled = false` disables the check, which it reports without
 /// fetching.
-pub fn force_check(settings: &Settings, debug: bool) -> ForceCheckResult {
+pub fn force_check(
+    settings: &Settings,
+    agent: &Agent,
+    debug: bool,
+    now: impl Fn() -> DateTime<Utc>,
+) -> ForceCheckResult {
     match config_enablement(settings.config_file.as_deref()) {
         Enablement::Disabled => return ForceCheckResult::Disabled,
         Enablement::Enabled => {}
     }
     let current = settings.current_version;
-    match fetch_latest_version(settings, debug, Duration::from_secs(5)) {
+    match fetch_latest_version(settings, agent, debug) {
         Some(latest) => {
             write_state(
                 settings.state_file.as_deref(),
                 &VersionCheckState {
-                    last_checked: Utc::now(),
+                    last_checked: now(),
                     latest_version: Some(latest.clone()),
                 },
             );
@@ -351,6 +342,31 @@ pub fn force_check(settings: &Settings, debug: bool) -> ForceCheckResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn at(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    fn test_settings(config_file: Option<PathBuf>, state_file: Option<PathBuf>) -> Settings {
+        Settings {
+            current_version: "0.2.0",
+            app_name: "git-forest",
+            command: "git forest",
+            channel: "stable",
+            endpoint: "https://forest.dliv.gg/api/latest".to_owned(),
+            config_file,
+            state_file,
+        }
+    }
+
+    fn save_state(path: &Path, checked: DateTime<Utc>, latest: Option<&str>) {
+        let state = VersionCheckState {
+            last_checked: checked,
+            latest_version: latest.map(str::to_owned),
+        };
+        write_state(Some(path), &state).unwrap();
+    }
 
     #[test]
     fn version_newer_upgrade_available() {
@@ -383,7 +399,7 @@ mod tests {
         let state_path = tmp.path().join("state.toml");
 
         let state = VersionCheckState {
-            last_checked: Utc::now(),
+            last_checked: at("2026-10-22T19:00:00Z"),
             latest_version: Some("0.2.0".to_string()),
         };
 
@@ -412,14 +428,16 @@ last_checked = "2026-01-01T00:00:00Z"
 
     #[test]
     fn staleness_check_old() {
-        let old = Utc::now() - chrono::Duration::hours(25);
-        assert!(is_stale(&old));
+        let now = at("2026-10-22T20:00:00Z");
+        let old = now - chrono::Duration::hours(25);
+        assert!(is_stale(&old, &|| now));
     }
 
     #[test]
     fn staleness_check_recent() {
-        let recent = Utc::now() - chrono::Duration::hours(1);
-        assert!(!is_stale(&recent));
+        let now = at("2026-10-22T20:00:00Z");
+        let recent = now - chrono::Duration::hours(1);
+        assert!(!is_stale(&recent, &|| now));
     }
 
     /// A forest config without a `[version_check]` table, ending inside its one repo's table.
@@ -548,22 +566,150 @@ path = "/tmp/src/foo-api"
         let config_file = tmp.path().join("config.toml");
         std::fs::write(&config_file, "[version_check]\nenabled = false\n").unwrap();
         let state_file = tmp.path().join("state").join("state.toml");
-        let settings = Settings {
-            current_version: "0.0.0",
-            app_name: "git-forest",
-            command: "git forest",
-            channel: "stable",
-            config_file: Some(config_file),
-            state_file: Some(state_file.clone()),
-        };
+        let settings = test_settings(Some(config_file), Some(state_file.clone()));
+        let clock_reads = Cell::new(0);
 
-        check_cache_and_notify(&settings, false);
+        assert_eq!(
+            check_cache_and_notify(&settings, false, || {
+                clock_reads.set(clock_reads.get() + 1);
+                at("2026-10-22T20:00:00Z")
+            }),
+            RefreshDisposition::NoRefresh
+        );
 
+        assert_eq!(clock_reads.get(), 0);
         assert!(
             !state_file.exists(),
             "a disabled check must not write {}",
             state_file.display()
         );
+    }
+
+    #[test]
+    fn cache_workflow_returns_disposition_and_preserves_fresh_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_file = tmp.path().join("state.toml");
+        let now = at("2026-10-22T20:00:00Z");
+        save_state(
+            &state_file,
+            now - chrono::Duration::hours(23) - chrono::Duration::minutes(59),
+            Some("0.2.0"),
+        );
+        let before = std::fs::read_to_string(&state_file).unwrap();
+        let settings = test_settings(None, Some(state_file.clone()));
+
+        assert_eq!(
+            check_cache_and_notify(&settings, false, || now),
+            RefreshDisposition::NoRefresh
+        );
+        assert_eq!(std::fs::read_to_string(state_file).unwrap(), before);
+    }
+
+    #[test]
+    fn missing_and_malformed_state_seed_the_clock_and_request_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = at("2026-10-22T20:00:00Z");
+        let missing = tmp.path().join("missing/state.toml");
+        let settings = test_settings(None, Some(missing.clone()));
+
+        assert_eq!(
+            check_cache_and_notify(&settings, false, || now),
+            RefreshDisposition::RefreshRequested
+        );
+        let state = read_state(Some(&missing)).unwrap();
+        assert_eq!(state.last_checked, now);
+        assert_eq!(state.latest_version, None);
+
+        let malformed = tmp.path().join("malformed/state.toml");
+        std::fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        std::fs::write(&malformed, "not valid TOML = [").unwrap();
+        let settings = test_settings(None, Some(malformed.clone()));
+        assert_eq!(
+            check_cache_and_notify(&settings, false, || now),
+            RefreshDisposition::RefreshRequested
+        );
+        let state = read_state(Some(&malformed)).unwrap();
+        assert_eq!(state.last_checked, now);
+        assert_eq!(state.latest_version, None);
+    }
+
+    #[test]
+    fn stale_threshold_is_twenty_four_whole_hours_and_future_state_is_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = at("2026-10-22T20:00:00Z");
+        let under = tmp.path().join("under/state.toml");
+        save_state(
+            &under,
+            now - chrono::Duration::hours(24) + chrono::Duration::seconds(1),
+            Some("0.2.0"),
+        );
+        assert_eq!(
+            check_cache_and_notify(&test_settings(None, Some(under.clone())), false, || now),
+            RefreshDisposition::NoRefresh
+        );
+
+        let exact = tmp.path().join("exact/state.toml");
+        save_state(&exact, now - chrono::Duration::hours(24), Some("0.2.0"));
+        assert_eq!(
+            check_cache_and_notify(&test_settings(None, Some(exact.clone())), false, || now),
+            RefreshDisposition::RefreshRequested
+        );
+        assert_eq!(read_state(Some(&exact)).unwrap().last_checked, now);
+
+        let future = tmp.path().join("future/state.toml");
+        save_state(&future, now + chrono::Duration::days(1), Some("0.2.0"));
+        assert_eq!(
+            check_cache_and_notify(&test_settings(None, Some(future)), false, || now),
+            RefreshDisposition::NoRefresh
+        );
+    }
+
+    #[test]
+    fn incomplete_cache_requests_refresh_even_when_its_timestamp_is_future() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_file = tmp.path().join("state.toml");
+        let now = at("2026-10-22T20:00:00Z");
+        save_state(&state_file, now + chrono::Duration::days(1), None);
+
+        assert_eq!(
+            check_cache_and_notify(
+                &test_settings(None, Some(state_file.clone())),
+                false,
+                || now
+            ),
+            RefreshDisposition::RefreshRequested
+        );
+        let state = read_state(Some(&state_file)).unwrap();
+        assert_eq!(state.last_checked, now);
+        assert_eq!(state.latest_version, None);
+    }
+
+    #[test]
+    fn missing_state_path_still_requests_refresh_without_persisting() {
+        let settings = test_settings(None, None);
+        assert_eq!(
+            check_cache_and_notify(&settings, false, || at("2026-10-22T20:00:00Z")),
+            RefreshDisposition::RefreshRequested
+        );
+    }
+
+    #[test]
+    fn failed_state_write_does_not_change_refresh_disposition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let state_file = blocker.join("state.toml");
+
+        assert_eq!(
+            check_cache_and_notify(
+                &test_settings(None, Some(state_file.clone())),
+                false,
+                || { at("2026-10-22T20:00:00Z") }
+            ),
+            RefreshDisposition::RefreshRequested
+        );
+        assert!(!state_file.exists());
+        assert_eq!(std::fs::read_to_string(blocker).unwrap(), "not a directory");
     }
 
     #[test]
