@@ -75,7 +75,7 @@ Together with the compiler this decides what a crate's code can reach. Rust refu
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason; all of them are inside the forest ops crate (`crate_dir` `crates/forest/ops`):
 
 - `commands::ls`, `commands::rm` and `commands::status` import `commands::branch_state`, the helper shared by the commands that inspect worktree branches. This is a permanent boundary.
-- `commands::reset` imports `commands::rm`, because reset observes and executes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal); the removal plan and its decisions live in `crates/forest/core/src/plan/rm.rs`. Whether those helpers become a shared module is an open question (temporary).
+- `commands::reset` imports `commands::rm`, because reset composes forest removal through rm's effectful helpers (observation, branch deletion, forest-directory removal) and rm owns removal; the removal plan and its decisions live in `crates/forest/core/src/plan/rm.rs`, which the reset plan reuses. This is a permanent boundary. Revisit if a third command needs the removal helpers, or rm's observe and execute steps change materially: that change pays for splitting them into a shared module, which is most of rm's effectful code (six helpers and the eleven private functions they call, about 560 lines) with the `rm` command left as a wrapper over it.
 
 An allowlist entry whose edge no longer exists fails the test too, so the list cannot go stale. A violation message names the edge, both classes and the rule, and says how to fix it: move the import, or add an `ALLOWED_EDGES` entry with a reason.
 
@@ -145,9 +145,7 @@ The script forces `CARGO_TERM_COLOR=never` (CI sets `always`, and colour codes w
 
 ## Planned follow-ups
 
-Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. No temporary sanctioned site remains today; the open question below stays. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `crates/forest/ops/src/git.rs`, `exec`'s spawn of the user's command, the policy crate's `cargo metadata` call, the `branch_state` helper edges and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
-
-- **Open question: whether `rm`'s observation and execution helpers become a shared module**, which would replace the `commands::reset -> commands::rm` allowlist entry. The removal plan and its decisions already live in `crates/forest/core/src/plan/rm.rs`, which `crates/forest/core/src/plan/reset.rs` reuses; the remaining edge is for those effectful helpers.
+Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. No temporary sanctioned site and no open question remains today. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `crates/forest/ops/src/git.rs`, `exec`'s spawn of the user's command, the policy crate's `cargo metadata` call, the `branch_state` helper edges, the `reset -> rm` edge and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
 
 ## Changing the rules
 

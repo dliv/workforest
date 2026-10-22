@@ -129,7 +129,7 @@ pub const ALLOWED_EDGES: &[AllowedEdge] = &[
         crate_dir: "crates/forest/ops",
         from: "commands::reset",
         to: "commands::rm",
-        reason: "reset observes and executes forest removal through rm's effectful helpers; the removal plan and its decisions live in crates/forest/core/src/plan/rm.rs, and whether those helpers become a shared module is an open follow-up",
+        reason: "permanent boundary: reset composes forest removal through rm's effectful helpers and rm owns removal; the removal plan and its decisions live in crates/forest/core/src/plan/rm.rs; docs/architecture.md names the revisit trigger",
     },
 ];
 
