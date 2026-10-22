@@ -7,15 +7,26 @@ Canonical agent instructions for this project. `CLAUDE.md` is only a pointer to 
 - **Push back on suggestions that don't make sense.** Don't blindly execute every request - if something is wrong or inapplicable, say so. Example: git-forest is a single-repo project, so "add git-forest multi-repo instructions to our own AGENTS.md" doesn't apply here - we don't consume git-forest, we build it.
 - **Fresh-agent handoffs:** when pivoting work to a new agent/thread, write a concise detailed handoff prompt under `tmp/` with the objective, repo state, key commits, verification already run, known blockers, and suggested next steps. `tmp/` is intentionally scratch space and should not be used for durable project documentation. Also provide the human a copy-paste-ready fenced text block that references the detailed prompt file path.
 
-## Commands
+## Document router
 
-```
-just setup           # one-time: configure git hooks
-just build           # build
-just test            # run all tests
-just check           # fmt, clippy (both channels), all tests incl. policy, positive control
-cargo check          # typecheck only
-```
+Read the documents relevant to the change, then the local README for the area
+you will edit. Keep each fact in its owning document and link to it elsewhere
+([documentation convention](docs/README.md)).
+
+| When | Read |
+| --- | --- |
+| Setting up, building or validating | [Development](docs/development.md) |
+| Adding behavior or choosing a design | [Design principles and feature-start questions](docs/design-principles.md) |
+| Changing dependencies, effects, composition or policy | [Architecture rules and proof limits](docs/architecture.md), then the relevant [ADRs](docs/decisions/ADR_INDEX.md) |
+| Deciding where behavior belongs | [Candidate features](docs/candidate-features.md), then the [crate map](crates/README.md) |
+| Changing forest commands, decisions or storage | [Forest feature](crates/forest/README.md) |
+| Changing CLI wiring, output or process entrypoints | [Composition root](src/README.md) |
+| Changing update checks or their server | [Update-check client](crates/update-check/README.md) and [worker](worker/README.md) |
+| Changing gates or their positive control | [Policy](crates/policy/README.md) and [scripts](scripts/README.md) |
+| Changing process tests or snapshots | [Tests](tests/README.md) |
+
+Read relevant ADRs before changing patterns they govern. Run `just check`
+before every commit and before handing work back.
 
 ## Commits
 
@@ -31,15 +42,6 @@ cargo check          # typecheck only
 Use `just release <version>` (stable) or `just release-beta <version>` (beta). These handle Cargo.toml, wrangler.toml, Cargo.lock, checks, commit, tag, and push.
 
 When pushing tags manually, push by name - `git push origin v0.x.y` - not `--tags`. Pushing all tags at once doesn't trigger the GitHub Actions release workflow.
-
-## Design philosophy
-
-- **Make illegal states unrepresentable.** Prefer newtypes (`AbsolutePath`, `RepoName`, `ForestName`, `BranchName`) over runtime validation. Validate once at construction; the type system enforces the invariant everywhere else.
-- **Don't add `bail!` or `debug_assert!` for something a type already guarantees.** If a field is `RepoName`, it's already non-empty - no need to check again.
-- **Validate at boundaries, trust internally.** Raw strings enter from CLI args and config files. Wrap them in newtypes at the command boundary (e.g., `ForestName::new()` at the top of `plan_forest()`). Internal code receives validated types.
-- **`debug_assert!` is for invariants types can't express** - collection-level properties (uniqueness), or preconditions at `&Path` boundaries where `AbsolutePath` isn't in the signature.
-- Architecture decisions are recorded in [`docs/decisions/ADR_INDEX.md`](docs/decisions/ADR_INDEX.md). Read relevant ADRs before changing patterns they govern.
-- Architecture rules and how they are enforced are in `docs/architecture.md`; run `just check` before every commit and before handing work back.
 
 ## Using git-forest
 

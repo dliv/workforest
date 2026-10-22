@@ -1,5 +1,10 @@
 # Architecture rules and their gates
 
+Up: [Developer documentation](README.md). For the code map, start with
+[crates](../crates/README.md) or the [composition root](../src/README.md).
+[Design principles](design-principles.md) owns the engineering guidance and
+feature-start questions.
+
 git-forest's architecture decisions live in [`docs/decisions/`](decisions/ADR_INDEX.md). This document says which of those rules a command enforces, where each rule is enforced, and what the enforcement does not prove.
 
 One local command is the gate: `just check`. It runs, in order, `cargo fmt --check`, Clippy for both build channels (`stable` and `beta`) across the whole workspace, all tests for both channels including the policy tests in `crates/policy`, and the positive control in `scripts/policy-control.sh`. CI runs the same `just check`, so the local gate and CI cannot drift. Run it before every commit and before handing work back.
@@ -23,6 +28,7 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | The decide steps of `new`, `rm`, `reset`, `ls` and `init`, and every command's result types and renderers, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `crates/forest/core/src/plan/` |
 | Root composes: ops' public surface is explicit re-exports only; each `run` arm calls at most one command entry point and progress callbacks call no operation; Root adds no predicates over repository, forest or configuration state | Checkable | the searches in "Root composition" |
 | Newtypes are validated once, at construction | Checkable | Search `crates/forest/core/src/paths.rs` for `pub fn new` on each newtype |
+| Features and major organizational areas have local README entrypoints, with one owning document per fact | Checkable | [Documentation convention](README.md), [crate entrypoint contract](../crates/README.md) and changed-link review; ADR 0018 |
 | When a module may become Pure | Judgment | Section "Pure modules" |
 | When a trait earns its place | Judgment | Section "No production traits" |
 
@@ -145,9 +151,27 @@ The script forces `CARGO_TERM_COLOR=never` (CI sets `always`, and colour codes w
 
 ## Planned follow-ups
 
-Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. No temporary sanctioned site and no open question remains today. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `crates/forest/ops/src/git.rs`, `exec`'s spawn of the user's command, the policy crate's `cargo metadata` call, the `branch_state` helper edges, the `reset -> rm` edge and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
+Temporary exceptions name the change that removes them; together they are the to-do list the build enforces. No temporary sanctioned site remains under the implemented rules. Permanent sanctioned boundaries are not on this list: the composition-root functions in `src/lib.rs`, the git wrapper in `crates/forest/ops/src/git.rs`, `exec`'s spawn of the user's command, the policy crate's `cargo metadata` call, the `branch_state` helper edges, the `reset -> rm` edge and the entries in `PURE_ALLOWED_CRATES`. Reason text is reviewed, not checked.
+
+**Update-check ownership: agreed direction, not implemented.** The application
+should supply configured clients and own background startup, shutdown or
+intentional detachment; libraries should expose callable work. This includes
+the update checker. Operation-local file handles and git commands remain
+effects owned by the workflow performing them. The current update-check crate
+still constructs its HTTP client, reads time and spawns the detached process
+itself, as its [README](../crates/update-check/README.md) describes. Its Shell
+classification, lint exemptions and public API above describe today's code;
+they do not establish conformance to this newer direction. Scope and validate
+that ownership change separately before changing the API or gates.
 
 ## Changing the rules
+
+**Adding behavior or a feature.** Answer the
+[feature-start questions](design-principles.md#feature-start-questions) and use
+the [placement test](candidate-features.md). Update the owning feature README;
+a new feature needs an entrypoint following the
+[crate documentation contract](../crates/README.md). Review responsibilities,
+dependency links and proof limits with the code change.
 
 **Adding a module.** Create the file and add it to `MODULES` in `crates/policy/src/classification.rs` with its class. The classification test fails until you do. A module added to the root package must be Root or Pure; effectful code goes into a library crate. If the new module needs an import the class rules refuse, either restructure or add an `ALLOWED_EDGES` entry whose reason names the permanent boundary it is or the change that removes it.
 

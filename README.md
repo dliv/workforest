@@ -154,19 +154,15 @@ git forest exec <name> -- <cmd> [args...]
 
 ## Development
 
-Requires [just](https://just.systems/man/en/) and [tokei](https://github.com/XAMPPRocky/tokei) (for `just loc`).
-
-```
-just setup    # configure git hooks
-just build    # build
-just test     # run all tests
-just check    # fmt, clippy (both channels), all tests incl. policy, positive control
-just loc      # count lines of code
-```
+Start with the [developer documentation](docs/README.md) for setup, commands,
+design guidance and the code map. [Development](docs/development.md) owns the
+local validation workflow; `just check` is the full Rust gate. Agents should
+also read [AGENTS.md](AGENTS.md).
 
 ## Design
 
-See [docs/decisions/](docs/decisions/) for architecture decision records (ADRs). Key principles:
+See the [ADR index](docs/decisions/ADR_INDEX.md) for design decisions and
+[architecture rules](docs/architecture.md) for their enforcement. Key principles:
 
 - **Agent-drivable first** ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)) — all inputs as flags, `--json` on every command
 - **Commands return data, don't print** ([ADR 0002](docs/decisions/0002-functional-core-imperative-shell.md)) — typed result structs, formatted at the edge
