@@ -16,9 +16,11 @@ policy-control:
 build:
     cargo build
 
+# Runs with the global and system git config disabled: the fixtures build real repositories, and a
+# developer's commit signing or global hooks would otherwise fail their commits (docs/architecture.md, "Tests").
 test:
-    cargo test --workspace --locked --no-default-features --features stable
-    cargo test --workspace --locked --no-default-features --features beta
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test --workspace --locked --no-default-features --features stable
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test --workspace --locked --no-default-features --features beta
 
 test-linux:
     docker run --rm -v "{{justfile_directory()}}:/work" -w /work rust:latest cargo test --workspace
