@@ -3,11 +3,11 @@
 
 use std::collections::BTreeSet;
 
+use arch_gates::graph::{check_direction, crate_edges, DirectionViolation, Edge};
 use git_forest_policy::classification::{
     class_allows, crate_modules, module_id, ModuleClass, ModuleId, ALLOWED_EDGES, MODULES,
 };
 use git_forest_policy::repo_root;
-use git_forest_policy::scan::crate_edges;
 
 const SECTION: &str = "see docs/architecture.md, section \"Import direction\"";
 
@@ -62,21 +62,8 @@ fn label(crate_dir: &str, module: &str) -> String {
     }
 }
 
-fn class_rule(class: ModuleClass) -> &'static str {
-    match class {
-        ModuleClass::Root => "Root modules may import anything",
-        ModuleClass::Shell => "Shell modules import only Shared and Pure",
-        ModuleClass::Command => {
-            "Command modules import only Shared, Pure and allowlisted Command modules"
-        }
-        ModuleClass::Shared => "Shared modules import only Shared and Pure",
-        ModuleClass::Pure => "Pure modules import only Pure and allowlisted edges",
-        ModuleClass::TestSupport => "TestSupport modules are not scanned",
-    }
-}
-
 /// Every crate-internal import edge of every scanned module, as (crate directory, from, to).
-fn production_edges() -> BTreeSet<(String, String, String)> {
+fn production_edges() -> BTreeSet<Edge> {
     let mut edges = BTreeSet::new();
     for (file, class) in MODULES {
         if *class == ModuleClass::TestSupport {
@@ -88,69 +75,54 @@ fn production_edges() -> BTreeSet<(String, String, String)> {
         let source = std::fs::read_to_string(repo_root().join(file))
             .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
         for target in crate_edges(&path, &source, &known) {
-            edges.insert((crate_dir.clone(), path.clone(), target));
+            edges.insert(Edge {
+                crate_dir: crate_dir.clone(),
+                from: path.clone(),
+                to: target,
+            });
         }
     }
     edges
 }
 
-fn is_allowlisted(crate_dir: &str, from: &str, to: &str) -> bool {
-    ALLOWED_EDGES
+fn direction_problems() -> Vec<DirectionViolation> {
+    let exceptions: Vec<Edge> = ALLOWED_EDGES
         .iter()
-        .any(|edge| edge.crate_dir == crate_dir && edge.from == from && edge.to == to)
+        .map(|edge| Edge {
+            crate_dir: edge.crate_dir.to_owned(),
+            from: edge.from.to_owned(),
+            to: edge.to.to_owned(),
+        })
+        .collect();
+    check_direction(&production_edges(), &exceptions, |edge| {
+        class_allows(
+            class_of(&edge.crate_dir, &edge.from),
+            class_of(&edge.crate_dir, &edge.to),
+        )
+    })
 }
 
 #[test]
 fn every_import_follows_the_class_rules_or_the_allowlist() {
-    let violations: Vec<String> = production_edges()
-        .iter()
-        .filter(|(crate_dir, from, to)| {
-            !class_allows(class_of(crate_dir, from), class_of(crate_dir, to))
-                && !is_allowlisted(crate_dir, from, to)
-        })
-        .map(|(crate_dir, from, to)| {
-            let from_class = class_of(crate_dir, from);
-            let to_class = class_of(crate_dir, to);
-            format!(
-                "{} -> {to}: a {from_class:?} module imports a {to_class:?} module, but {}. \
-                 Fix: move the import, or add an ALLOWED_EDGES entry with a reason in \
-                 crates/policy/src/classification.rs; {SECTION}.",
-                label(crate_dir, from),
-                class_rule(from_class)
-            )
-        })
+    let violations: Vec<_> = direction_problems()
+        .into_iter()
+        .filter(|problem| !matches!(problem, DirectionViolation::Stale(_)))
         .collect();
     assert!(
         violations.is_empty(),
-        "import direction violations:\n  {}",
-        violations.join("\n  ")
+        "import direction violations ({SECTION}): {violations:?}"
     );
 }
 
 #[test]
 fn every_allowlisted_edge_is_still_imported() {
-    let edges = production_edges();
-    let stale: Vec<String> = ALLOWED_EDGES
-        .iter()
-        .filter(|edge| {
-            !edges.contains(&(
-                edge.crate_dir.to_owned(),
-                edge.from.to_owned(),
-                edge.to.to_owned(),
-            ))
-        })
-        .map(|edge| {
-            format!(
-                "{} -> {} is allowlisted but no longer imported; remove its ALLOWED_EDGES entry ({SECTION})",
-                label(edge.crate_dir, edge.from),
-                edge.to
-            )
-        })
+    let stale: Vec<_> = direction_problems()
+        .into_iter()
+        .filter(|problem| matches!(problem, DirectionViolation::Stale(_)))
         .collect();
     assert!(
         stale.is_empty(),
-        "stale allowlist entries:\n  {}",
-        stale.join("\n  ")
+        "stale allowlist entries ({SECTION}): {stale:?}"
     );
 }
 

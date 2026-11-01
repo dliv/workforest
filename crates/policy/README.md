@@ -30,3 +30,10 @@ local. The engine's Pure scanner fixtures run in its own `just check`; the
 consumer gate explicitly invokes its checker. Root scanning and remaining
 machinery are not migrated in this first slice. The local Git pin is a
 machine-local checkpoint pending engine publication and portable qualification.
+
+Coverage and direction now call arch-gates from the classification/direction
+integration tests. Workforest still owns source observation, containment rules,
+role matrices and allowed edges/reasons. The shared functions compare discovered
+files with that map, discover internal paths, and evaluate direction plus stale
+exceptions. The donor controls remain in normal validation; remaining library
+helpers are retained for unmigrated checks until their separate extraction.

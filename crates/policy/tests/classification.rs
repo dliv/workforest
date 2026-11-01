@@ -59,14 +59,12 @@ fn every_source_file_has_exactly_one_class() {
         collect_rust_files(&root, &root.join(&member.dir).join("src"), &mut on_disk);
     }
 
-    let mut problems = Vec::new();
-    let mut classified = BTreeSet::new();
+    let files: Vec<&str> = MODULES.iter().map(|(file, _)| *file).collect();
+    let mut problems: Vec<String> = arch_gates::graph::check_coverage(&on_disk, &files)
+        .into_iter()
+        .map(|problem| format!("{problem:?}"))
+        .collect();
     for (file, class) in MODULES {
-        if !classified.insert((*file).to_owned()) {
-            problems.push(format!(
-                "{file} is listed in MODULES more than once; keep one entry"
-            ));
-        }
         let Some(ModuleId { crate_dir, .. }) = module_id(file) else {
             problems.push(format!(
                 "{file} in MODULES is not a path of the form [<crate directory>/]src/<module>.rs"
@@ -92,16 +90,6 @@ fn every_source_file_has_exactly_one_class() {
                 *class,
             ));
         }
-    }
-    for file in on_disk.difference(&classified) {
-        problems.push(format!(
-            "{file} is not classified; add it to MODULES in crates/policy/src/classification.rs with its class"
-        ));
-    }
-    for file in classified.difference(&on_disk) {
-        problems.push(format!(
-            "{file} is listed in MODULES but does not exist; remove the entry"
-        ));
     }
     assert!(
         problems.is_empty(),

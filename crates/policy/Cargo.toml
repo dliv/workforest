@@ -11,4 +11,4 @@ serde_json = "1"
 workspace = true
 
 [dev-dependencies]
-arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "9934cc7bace6def3b9c543862ceb9b7343b29a39" }
+arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "b1505546991527da3cdd9c7c3969781fed88b2de" }

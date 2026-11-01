@@ -216,3 +216,16 @@ its native compiler inventory. No product runtime code moves.
 This local dependency needs this machine's engine repository. Publication,
 replacement with a published immutable revision and independent checkout/CI
 qualification are outstanding; this is not a portable consumer candidate.
+
+## Shared coverage and direction: local checkpoint
+
+The classification and direction integration tests now invoke arch-gates'
+coverage evaluator, internal-path scanner and direction/exception evaluator.
+Product discovery still uses local Cargo observation, walks unknown product
+members, and retains Workforest's local module-class containment checks. The
+file map, class matrix, allowed edges and their reasons remain in this repository.
+The existing classification, direction scanner fixtures, count guard and stale
+allowance tests still run through normal `just check`. The engine also carries
+the generic fixture cases. Other metadata/package, Root and trait machinery
+stays local. The same documented scanner limitations and local-Git publication
+limits apply. No runtime code or product behavior changed.
