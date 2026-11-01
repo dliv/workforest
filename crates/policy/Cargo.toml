@@ -8,4 +8,5 @@ publish = false
 workspace = true
 
 [dev-dependencies]
-arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "76a3861dd133515660819ad4376087a01ffb148b" }
+arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "34b33664e227c99376ae03b3ff628da00618a507" }
+toml = "1"

@@ -8,11 +8,9 @@ use crate::support::classification::{
     crates_allowed_in_pure_modules, module_id, ModuleClass, MODULES, PURE_ALLOWED_CRATES,
 };
 use crate::support::edges::{CrateClass, CRATES};
+use crate::support::{ambient_violations, external_crate_references, root_ambient_violations};
 use arch_gates::manifest::dependency_crate_names;
 use git_forest_policy::repo_root;
-use git_forest_policy::scan::{
-    ambient_violations, external_crate_references, root_ambient_violations,
-};
 
 const SECTION: &str = "see docs/architecture.md, section \"Pure modules\"";
 const ROOT_SECTION: &str = "see docs/architecture.md, section \"Root effects\"";
@@ -235,7 +233,7 @@ fn pure_modules_use_only_allowed_crates() {
     assert!(
         problems.is_empty(),
         "Pure modules may use only the dependency crates in PURE_ALLOWED_CRATES \
-         (crates/policy/src/classification.rs) and Pure workspace crates; move the call into a \
+         (crates/policy/tests/support/classification.rs) and Pure workspace crates; move the call into a \
          Shared or Root module, or allow the crate there with a reason ({SECTION}):\n  {}",
         problems.join("\n  ")
     );

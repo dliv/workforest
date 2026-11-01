@@ -13,3 +13,6 @@ mod scanner;
 mod support;
 #[path = "checks/traits.rs"]
 mod traits;
+
+#[path = "checks/native.rs"]
+mod native;

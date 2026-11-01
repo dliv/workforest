@@ -15,11 +15,16 @@ classes, external lists, feature layout, direction permissions and reasons.
 
 The shared engine is a pinned Git dev-dependency. `arch_gates::metadata`,
 `manifest` and `packages` parse supplied facts and evaluate dependencies/features;
-`graph` and the Pure scanner evaluate the earlier shared checks. The engine
-performs no consumer observation. The real workspace and planted controls in
-[checks](tests/checks/) remain in normal `just check`; all previous 39 tests run.
-Root/trait and remaining scanner code stay local in [src/scan.rs](src/scan.rs)
-and [src/tokens.rs](src/tokens.rs) pending their separate extraction.
+`graph` and `scan` evaluate coverage/direction, Pure/Root effects, external
+references and trait discovery. The engine performs no consumer observation.
+The real workspace and planted controls in [checks](tests/checks/) remain in
+normal `just check`; all previous 39 tests run. The duplicate normal-library
+scanner/token code is removed. Workforest's Root permissions, external lists,
+trait acceptance and diagnostics stay in local integration support/checks.
+
+[Native consistency](tests/checks/native.rs) adds the fortieth policy test: it
+checks Workforest's own method/print/debug baseline and pairs Root environment
+permissions with native bans. TOML parsing is a policy dev-dependency only.
 
 The [native control inventory](control-expected.txt) and shell adapter stay local.
 The Cargo spawn is still inventoried at its original source file, with the

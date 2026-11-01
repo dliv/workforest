@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use git_forest_policy::scan::{
+use crate::support::{
     ambient_violations, crate_edges, external_crate_references, trait_declarations,
 };
 

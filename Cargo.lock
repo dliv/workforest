@@ -85,7 +85,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "arch-gates"
 version = "0.1.0"
-source = "git+file:///Users/davidlivingston/aw/p/arch-gates?rev=76a3861dd133515660819ad4376087a01ffb148b#76a3861dd133515660819ad4376087a01ffb148b"
+source = "git+file:///Users/davidlivingston/aw/p/arch-gates?rev=34b33664e227c99376ae03b3ff628da00618a507#34b33664e227c99376ae03b3ff628da00618a507"
 dependencies = [
  "serde_json",
 ]
@@ -489,6 +489,7 @@ name = "git-forest-policy"
 version = "0.0.0"
 dependencies = [
  "arch-gates",
+ "toml",
 ]
 
 [[package]]

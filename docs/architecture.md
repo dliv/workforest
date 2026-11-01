@@ -22,7 +22,7 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 | Code outside ops cannot name ops' private modules, functions or other private items | Gated | Rust visibility, checked by the workspace builds in `just check` |
 | Every workspace member has one crate class, and crate dependencies follow the class rules | Gated | `crates/policy/tests/support/edges.rs` (`CRATES`, `EFFECTFUL_ALLOWED_CRATES`, `EDGE_ALLOWED_CRATES`), `PURE_ALLOWED_CRATES`; `crates/policy/tests/checks/edges.rs` |
 | Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/checks/ambient.rs`; `PURE_ALLOWED_CRATES` |
-| Root modules contain none of the source forms forbidden by the Root profile | Gated | `crates/policy/src/scan.rs`; `crates/policy/tests/checks/ambient.rs` |
+| Root modules contain none of the source forms forbidden by the Root profile | Gated | `arch_gates::scan`; `crates/policy/tests/checks/ambient.rs` |
 | Production code declares no traits | Gated | `crates/policy/tests/checks/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
 | The decide steps of `new`, `rm`, `reset`, `ls` and `init`, and every command's result types and renderers, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/checks/ambient.rs` and `crates/policy/tests/checks/direction.rs` over `crates/forest/core/src/plan/` |
@@ -104,7 +104,7 @@ When may a module become Pure? When its own production code has none of the effe
 
 ## Root effects
 
-The Root profile of the ambient scan applies to the production tokens of every Root file (`src/lib.rs` and the binaries); `crates/policy/tests/checks/ambient.rs` fails when it reports anything. It is the same token scanner as the Pure profile (`crates/policy/src/scan.rs`), and it reports:
+The Root profile of the ambient scan applies to the production tokens of every Root file (`src/lib.rs` and the binaries); `crates/policy/tests/checks/ambient.rs` fails when it reports anything. It is the same token scanner as the Pure profile (`arch_gates::scan`), and it reports:
 
 - any use of `std::fs`, `std::net` or `std::thread`, inline or imported, and through aliases;
 - any path through `std::env` other than the namespace itself (`use std::env;` is allowed, and every use through it is checked), `std::env::args_os` and `std::env::ArgsOs`, which read the process arguments the composition root parses, `std::env::var`, `std::env::var_os` and `std::env::current_dir`, which read the environment and working directory passed into workflows, and `std::env::current_exe`, which the app-owned refresh launcher uses;
@@ -208,10 +208,11 @@ dependency links and proof limits with the code change.
 
 `crates/policy/tests/checks/ambient.rs` invokes arch-gates for the actual Pure-source
 scan. The engine is a pinned local Git dev-dependency of policy, used only in
-integration tests. Root, graph, dependency and trait checks and their data stay
-local in this first slice; the donor scanner remains for those unmigrated checks
-and their controls. The Cargo spawn stays in local `src/metadata.rs`, retaining
-its native compiler inventory. No product runtime code moves.
+integration tests. Pure/Root, graph, external-reference, trait and package
+machinery is now shared; classifications, allowances and trait acceptance remain
+local. The duplicate normal-library scanner/token code has been removed after
+preserving all donor controls. The Cargo spawn stays in local `src/metadata.rs`,
+retaining its native compiler inventory. No product runtime code moves.
 
 This local dependency needs this machine's engine repository. Publication,
 replacement with a published immutable revision and independent checkout/CI
@@ -226,9 +227,9 @@ members, and retains Workforest's local module-class containment checks. The
 file map, class matrix, allowed edges and their reasons remain in this repository.
 The existing classification, direction scanner fixtures, count guard and stale
 allowance tests still run through normal `just check`. The engine also carries
-the generic fixture cases. Other metadata/package, Root and trait machinery
-stays local. The same documented scanner limitations and local-Git publication
-limits apply. No runtime code or product behavior changed.
+the generic fixture cases. Metadata/package, Root and trait discovery also use
+the shared engine, with local policy data. The same documented scanner limitations
+and local-Git publication limits apply. No runtime code or product behavior changed.
 
 ## Shared metadata and package evaluation
 
@@ -248,3 +249,26 @@ normal/build/dev declarations. Tooling uses the engine only as a dev-dependency.
 Error reasons for internal edges come from local policy; the engine imposes no
 Workforest directory layout. Declared feature checks retain their default-feature
 and transitive-capability nonclaims. See ADR 0020 and the policy README.
+
+## Shared scanner and native-policy consistency
+
+`arch_gates::scan` owns Root effect evaluation, external-crate references and
+trait discovery. The normal policy library now contains only root discovery
+and the Cargo adapter. `tests/support/mod.rs` supplies Workforest's exact Root
+environment list, including `current_exe`; the engine has no product defaults.
+Local tests retain the no-unsanctioned-traits rule, stale trait allowances and
+Pure external allowances. All 39 original controls remain; the single integration
+target adds one native consistency test, for 40 policy tests per channel.
+
+`tests/checks/native.rs` parses the actual root Clippy/Cargo configuration,
+requires Workforest's own method and print/debug lint baseline, accepts stronger
+lint levels, and checks every permitted Root environment function has its native
+method ban. `ArgsOs` is a type and needs no method ban. Slopid's explicit macro
+list and random-method ban are not Workforest requirements. This configuration
+check supplements the unchanged shell adapter and 60-site compiler inventory;
+it does not by itself prove a lint fires or an exemption's reason is sound.
+
+Engine fixtures separately exercise Root permissions, external references,
+traits and the shared production-token grammar. Consumer tests call the same
+APIs through the normal gate. Existing bounded-grammar, transitive-purity and
+local-Git publication limits continue to apply. See ADR 0020.

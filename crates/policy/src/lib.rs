@@ -9,8 +9,6 @@
 use std::path::{Path, PathBuf};
 
 pub mod metadata;
-pub mod scan;
-mod tokens;
 
 /// The repository root: the directory holding the root `Cargo.toml` and `src/`.
 pub fn repo_root() -> PathBuf {

@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::support::classification::{module_id, ModuleClass, ModuleId, MODULES};
+use crate::support::trait_declarations;
 use git_forest_policy::repo_root;
-use git_forest_policy::scan::trait_declarations;
 
 const SECTION: &str = "see docs/architecture.md, section \"No production traits\"";
 
@@ -51,7 +51,7 @@ fn production_code_declares_no_unsanctioned_traits() {
     for (crate_dir, module, name) in declared.difference(&allowed) {
         problems.push(format!(
             "Declared but not allowed: {} declares trait {name}; use a concrete type or an \
-             enum, or add it to ALLOWED_TRAITS in crates/policy/tests/traits.rs with a reason",
+             enum, or add it to ALLOWED_TRAITS in crates/policy/tests/checks/traits.rs with a reason",
             label(crate_dir, module)
         ));
     }
