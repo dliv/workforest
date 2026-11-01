@@ -24,5 +24,9 @@ Follow [Changing the rules](../../docs/architecture.md#changing-the-rules)
 when adding a module, crate, allowed dependency or exemption. Review the reason
 and corresponding failure control together; do not update an expected count
 just to make a changed warning disappear. The scanner catches ordinary drift,
-not every spelling or effect hidden behind a dependency. Sharing this engine
-with another project is a separate design change; it remains local today.
+not every spelling or effect hidden behind a dependency. The actual Pure-source check in `tests/ambient.rs` now calls arch-gates as a
+pinned local Git dev-dependency. File selection and the other checks remain
+local. The engine's Pure scanner fixtures run in its own `just check`; the
+consumer gate explicitly invokes its checker. Root scanning and remaining
+machinery are not migrated in this first slice. The local Git pin is a
+machine-local checkpoint pending engine publication and portable qualification.

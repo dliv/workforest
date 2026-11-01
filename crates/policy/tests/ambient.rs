@@ -28,8 +28,8 @@ fn pure_modules_have_no_ambient_effects() {
         scanned += 1;
         let source = std::fs::read_to_string(repo_root().join(file))
             .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
-        for violation in ambient_violations(&source) {
-            problems.push(format!("{file}: {violation}"));
+        for violation in arch_gates::check_pure_source(file, &source) {
+            problems.push(format!("{}: {}", violation.file, violation.form));
         }
     }
     assert!(scanned > 0, "no Pure module was scanned ({SECTION})");

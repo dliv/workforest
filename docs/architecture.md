@@ -203,3 +203,16 @@ dependency links and proof limits with the code change.
 - A `clippy.toml` entry with no call site anywhere is covered only by Clippy's own "does not refer to a reachable function" warning, and that warning is not emitted when the path's first segment names a crate that is not loaded, so such an entry could do nothing unnoticed. This was confirmed on Clippy 0.1.95 by an experiment that replaced an unused entry with a path under an unloaded crate and saw no warning.
 - The Rust toolchain is not pinned. A future stable Clippy may add lints that fail `-D warnings`, as it already could before these gates existed.
 - CI installs `just` from the Ubuntu archive on an `ubuntu-24.04` runner; that step was untested when the gates were introduced, and only a push or pull request exercises it.
+
+## Shared Pure scanner: local checkpoint
+
+`crates/policy/tests/ambient.rs` invokes arch-gates for the actual Pure-source
+scan. The engine is a pinned local Git dev-dependency of policy, used only in
+integration tests. Root, graph, dependency and trait checks and their data stay
+local in this first slice; the donor scanner remains for those unmigrated checks
+and their controls. The Cargo spawn stays in local `src/metadata.rs`, retaining
+its native compiler inventory. No product runtime code moves.
+
+This local dependency needs this machine's engine repository. Publication,
+replacement with a published immutable revision and independent checkout/CI
+qualification are outstanding; this is not a portable consumer candidate.
