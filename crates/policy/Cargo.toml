@@ -4,11 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-[dependencies]
-serde_json = "1"
-
 [lints]
 workspace = true
 
 [dev-dependencies]
-arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "b1505546991527da3cdd9c7c3969781fed88b2de" }
+arch-gates = { git = "file:///Users/davidlivingston/aw/p/arch-gates", rev = "76a3861dd133515660819ad4376087a01ffb148b" }

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use git_forest_policy::classification::{module_id, ModuleClass, ModuleId, MODULES};
+use crate::support::classification::{module_id, ModuleClass, ModuleId, MODULES};
 use git_forest_policy::repo_root;
 use git_forest_policy::scan::trait_declarations;
 

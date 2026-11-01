@@ -3,10 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use arch_gates::graph::{check_direction, crate_edges, DirectionViolation, Edge};
-use git_forest_policy::classification::{
+use crate::support::classification::{
     class_allows, crate_modules, module_id, ModuleClass, ModuleId, ALLOWED_EDGES, MODULES,
 };
+use arch_gates::graph::{check_direction, crate_edges, DirectionViolation, Edge};
 use git_forest_policy::repo_root;
 
 const SECTION: &str = "see docs/architecture.md, section \"Import direction\"";
@@ -88,10 +88,16 @@ fn production_edges() -> BTreeSet<Edge> {
 fn direction_problems() -> Vec<DirectionViolation> {
     let exceptions: Vec<Edge> = ALLOWED_EDGES
         .iter()
-        .map(|edge| Edge {
-            crate_dir: edge.crate_dir.to_owned(),
-            from: edge.from.to_owned(),
-            to: edge.to.to_owned(),
+        .map(|edge| {
+            assert!(
+                !edge.reason.trim().is_empty(),
+                "allowed edges require a reason"
+            );
+            Edge {
+                crate_dir: edge.crate_dir.to_owned(),
+                from: edge.from.to_owned(),
+                to: edge.to.to_owned(),
+            }
         })
         .collect();
     check_direction(&production_edges(), &exceptions, |edge| {

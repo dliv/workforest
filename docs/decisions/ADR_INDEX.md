@@ -25,3 +25,4 @@ Format: `NNNN-short-title.md` with sections: Context, Decision, Consequences.
 | [0017](0017-crate-layout.md) | Crate Layout | Accepted |
 | [0018](0018-local-documentation-entrypoints.md) | Local Documentation Entrypoints | Accepted |
 | [0019](0019-app-owned-update-check-resources.md) | App-Owned Update-Check Resources and Process Lifetime | Accepted and implemented |
+| [0020](0020-shared-policy-engine.md) | Shared policy engine with consumer-owned observation | Accepted locally |

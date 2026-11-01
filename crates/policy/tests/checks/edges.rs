@@ -3,15 +3,15 @@
 
 use std::path::PathBuf;
 
-use git_forest_policy::classification::PURE_ALLOWED_CRATES;
-use git_forest_policy::edges::{
+use crate::support::classification::PURE_ALLOWED_CRATES;
+use crate::support::edges::{
     check_edges, CrateClass, ExternalAllowlists, CRATES, EDGE_ALLOWED_CRATES,
     EFFECTFUL_ALLOWED_CRATES,
 };
-use git_forest_policy::manifest::manifest_inherits_workspace_lints;
-use git_forest_policy::metadata::{
+use crate::support::metadata::{
     parse_members, workspace_members, Dependency, DependencyKind, Features, ListedMember, Member,
 };
+use arch_gates::manifest::manifest_inherits_workspace_lints;
 
 const SECTION: &str = "see docs/architecture.md, section \"Crate classes and edges\"";
 
@@ -496,6 +496,7 @@ fn members_parse_the_cargo_metadata_shape() {
     let metadata = r#"{
   "packages": [
     {
+      "id": "app-id",
       "name": "app",
       "version": "1.0.0",
       "manifest_path": "/ws/Cargo.toml",
@@ -511,6 +512,7 @@ fn members_parse_the_cargo_metadata_shape() {
       ]
     },
     {
+      "id": "widgets-id",
       "name": "widgets-core",
       "version": "0.0.0",
       "manifest_path": "/ws/crates/widgets/core/Cargo.toml",
@@ -524,7 +526,7 @@ fn members_parse_the_cargo_metadata_shape() {
       ]
     }
   ],
-  "workspace_members": [],
+  "workspace_members": ["app-id", "widgets-id"],
   "workspace_root": "/ws"
 }"#;
 
@@ -590,9 +592,16 @@ fn members_parse_the_cargo_metadata_shape() {
         "not json",
         "{}",
         r#"{"workspace_root": "/ws", "packages": [{}]}"#,
-        r#"{"workspace_root": "/ws", "packages": [{"name": "app", "manifest_path": "/ws/Cargo.toml", "targets": [], "dependencies": [], "features": {"default": "compressed"}}]}"#,
+        r#"{"workspace_root": "/ws", "workspace_members": ["app-id"], "packages": [{"id": "app-id", "name": "app", "manifest_path": "/ws/Cargo.toml", "targets": [], "dependencies": [], "features": {"default": "compressed"}}]}"#,
     ] {
         let error = parse_members(malformed).expect_err("a malformed document is an error");
+        if malformed.contains(r#""default": "compressed""#) {
+            assert!(
+                error.contains("package app, feature default")
+                    && error.contains("enabled features"),
+                "wrong malformed-feature rejection: {error}"
+            );
+        }
         assert!(
             error.contains("cargo metadata"),
             "the error names cargo metadata: {error}"

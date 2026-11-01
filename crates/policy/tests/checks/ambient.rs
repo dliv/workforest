@@ -4,11 +4,11 @@
 
 use std::collections::BTreeSet;
 
-use git_forest_policy::classification::{
+use crate::support::classification::{
     crates_allowed_in_pure_modules, module_id, ModuleClass, MODULES, PURE_ALLOWED_CRATES,
 };
-use git_forest_policy::edges::{CrateClass, CRATES};
-use git_forest_policy::manifest::dependency_crate_names;
+use crate::support::edges::{CrateClass, CRATES};
+use arch_gates::manifest::dependency_crate_names;
 use git_forest_policy::repo_root;
 use git_forest_policy::scan::{
     ambient_violations, external_crate_references, root_ambient_violations,

@@ -17,15 +17,15 @@ The gates exist to catch architectural drift in ordinary code: a person or an ag
 |------|------|------|
 | Environment, arguments, working directory, executable path, exit, process spawning and the clock are read only at sanctioned sites | Gated | Root `clippy.toml` (`disallowed-methods`); `#[expect]` at each sanctioned site |
 | Only the shell uses the standard streams: print macros by lint, stream handles by the ban list, `dbg!` nowhere in product code | Gated | `[workspace.lints.clippy]` in the root `Cargo.toml` (`print_stdout`, `print_stderr`, `dbg_macro`), inherited by every member through `[lints] workspace = true`; root `clippy.toml` (`std::io::stdout`, `stderr`, `stdin`); `#[expect]` at each sanctioned site |
-| Every product source file has one module class; Pure crates contain only Pure files, the Binary crate only Root or Pure files, and only the Binary crate holds Root files | Gated | `crates/policy/src/classification.rs`; `crates/policy/tests/classification.rs` |
-| Crate-internal imports follow the class direction | Gated | `crates/policy/tests/direction.rs`; `ALLOWED_EDGES` |
+| Every product source file has one module class; Pure crates contain only Pure files, the Binary crate only Root or Pure files, and only the Binary crate holds Root files | Gated | `crates/policy/tests/support/classification.rs`; `crates/policy/tests/checks/classification.rs` |
+| Crate-internal imports follow the class direction | Gated | `crates/policy/tests/checks/direction.rs`; `ALLOWED_EDGES` |
 | Code outside ops cannot name ops' private modules, functions or other private items | Gated | Rust visibility, checked by the workspace builds in `just check` |
-| Every workspace member has one crate class, and crate dependencies follow the class rules | Gated | `crates/policy/src/edges.rs` (`CRATES`, `EFFECTFUL_ALLOWED_CRATES`, `EDGE_ALLOWED_CRATES`), `PURE_ALLOWED_CRATES`; `crates/policy/tests/edges.rs` |
-| Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/ambient.rs`; `PURE_ALLOWED_CRATES` |
-| Root modules contain none of the source forms forbidden by the Root profile | Gated | `crates/policy/src/scan.rs`; `crates/policy/tests/ambient.rs` |
-| Production code declares no traits | Gated | `crates/policy/tests/traits.rs` |
+| Every workspace member has one crate class, and crate dependencies follow the class rules | Gated | `crates/policy/tests/support/edges.rs` (`CRATES`, `EFFECTFUL_ALLOWED_CRATES`, `EDGE_ALLOWED_CRATES`), `PURE_ALLOWED_CRATES`; `crates/policy/tests/checks/edges.rs` |
+| Pure modules contain none of the effects the purity scan lists (see "Pure modules") | Gated | `crates/policy/tests/checks/ambient.rs`; `PURE_ALLOWED_CRATES` |
+| Root modules contain none of the source forms forbidden by the Root profile | Gated | `crates/policy/src/scan.rs`; `crates/policy/tests/checks/ambient.rs` |
+| Production code declares no traits | Gated | `crates/policy/tests/checks/traits.rs` |
 | The bans still fire at every sanctioned site, and every ban path resolves | Gated | `scripts/policy-control.sh`; `crates/policy/control-expected.txt` |
-| The decide steps of `new`, `rm`, `reset`, `ls` and `init`, and every command's result types and renderers, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/ambient.rs` and `crates/policy/tests/direction.rs` over `crates/forest/core/src/plan/` |
+| The decide steps of `new`, `rm`, `reset`, `ls` and `init`, and every command's result types and renderers, live in Pure modules (ADR 0003) | Gated | `crates/policy/tests/checks/ambient.rs` and `crates/policy/tests/checks/direction.rs` over `crates/forest/core/src/plan/` |
 | Root composes: ops' public surface is explicit re-exports only; each `run` arm calls at most one command entry point and progress callbacks call no operation; Root adds no predicates over repository, forest or configuration state | Checkable | the searches in "Root composition" |
 | Newtypes are validated once, at construction | Checkable | Search `crates/forest/core/src/paths.rs` for `pub fn new` on each newtype |
 | Features and major organizational areas have local README entrypoints, with one owning document per fact | Checkable | [Documentation convention](README.md), [crate entrypoint contract](../crates/README.md) and changed-link review; ADR 0018 |
@@ -36,7 +36,7 @@ An "ambient effect" is anything that reads or changes the outside world without 
 
 ## Module classes
 
-Every `.rs` file under the `src/` directory of every workspace member except the policy crate has exactly one class, listed in `MODULES` in `crates/policy/src/classification.rs` by its path from the repository root. The classification test takes the members from `cargo metadata` (see "Crate classes and edges"), walks the `src/` beside each one's manifest, an unclassified member's too, and fails when a file is missing from that list, listed twice, or listed but gone, when an entry is not under such a directory, or when a file's class is one its crate's class does not hold: a file of a Pure crate classified anything but Pure, a file of the Binary crate classified anything but Root or Pure, or a file of an Effectful or Edge crate classified Root (`crate_holds_module_class`). A member missing from `CRATES` has no crate class, so this last rule skips its files; the edges test reports the member.
+Every `.rs` file under the `src/` directory of every workspace member except the policy crate has exactly one class, listed in `MODULES` in `crates/policy/tests/support/classification.rs` by its path from the repository root. The classification test takes the members from `cargo metadata` (see "Crate classes and edges"), walks the `src/` beside each one's manifest, an unclassified member's too, and fails when a file is missing from that list, listed twice, or listed but gone, when an entry is not under such a directory, or when a file's class is one its crate's class does not hold: a file of a Pure crate classified anything but Pure, a file of the Binary crate classified anything but Root or Pure, or a file of an Effectful or Edge crate classified Root (`crate_holds_module_class`). A member missing from `CRATES` has no crate class, so this last rule skips its files; the edges test reports the member.
 
 - **Root**: `src/lib.rs` and the binaries in `src/bin/`. The composition root reads process arguments, environment, working directory and command time, resolves config and state paths, loads forest configuration through `git_forest_ops::config`, dispatches commands, prints results and decides exit codes. For update checks it supplies a configured HTTP agent, endpoint and clock, and owns the executable lookup and one-shot child launch. Root may import anything. The classification rule constrains declarations, not effects: what a Root file's source may contain is the Root profile's job ("Root effects"), and how it composes the commands is a checkable rule ("Root composition").
 - **Shell / update-check edge**: `crates/update-check/src/lib.rs`, the outbound protocol workflow: it owns cache and config reads, freshness and enablement decisions, the HTTP call, state writes and existing notices. It receives its HTTP agent, endpoint and clock from Root and returns a typed refresh disposition; it starts no process and imports no workspace member.
@@ -49,7 +49,7 @@ Nothing except Root imports Root.
 
 ## Crate classes and edges
 
-Every workspace member has exactly one crate class, listed in `CRATES` in `crates/policy/src/edges.rs`:
+Every workspace member has exactly one crate class, listed in `CRATES` in `crates/policy/tests/support/edges.rs`:
 
 - **Pure** (`CrateClass::Pure { feature }`): a crate of Pure modules only, for one feature, living at `crates/<feature>/<role>/`. This is `crates/forest/core` (`git-forest-core`, feature `forest`): the forest's decisions, types and renderers.
 - **Effectful** (`CrateClass::Effectful { feature }`): a feature's effectful workflow (observing and executing what the feature's Pure crate decides), living at `crates/<feature>/<role>/`. It depends only on Pure and Effectful crates of its own feature and on the external crates in `EFFECTFUL_ALLOWED_CRATES`. This is `crates/forest/ops` (`git-forest-ops`, feature `forest`): every command's observe and execute steps, the git wrapper, forest discovery and metadata I/O, and the config file's I/O. Its allowed crates are `anyhow`, `chrono`, `directories`, `libc` and `toml`. Its public surface is explicit re-exports only: the command entry points, renderers and the types the root names, three config functions (`default_config_path`, `xdg_state_dir`, `load_default_config`) and `resolve_forest_multi`. Every observe, plan and execute step, the git wrapper and the metadata and config-file helpers are private to the crate.
@@ -59,15 +59,15 @@ Every workspace member has exactly one crate class, listed in `CRATES` in `crate
 
 The full layout is in ADR 0017; what makes work a feature, and why the forest is the only one, is in `docs/candidate-features.md`.
 
-`crates/policy/tests/edges.rs` runs `cargo metadata --format-version 1 --no-deps --offline`, which lists the members and the dependencies each one declares without the network and without touching `Cargo.lock`, and reads each member's `Cargo.toml` for the one fact `cargo metadata` does not report, its `[lints]` table. It fails when:
+`crates/policy/tests/checks/edges.rs` runs `cargo metadata --format-version 1 --no-deps --offline`, which lists the members and the dependencies each one declares without the network and without touching `Cargo.lock`, and reads each member's `Cargo.toml` for the one fact `cargo metadata` does not report, its `[lints]` table. It fails when:
 
 - a member is missing from `CRATES`, a package is listed in `CRATES` more than once (with one class or with several), or a `CRATES` entry is not a member: every member appears in `CRATES` exactly once;
 - a Pure crate has a build script, or a feature crate (Pure or Effectful) does not live at `crates/<its feature>/<role>`;
 - a member has a path dependency, of any kind, on a package that is not a member;
 - a member depends on a Tooling crate, in any dependency table;
 - a normal or build dependency between members goes against the direction: a Pure crate depends only on Pure crates of its own feature, an Effectful crate only on Pure and Effectful crates of its own feature, an Edge crate on no member, a Binary crate on any member except Tooling, and a Tooling crate on no member;
-- a Pure crate has a normal or build dependency on an external crate that is not in `PURE_ALLOWED_CRATES` (`crates/policy/src/classification.rs`), or declares a feature of an allowed crate that the list does not pin for it. The pins cover both the features declared on the dependency and the features the crate's own `[features]` table forwards to it (`<dep>/<feat>` and `<dep>?/<feat>`, where `<dep>` is the name the manifest declares the dependency under, its rename if it has one); a `dep:<name>` entry or a bare feature name forwards nothing. The pins are `chrono`'s `serde`, `clap`'s `derive`, `serde`'s `derive` and `toml`'s `display`, `parse`, `serde` and `std` (declared with `default-features = false`; its `debug` feature, which prints parser events to standard error and reads color variables, is not pinned); `anyhow` has none;
-- an Effectful crate has a normal or build dependency on an external crate that is not in `EFFECTFUL_ALLOWED_CRATES`, or an Edge crate on one that is not in `EDGE_ALLOWED_CRATES` (both in `crates/policy/src/edges.rs`), or an entry of either list is not declared, as a normal or build dependency, by any crate of its class. These two lists name crates only: features are not pinned, because code in these classes performs effects by design, and the list's job is which clients and libraries the class uses, not which capabilities;
+- a Pure crate has a normal or build dependency on an external crate that is not in `PURE_ALLOWED_CRATES` (`crates/policy/tests/support/classification.rs`), or declares a feature of an allowed crate that the list does not pin for it. The pins cover both the features declared on the dependency and the features the crate's own `[features]` table forwards to it (`<dep>/<feat>` and `<dep>?/<feat>`, where `<dep>` is the name the manifest declares the dependency under, its rename if it has one); a `dep:<name>` entry or a bare feature name forwards nothing. The pins are `chrono`'s `serde`, `clap`'s `derive`, `serde`'s `derive` and `toml`'s `display`, `parse`, `serde` and `std` (declared with `default-features = false`; its `debug` feature, which prints parser events to standard error and reads color variables, is not pinned); `anyhow` has none;
+- an Effectful crate has a normal or build dependency on an external crate that is not in `EFFECTFUL_ALLOWED_CRATES`, or an Edge crate on one that is not in `EDGE_ALLOWED_CRATES` (both in `crates/policy/tests/support/edges.rs`), or an entry of either list is not declared, as a normal or build dependency, by any crate of its class. These two lists name crates only: features are not pinned, because code in these classes performs effects by design, and the list's job is which clients and libraries the class uses, not which capabilities;
 - a member's manifest does not inherit the workspace lints, which takes a `[lints]` table containing `workspace = true`.
 
 Dev-dependencies are exempt from the direction and from every allowlist, except that none may point at Tooling: a Pure crate's tests may use `serde_json` or a Binary crate without its production code depending on them.
@@ -76,7 +76,7 @@ Together with the compiler this decides what a crate's code can reach. Rust refu
 
 ## Import direction
 
-`crates/policy/tests/direction.rs` computes, for every module except TestSupport, the crate-internal modules it refers to, and checks each edge against the class rules above. Edges are computed within one crate: a module's identity is its crate's directory and its path inside that crate, split at the file path's first `src` component, so each crate's `src/lib.rs` is that crate's `crate`, and known modules, classes and `ALLOWED_EDGES` entries are looked up in the module's own crate. A path into another workspace crate starts with that crate's name and is not an edge here: every module class may use a Pure crate, and the edges test checks the crate dependency itself. An edge is any path that starts with `crate::`, `super::` or `self::` in the module's production code, written inline or inside a `use` tree (`use super::rm::{self, X}` counts as `super::rm`). A path is read once, from its first segment, so `super::super::channel::APP_NAME` in `commands::rm` climbs two levels and is an edge to `channel`. `super` and `self` resolve against the module's own path plus any inline `mod name { ... }` blocks around them: inside an inline module `child` of `src/channel.rs`, `super::APP_NAME` refers to `channel` itself. Each path is cut back to the longest known module, so `crate::meta::read` is an edge to `meta`. Edges to the module itself, including its inline modules, and to its own child modules are dropped. Visibility qualifiers such as `pub(crate)` and `pub(in crate::commands)` are not edges. Code inside an inline module whose attributes include `#[cfg(test)]`, whatever its visibility and other attributes, is not production code and is skipped; so are comments and string literals.
+`crates/policy/tests/checks/direction.rs` computes, for every module except TestSupport, the crate-internal modules it refers to, and checks each edge against the class rules above. Edges are computed within one crate: a module's identity is its crate's directory and its path inside that crate, split at the file path's first `src` component, so each crate's `src/lib.rs` is that crate's `crate`, and known modules, classes and `ALLOWED_EDGES` entries are looked up in the module's own crate. A path into another workspace crate starts with that crate's name and is not an edge here: every module class may use a Pure crate, and the edges test checks the crate dependency itself. An edge is any path that starts with `crate::`, `super::` or `self::` in the module's production code, written inline or inside a `use` tree (`use super::rm::{self, X}` counts as `super::rm`). A path is read once, from its first segment, so `super::super::channel::APP_NAME` in `commands::rm` climbs two levels and is an edge to `channel`. `super` and `self` resolve against the module's own path plus any inline `mod name { ... }` blocks around them: inside an inline module `child` of `src/channel.rs`, `super::APP_NAME` refers to `channel` itself. Each path is cut back to the longest known module, so `crate::meta::read` is an edge to `meta`. Edges to the module itself, including its inline modules, and to its own child modules are dropped. Visibility qualifiers such as `pub(crate)` and `pub(in crate::commands)` are not edges. Code inside an inline module whose attributes include `#[cfg(test)]`, whatever its visibility and other attributes, is not production code and is skipped; so are comments and string literals.
 
 Edges the class rules refuse but that are sanctioned are listed in `ALLOWED_EDGES`, each with a reason; all of them are inside the forest ops crate (`crate_dir` `crates/forest/ops`):
 
@@ -87,12 +87,12 @@ An allowlist entry whose edge no longer exists fails the test too, so the list c
 
 ## Pure modules
 
-A Pure module's production code may not contain any of the effects listed below. `crates/policy/tests/ambient.rs` scans each Pure module with a token-level scanner, so comments, strings and raw strings can neither hide nor fake a path, and aliases (`use std::env as e`), grouped imports, glob imports and raw identifiers are resolved. It reports:
+A Pure module's production code may not contain any of the effects listed below. `crates/policy/tests/checks/ambient.rs` scans each Pure module with a token-level scanner, so comments, strings and raw strings can neither hide nor fake a path, and aliases (`use std::env as e`), grouped imports, glob imports and raw identifiers are resolved. It reports:
 
 - any use of `std::fs`, `std::env`, `std::process`, `std::net`, `std::time` or `std::thread`, inline or imported;
 - standard input (`std::io::stdin` or `std::io::Stdin`);
 - a `std::path` name with an effect: the `Path` methods that query the filesystem (`exists`, `try_exists`, `metadata`, `symlink_metadata`, `canonicalize`, `read_dir`, `read_link`, `is_file`, `is_dir` and `is_symlink`) and the function `absolute`, which reads the working directory. They are matched by name when called as a method, with or without a turbofish (`path.exists()`, `path.exists::<>()`), after `::` whether called or used as a value (`Path::exists(p)`, `.any(Path::exists)`, `std::path::absolute(p)`), and as the last segment of a `use` import (`use std::path::{absolute, Path};`). The scanner does not know types, so a method or item of another type with one of these names is reported too;
-- a path into a dependency crate of the module's own package, meaning any key of that package's `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs` or is a Pure workspace crate in `CRATES`. Today that list holds `anyhow`, which carries errors; `chrono`, which supplies date and time types (its clock reads are banned by `clippy.toml`); `clap`, which `src/cli.rs` and `crates/forest/core/src/meta.rs` use to derive argument types (parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`); `serde`, which derives serialization; and `toml`, which parses and renders the config file's format. An allowed crate that no Pure module uses fails the test;
+- a path into a dependency crate of the module's own package, meaning any key of that package's `Cargo.toml`'s `[dependencies]` or `[target.*.dependencies]` tables with hyphens read as underscores, unless the crate is in `PURE_ALLOWED_CRATES` in `crates/policy/tests/support/classification.rs` or is a Pure workspace crate in `CRATES`. Today that list holds `anyhow`, which carries errors; `chrono`, which supplies date and time types (its clock reads are banned by `clippy.toml`); `clap`, which `src/cli.rs` and `crates/forest/core/src/meta.rs` use to derive argument types (parsing the arguments, which reads the process's arguments, happens in `src/lib.rs`); `serde`, which derives serialization; and `toml`, which parses and renders the config file's format. An allowed crate that no Pure module uses fails the test;
 - `include!` and `#[path = ...]`, which pull Rust code into the module from a file the scanner does not read;
 - `unsafe`, `extern`, `macro_rules!`, glob imports of `std` or `core`, importing or aliasing `std` itself, and non-ASCII identifiers.
 
@@ -104,7 +104,7 @@ When may a module become Pure? When its own production code has none of the effe
 
 ## Root effects
 
-The Root profile of the ambient scan applies to the production tokens of every Root file (`src/lib.rs` and the binaries); `crates/policy/tests/ambient.rs` fails when it reports anything. It is the same token scanner as the Pure profile (`crates/policy/src/scan.rs`), and it reports:
+The Root profile of the ambient scan applies to the production tokens of every Root file (`src/lib.rs` and the binaries); `crates/policy/tests/checks/ambient.rs` fails when it reports anything. It is the same token scanner as the Pure profile (`crates/policy/src/scan.rs`), and it reports:
 
 - any use of `std::fs`, `std::net` or `std::thread`, inline or imported, and through aliases;
 - any path through `std::env` other than the namespace itself (`use std::env;` is allowed, and every use through it is checked), `std::env::args_os` and `std::env::ArgsOs`, which read the process arguments the composition root parses, `std::env::var`, `std::env::var_os` and `std::env::current_dir`, which read the environment and working directory passed into workflows, and `std::env::current_exe`, which the app-owned refresh launcher uses;
@@ -125,9 +125,9 @@ The searches are exhaustive for the ordinary form because of a convention: effec
 
 ## No production traits
 
-ADR 0002 keeps the call graph shallow: no traits, dependency injection or ports-and-adapters machinery. `crates/policy/tests/traits.rs` fails when production code declares a trait (`trait` followed by a name, outside test modules). Implementing a trait from another crate, such as `impl std::fmt::Display for X`, is fine.
+ADR 0002 keeps the call graph shallow: no traits, dependency injection or ports-and-adapters machinery. `crates/policy/tests/checks/traits.rs` fails when production code declares a trait (`trait` followed by a name, outside test modules). Implementing a trait from another crate, such as `impl std::fmt::Display for X`, is fine.
 
-When does a trait earn its place? Only when production code has more than one real implementation that callers must treat the same way. Test doubles are not a reason, because tests run against real git repositories (ADR 0007). Adding one is a design decision: record it in an ADR and add an entry to `ALLOWED_TRAITS` in `crates/policy/tests/traits.rs` with the reason. An entry whose trait no longer exists fails the test.
+When does a trait earn its place? Only when production code has more than one real implementation that callers must treat the same way. Test doubles are not a reason, because tests run against real git repositories (ADR 0007). Adding one is a design decision: record it in an ADR and add an entry to `ALLOWED_TRAITS` in `crates/policy/tests/checks/traits.rs` with the reason. An entry whose trait no longer exists fails the test.
 
 ## Ambient reads
 
@@ -169,17 +169,17 @@ a new feature needs an entrypoint following the
 [crate documentation contract](../crates/README.md). Review responsibilities,
 dependency links and proof limits with the code change.
 
-**Adding a module.** Create the file and add it to `MODULES` in `crates/policy/src/classification.rs` with its class. The classification test fails until you do. A module added to the root package must be Root or Pure; effectful code goes into a library crate. If the new module needs an import the class rules refuse, either restructure or add an `ALLOWED_EDGES` entry whose reason names the permanent boundary it is or the change that removes it.
+**Adding a module.** Create the file and add it to `MODULES` in `crates/policy/tests/support/classification.rs` with its class. The classification test fails until you do. A module added to the root package must be Root or Pure; effectful code goes into a library crate. If the new module needs an import the class rules refuse, either restructure or add an `ALLOWED_EDGES` entry whose reason names the permanent boundary it is or the change that removes it.
 
 **Adding an exemption.** Put `#[expect(<lint>, reason = "...")]` on the narrowest enclosing item, listing only the lints that actually fire there, with a reason that names the permanent boundary, or, for a temporary exception, the follow-up removing it. Then update `crates/policy/control-expected.txt`: the positive control fails with a diff showing the new count, which is the line to change. Add a temporary exception's follow-up to "Planned follow-ups".
 
 **Adding a banned method.** Add an entry to `disallowed-methods` in the root `clippy.toml` with a reason saying where the call belongs. If the method has sanctioned call sites, exempt them as above; their lines in `crates/policy/control-expected.txt` prove the path resolves. If it has no call site anywhere, Clippy's reachable-function check still proves that a path under a loaded crate resolves; nothing proves a path under an unloaded crate (see "What the gates do not prove").
 
-**Allowing a crate in Pure modules.** Add it to `PURE_ALLOWED_CRATES` in `crates/policy/src/classification.rs`, with a comment saying why the Pure module needs it and why what it uses is not an effect. An entry that no Pure module uses fails the test.
+**Allowing a crate in Pure modules.** Add it to `PURE_ALLOWED_CRATES` in `crates/policy/tests/support/classification.rs`, with a comment saying why the Pure module needs it and why what it uses is not an effect. An entry that no Pure module uses fails the test.
 
-**Allowing a crate in an Effectful or Edge crate.** Add it to `EFFECTFUL_ALLOWED_CRATES` or `EDGE_ALLOWED_CRATES` in `crates/policy/src/edges.rs`, with a comment saying why that crate's code needs it; an entry no crate of the class uses fails the test.
+**Allowing a crate in an Effectful or Edge crate.** Add it to `EFFECTFUL_ALLOWED_CRATES` or `EDGE_ALLOWED_CRATES` in `crates/policy/tests/support/edges.rs`, with a comment saying why that crate's code needs it; an entry no crate of the class uses fails the test.
 
-**Adding a crate.** Put a feature crate (Pure or Effectful) at `crates/<feature>/<role>/` and an Edge crate flat under `crates/`, and add its files to `MODULES` with their classes. Give its `Cargo.toml` `version = "0.0.0"` and `publish = false`, so `just release` touches only the root package, and a `[lints]` table with `workspace = true`. Add it to `[workspace] members` in the root `Cargo.toml` and to `CRATES` in `crates/policy/src/edges.rs` with its class; the edges test fails until it is there. Depend on it by path without a `version` key (`git-forest-<name> = { path = "crates/<feature>/<role>" }`), so the release version `sed` cannot match the line. Refresh `Cargo.lock` (`cargo check --workspace`) and commit it with the change, because `just check` runs Cargo with `--locked`.
+**Adding a crate.** Put a feature crate (Pure or Effectful) at `crates/<feature>/<role>/` and an Edge crate flat under `crates/`, and add its files to `MODULES` with their classes. Give its `Cargo.toml` `version = "0.0.0"` and `publish = false`, so `just release` touches only the root package, and a `[lints]` table with `workspace = true`. Add it to `[workspace] members` in the root `Cargo.toml` and to `CRATES` in `crates/policy/tests/support/edges.rs` with its class; the edges test fails until it is there. Depend on it by path without a `version` key (`git-forest-<name> = { path = "crates/<feature>/<role>" }`), so the release version `sed` cannot match the line. Refresh `Cargo.lock` (`cargo check --workspace`) and commit it with the change, because `just check` runs Cargo with `--locked`.
 
 **Adding a trait or an allowed edge.** See "No production traits" and "Import direction". Every allowlist rejects entries that are no longer used: the allowed edges, the traits, and the Pure, Effectful and Edge crate lists.
 
@@ -206,7 +206,7 @@ dependency links and proof limits with the code change.
 
 ## Shared Pure scanner: local checkpoint
 
-`crates/policy/tests/ambient.rs` invokes arch-gates for the actual Pure-source
+`crates/policy/tests/checks/ambient.rs` invokes arch-gates for the actual Pure-source
 scan. The engine is a pinned local Git dev-dependency of policy, used only in
 integration tests. Root, graph, dependency and trait checks and their data stay
 local in this first slice; the donor scanner remains for those unmigrated checks
@@ -229,3 +229,22 @@ allowance tests still run through normal `just check`. The engine also carries
 the generic fixture cases. Other metadata/package, Root and trait machinery
 stays local. The same documented scanner limitations and local-Git publication
 limits apply. No runtime code or product behavior changed.
+
+## Shared metadata and package evaluation
+
+The policy integration target now parses explicit workspace IDs and package
+facts through arch-gates. Its local support reads each manifest and supplies
+that text to shared lint/dependency readers; metadata/parse/read failure fails
+the gate. Cargo execution remains in `src/metadata.rs`, with explicit root cwd
+and manifest and no engine dependency in the normal library. All 39 previous
+policy controls remain under `tests/checks/`.
+
+Local package policy retains Workforest's class matrix and feature-directory
+spelling. Shared dependency evaluation checks classifications, declared/forwarded
+Pure features, external allowances and staleness, build scripts, member path
+edges, and workspace lint inheritance. In addition to workspace Tooling targets,
+production is forbidden to depend on external `arch-gates`, including renamed
+normal/build/dev declarations. Tooling uses the engine only as a dev-dependency.
+Error reasons for internal edges come from local policy; the engine imposes no
+Workforest directory layout. Declared feature checks retain their default-feature
+and transitive-capability nonclaims. See ADR 0020 and the policy README.

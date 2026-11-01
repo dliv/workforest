@@ -3,14 +3,11 @@
 //! This crate is test-only: it never builds or runs the product. Its tests read
 //! the sources under each product crate's `src/` and the crates' manifests, and
 //! the workspace graph from `cargo metadata`, and fail when they break a
-//! mechanically checkable architecture rule. Its one dependency, `serde_json`, parses that graph. The
+//! mechanically checkable architecture rule. Parsing and policy data live in integration-test support through arch-gates. The
 //! rules and their homes are documented in `docs/architecture.md`.
 
 use std::path::{Path, PathBuf};
 
-pub mod classification;
-pub mod edges;
-pub mod manifest;
 pub mod metadata;
 pub mod scan;
 mod tokens;

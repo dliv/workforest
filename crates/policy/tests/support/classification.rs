@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::edges::CrateClass;
+use super::edges::CrateClass;
 
 /// The architectural role of a source file under a product crate's `src/`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

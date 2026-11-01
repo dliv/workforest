@@ -6,11 +6,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use git_forest_policy::classification::{
+use crate::support::classification::{
     crate_holds_module_class, module_id, ModuleClass, ModuleId, MODULES,
 };
-use git_forest_policy::edges::{CrateClass, CRATES};
-use git_forest_policy::metadata::{workspace_members, Member};
+use crate::support::edges::{CrateClass, CRATES};
+use crate::support::metadata::{workspace_members, Member};
 use git_forest_policy::repo_root;
 
 const SECTION: &str = "see docs/architecture.md, section \"Module classes\"";
