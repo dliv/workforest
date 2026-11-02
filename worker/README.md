@@ -28,8 +28,12 @@ recipes act on remote infrastructure; the database-migrate recipe executes
 `schema.sql`, not the historical migration file. The
 [release workflow](../.github/workflows/release.yml) also deploys the worker.
 
-[CI](../.github/workflows/ci.yml) runs `npm ci` and `npm audit` here. That
-audits dependencies; it is not a TypeScript typecheck or a live protocol proof.
+[CI](../.github/workflows/ci.yml) runs `npm ci --no-audit` and then `npm audit`
+here on Node 22.
+Tag preflight audits before any release build/upload; the deployment job audits
+again immediately before deployment. Future beta tags publish as GitHub prereleases.
+The same audit command gates local release recipes. These are dependency
+checks, not a TypeScript typecheck or a live protocol proof.
 `package.json` currently has a deploy script and no test script. The Rust
 ignored network tests exercise a deployed endpoint, not this checkout's worker
 implementation. Changes to worker behavior therefore need their own explicit

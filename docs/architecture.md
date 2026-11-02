@@ -7,7 +7,7 @@ feature-start questions.
 
 git-forest's architecture decisions live in [`docs/decisions/`](decisions/ADR_INDEX.md). This document says which of those rules a command enforces, where each rule is enforced, and what the enforcement does not prove.
 
-One local command is the gate: `just check`. It runs, in order, `cargo fmt --check`, Clippy for both build channels (`stable` and `beta`) across the whole workspace, all tests for both channels including the policy tests in `crates/policy`, and the positive control in `scripts/policy-control.sh`. CI runs the same `just check`, so the local gate and CI cannot drift. Run it before every commit and before handing work back.
+One local command is the gate: `just check`. It runs, in order, `cargo fmt --check`, Clippy for both build channels (`stable` and `beta`) across the whole workspace, all tests for both channels including the policy tests in `crates/policy`, release-identity fixture tests, and the positive control in `scripts/policy-control.sh`. CI runs the same `just check`, so the local gate and CI cannot drift. Run it before every commit and before handing work back.
 
 Rules come in three kinds. A **gated** rule fails `just check` when code breaks it. A **checkable** rule is verified by a reviewer with a search, because a mechanical check would cost more than it saves. A **judgment** rule needs a person to decide; this document states the criteria.
 

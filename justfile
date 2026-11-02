@@ -1,7 +1,7 @@
 setup:
     git config core.hooksPath .githooks
 
-check: fmt-check lint test policy-control
+check: fmt-check lint test release-tests policy-control
 
 fmt-check:
     cargo fmt --all -- --check
@@ -9,6 +9,9 @@ fmt-check:
 lint:
     cargo clippy --workspace --locked --no-default-features --features stable --all-targets -- -D warnings
     cargo clippy --workspace --locked --no-default-features --features beta --all-targets -- -D warnings
+
+release-tests:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
 policy-control:
     bash scripts/policy-control.sh
@@ -36,7 +39,7 @@ release version:
     # 1. Verify clean state and passing checks
     just check
     just test
-    (cd worker && npm ci --silent && npm audit)
+    (cd worker && npm ci --silent --no-audit && npm audit)
 
     # 2. Update version in Cargo.toml and wrangler.toml
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
@@ -63,7 +66,7 @@ release-beta version:
     # 1. Verify clean state and passing checks
     just check
     just test
-    (cd worker && npm ci --silent && npm audit)
+    (cd worker && npm ci --silent --no-audit && npm audit)
 
     # 2. Update version in Cargo.toml and wrangler.toml
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
