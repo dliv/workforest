@@ -85,7 +85,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "arch-gates"
 version = "0.1.0"
-source = "git+https://github.com/dliv/arch-gates.git?rev=34b33664e227c99376ae03b3ff628da00618a507#34b33664e227c99376ae03b3ff628da00618a507"
+source = "git+https://github.com/dliv/arch-gates.git?rev=e0c680955d8eabe40c6cbf006eb30202511890a5#e0c680955d8eabe40c6cbf006eb30202511890a5"
 dependencies = [
  "serde_json",
 ]
