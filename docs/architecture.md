@@ -204,21 +204,24 @@ dependency links and proof limits with the code change.
 - The Rust toolchain is not pinned. A future stable Clippy may add lints that fail `-D warnings`, as it already could before these gates existed.
 - CI installs `just` from the Ubuntu archive on an `ubuntu-24.04` runner; that step was untested when the gates were introduced, and only a push or pull request exercises it.
 
-## Shared Pure scanner: local checkpoint
+## Shared Pure scanner
 
 `crates/policy/tests/checks/ambient.rs` invokes arch-gates for the actual Pure-source
-scan. The engine is a pinned local Git dev-dependency of policy, used only in
+scan. The engine is a pinned public Git dev-dependency of policy, used only in
 integration tests. Pure/Root, graph, external-reference, trait and package
 machinery is now shared; classifications, allowances and trait acceptance remain
 local. The duplicate normal-library scanner/token code has been removed after
 preserving all donor controls. The Cargo spawn stays in local `src/metadata.rs`,
 retaining its native compiler inventory. No product runtime code moves.
 
-This local dependency needs this machine's engine repository. Publication,
-replacement with a published immutable revision and independent checkout/CI
-qualification are outstanding; this is not a portable consumer candidate.
+The engine is fetched over HTTPS from the public
+[arch-gates repository](https://github.com/dliv/arch-gates), pinned to a full
+immutable revision in the policy manifest and lockfile. No adjacent clone or
+local override is required. Fresh exported-checkout gates verify dependency
+resolution on the current host; remote CI and other platforms remain separate
+qualification.
 
-## Shared coverage and direction: local checkpoint
+## Shared coverage and direction
 
 The classification and direction integration tests now invoke arch-gates'
 coverage evaluator, internal-path scanner and direction/exception evaluator.
@@ -229,7 +232,7 @@ The existing classification, direction scanner fixtures, count guard and stale
 allowance tests still run through normal `just check`. The engine also carries
 the generic fixture cases. Metadata/package, Root and trait discovery also use
 the shared engine, with local policy data. The same documented scanner limitations
-and local-Git publication limits apply. No runtime code or product behavior changed.
+and host/platform proof limits apply. No runtime code or product behavior changed.
 
 ## Shared metadata and package evaluation
 
@@ -271,4 +274,4 @@ it does not by itself prove a lint fires or an exemption's reason is sound.
 Engine fixtures separately exercise Root permissions, external references,
 traits and the shared production-token grammar. Consumer tests call the same
 APIs through the normal gate. Existing bounded-grammar, transitive-purity and
-local-Git publication limits continue to apply. See ADR 0020.
+host/platform proof limits continue to apply. See ADR 0020.

@@ -1,7 +1,7 @@
 # 20. Shared policy engine with consumer-owned observation
 
 Date: 2026-11-01
-Status: Accepted locally; remote qualification pending
+Status: Accepted; published Git dependency
 
 ## Context
 
@@ -28,9 +28,11 @@ pairs permitted Root environment functions with actual method bans.
 Parse explicit workspace membership, fail on malformed input, and prohibit
 production dependencies on local policy and external engine packages across
 normal/build/dev kinds, including aliases. Engine dependencies are dev-only.
-Current pins use immutable local Git revisions while publication is deferred;
-replace them with a reviewed published revision and qualify independently before
-claiming portable builds or pushing consumers.
+Pin the reviewed engine revision from its public HTTPS Git repository and
+record the source/revision in Cargo.lock. Qualify consumer gates from independent
+exports with fresh Cargo homes and no adjacent clone or override. Host/platform
+coverage and remote CI are reported separately; consumer pushes retain their
+own authorization and repository rules.
 
 ## Consequences
 

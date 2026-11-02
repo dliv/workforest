@@ -37,6 +37,8 @@ the shared evaluator rejects stale lists, missing lint inheritance and forbidden
 Tooling dependencies, including external arch-gates aliases across dependency
 kinds. See [architecture](../../docs/architecture.md) for enforcement limits.
 
-Consumer pins currently name an immutable local file Git revision. This is a
-machine-local checkpoint pending engine publication and independent portable
-qualification. No remote or clean-machine CI success is claimed.
+Consumer pins name an immutable revision of the public
+[arch-gates repository](https://github.com/dliv/arch-gates). Cargo fetches it over
+HTTPS; no adjacent engine checkout or local path override is required. The
+lockfile records that exact source/revision. Independent exported-checkout gate
+proof covers this host; remote CI and other platforms are separate evidence.
