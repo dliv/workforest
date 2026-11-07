@@ -50,6 +50,9 @@ impl TestEnv {
         };
 
         run(&["init", "-b", "main"]);
+        // Later test commits, including linked worktrees, must not need a host identity.
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@test.com"]);
         run(&["commit", "--allow-empty", "-m", "initial"]);
 
         AbsolutePath::new(repo_path).unwrap()
@@ -97,6 +100,8 @@ impl TestEnv {
 
         // 2. Create regular repo
         run(&repo_path, &["init", "-b", "main"]);
+        run(&repo_path, &["config", "user.name", "Test"]);
+        run(&repo_path, &["config", "user.email", "test@test.com"]);
 
         // 3. Add remote
         run(
