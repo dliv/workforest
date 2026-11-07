@@ -11,11 +11,11 @@ use git_forest_core::plan::branch_state::{
 #[cfg(test)]
 pub(crate) use git_forest_core::plan::rm::legacy_error_lines;
 use git_forest_core::plan::rm::{
-    branch_not_fully_merged_error, decide_rm_dry_run, decide_rm_plan, rejected_rm_result,
-    root_cleanup_results, root_entry_name_matches, worktree_removal_refusal, BranchObservation,
-    ForestDirListing, ForestDirObservation, ForestRootCleanupAction, ForestRootPlan,
-    RepoDryRunObservation, RepoObservation, RmDryRunObservation, RmObservation, RootListing,
-    RootObservation, WorktreeEntry,
+    branch_not_fully_merged_error, decide_rm_plan, decide_rm_preflight, preflight_to_dry_run,
+    rejected_rm_result, root_cleanup_results, root_entry_name_matches, worktree_removal_refusal,
+    BranchObservation, Dirtiness, ForestDirListing, ForestDirObservation, ForestRootCleanupAction,
+    ForestRootPlan, RepoDryRunObservation, RepoObservation, RmDryRunObservation, RmObservation,
+    RmPreflight, RmWorktreeChecks, RootListing, RootObservation, SubmoduleState, WorktreeEntry,
 };
 pub use git_forest_core::plan::rm::{
     format_repo_done, format_rm_all_human, format_rm_all_summary, format_rm_human,
@@ -28,8 +28,13 @@ pub use git_forest_core::plan::rm::{
 
 #[cfg(test)]
 pub fn plan_rm(forest_dir: &std::path::Path, meta: &ForestMeta) -> RmPlan {
-    plan_rm_with_options(forest_dir, meta, &RmOptions::default())
-        .expect("validated forest metadata should produce a removal plan")
+    decide_rm_plan(
+        forest_dir,
+        meta,
+        &RmOptions::default(),
+        observe_rm_planning(forest_dir, meta),
+    )
+    .expect("validated forest metadata should produce a removal plan")
 }
 
 /// Plans a removal: observes the forest, then decides.
@@ -38,20 +43,28 @@ fn plan_rm_with_options(
     meta: &ForestMeta,
     options: &RmOptions,
 ) -> Result<RmPlan> {
-    let observation = observe_rm(forest_dir, meta, options.dry_run);
+    let observation = observe_rm(forest_dir, meta);
     decide_rm_plan(forest_dir, meta, options, observation)
 }
 
 // --- Observation (read-only) ---
 
-/// Reads what planning a removal needs and, for a dry-run, what the dry-run result is decided
-/// from, so nothing is read after planning.
-fn observe_rm(forest_dir: &Path, meta: &ForestMeta, dry_run: bool) -> RmObservation {
-    let planning = observe_rm_planning(forest_dir, meta);
-    let dry_run = dry_run.then(|| observe_rm_dry_run(forest_dir, meta, &planning.repos));
+/// Reads the structural plan. The rm-only prepared phase observes status and safety
+/// facts once for either preview or live execution.
+fn observe_rm(forest_dir: &Path, meta: &ForestMeta) -> RmObservation {
+    let repo_names = meta
+        .repos
+        .iter()
+        .map(|repo| repo.name.as_str())
+        .collect::<Vec<_>>();
     RmObservation {
-        dry_run,
-        ..planning
+        root: observe_forest_root(forest_dir, &repo_names),
+        repos: meta
+            .repos
+            .iter()
+            .map(|repo| observe_repo_with_dirtiness(forest_dir, repo, false))
+            .collect(),
+        dry_run: None,
     }
 }
 
@@ -140,13 +153,22 @@ fn observe_forest_root(forest_dir: &Path, repo_names: &[&str]) -> RootObservatio
 }
 
 fn observe_repo(forest_dir: &Path, repo: &RepoMeta) -> RepoObservation {
+    observe_repo_with_dirtiness(forest_dir, repo, true)
+}
+
+fn observe_repo_with_dirtiness(
+    forest_dir: &Path,
+    repo: &RepoMeta,
+    legacy_dirtiness: bool,
+) -> RepoObservation {
     let worktree_path = forest_dir.join(repo.name.as_str());
     let worktree_exists = path_exists_or_symlink(&worktree_path);
     let worktree_is_symlink = path_is_symlink(&worktree_path);
     let branch_state = read_branch_state(&worktree_path, &repo.branch);
     let source_exists = repo.source.is_dir();
     let detached_head_safety = detached_head_safety(&branch_state, &repo.source, source_exists);
-    let has_dirty_files = worktree_exists
+    let has_dirty_files = legacy_dirtiness
+        && worktree_exists
         && !worktree_is_symlink
         && !matches!(&branch_state.actual, ActualBranchState::Unknown { .. })
         && crate::git::git(
@@ -285,77 +307,157 @@ fn worktree_removal_safety_error(repo_plan: &RepoRmPlan, force: bool) -> Option<
 
 // --- Execution (impure) ---
 
-pub fn execute_rm(
-    plan: &RmPlan,
+struct PreparedRemoval {
+    plan: RmPlan,
     force: bool,
-    on_progress: Option<&dyn Fn(RmProgress)>,
-) -> RmResult {
-    validate_rm_plan_paths(plan);
+    decision: RmPreflight,
+    observation: RmDryRunObservation,
+}
 
-    if let Some(error) = planned_or_current_root_safety_error(plan) {
-        return rejected_rm_result(plan, false, force, error);
-    }
-
-    // Preflight: if not forcing, reject if any repo has dirty files
-    if !force {
-        let dirty_repos: Vec<&RepoRmPlan> = plan
+fn prepare_rm(plan: RmPlan, force: bool, dry_run: bool) -> PreparedRemoval {
+    validate_rm_plan_paths(&plan);
+    let observation = RmDryRunObservation {
+        current_root_refusal: current_forest_root_safety_error(&plan.forest_dir),
+        repos: plan
             .repo_plans
             .iter()
-            .filter(|rp| rp.has_dirty_files)
-            .collect();
+            .map(|rp| {
+                observe_repo_dry_run(
+                    &rp.worktree_path,
+                    &RepoMeta {
+                        name: rp.name.clone(),
+                        source: rp.source.clone(),
+                        branch: rp.branch.clone(),
+                        base_branch: rp.base_branch.clone(),
+                        remote: rp.remote.clone(),
+                        branch_created: rp.branch_created,
+                    },
+                    rp.source_exists,
+                )
+            })
+            .collect(),
+        forest_dir: observe_forest_dir(&plan.forest_dir),
+    };
+    let checks = plan
+        .repo_plans
+        .iter()
+        .map(observe_worktree_checks)
+        .collect::<Vec<_>>();
+    let decision = decide_rm_preflight(&plan, &observation, &checks, force, dry_run);
+    PreparedRemoval {
+        plan,
+        force,
+        decision,
+        observation,
+    }
+}
 
-        if !dirty_repos.is_empty() {
-            let mut repos = Vec::new();
-            let mut errors = Vec::new();
+fn observe_worktree_checks(plan: &RepoRmPlan) -> RmWorktreeChecks {
+    // Structural safety already refuses or skips these paths; do not follow a replacement.
+    if !plan.worktree_exists
+        || path_is_symlink(&plan.worktree_path)
+        || matches!(plan.branch_state.actual, ActualBranchState::Unknown { .. })
+    {
+        return RmWorktreeChecks {
+            dirtiness: Dirtiness::Clean,
+            submodules: SubmoduleState::Clear,
+        };
+    }
+    let dirtiness = match crate::git::git(
+        &plan.worktree_path,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    ) {
+        Ok(output) if output.is_empty() => Dirtiness::Clean,
+        Ok(_) => Dirtiness::Dirty,
+        Err(error) => Dirtiness::Unavailable(error.to_string()),
+    };
+    let submodules = match worktree_has_submodules(&plan.worktree_path) {
+        Ok(true) => SubmoduleState::RequiresForce,
+        Ok(false) => SubmoduleState::Clear,
+        Err(error) => SubmoduleState::Unavailable(error.to_string()),
+    };
+    RmWorktreeChecks {
+        dirtiness,
+        submodules,
+    }
+}
 
-            for rp in &plan.repo_plans {
-                if let Some(cb) = &on_progress {
-                    cb(RmProgress::RepoStarting { name: &rp.name });
-                }
-
-                let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
-                    let msg = format!("{}: worktree has uncommitted changes", rp.name);
-                    errors.push(CleanupIssue::dirty_worktree(msg.clone()));
-                    (
-                        RmOutcome::Failed { error: msg },
-                        RmOutcome::Skipped {
-                            reason: "worktree not removed".to_string(),
-                        },
-                    )
-                } else {
-                    (
-                        RmOutcome::Skipped {
-                            reason: "blocked by dirty repos".to_string(),
-                        },
-                        RmOutcome::Skipped {
-                            reason: "blocked by dirty repos".to_string(),
-                        },
-                    )
-                };
-                let result = RepoRmResult {
-                    name: rp.name.clone(),
-                    branch_state: rp.branch_state.clone(),
-                    worktree_removed,
-                    branch_deleted,
-                };
-
-                if let Some(cb) = &on_progress {
-                    cb(RmProgress::RepoDone(&result));
-                }
-                repos.push(result);
-            }
-
-            return RmResult {
-                forest_name: plan.forest_name.clone(),
-                forest_dir: plan.forest_dir.clone(),
-                dry_run: false,
-                force,
-                repos,
-                forest_root_cleanup: vec![],
-                forest_dir_removed: false,
-                errors,
-            };
+fn worktree_has_submodules(worktree: &Path) -> Result<bool> {
+    // Git refuses even an empty/leftover worktree-specific modules directory.
+    let git_dir = crate::git::git(worktree, &["rev-parse", "--absolute-git-dir"])?;
+    match std::fs::metadata(Path::new(&git_dir).join("modules")) {
+        Ok(metadata) if metadata.is_dir() => return Ok(true),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Inspect indexed gitlinks independently of submodule.active/ignore settings.
+    // `submodule status` can call an existing checkout uninitialized when inactive.
+    let index = crate::git::git_bytes(worktree, &["ls-files", "--stage", "-z"])?;
+    if index.is_empty() {
+        return Ok(false);
+    }
+    let records = index
+        .strip_suffix(b"\0")
+        .ok_or_else(|| anyhow::anyhow!("truncated index listing"))?;
+    for record in records.split(|byte| *byte == 0) {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| anyhow::anyhow!("invalid index entry"))?;
+        let (fields, path) = record.split_at(tab);
+        if !fields.starts_with(b"160000 ") {
+            continue;
         }
+        let path = &path[1..];
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            Path::new(std::ffi::OsStr::from_bytes(path))
+        };
+        #[cfg(not(unix))]
+        let path = Path::new(std::str::from_utf8(path)?);
+        if path.as_os_str().is_empty()
+            || !path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            bail!("invalid indexed submodule path");
+        }
+        match std::fs::symlink_metadata(worktree.join(path).join(".git")) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
+}
+
+fn execute_rm(prepared: PreparedRemoval, on_progress: Option<&dyn Fn(RmProgress)>) -> RmResult {
+    let PreparedRemoval {
+        plan,
+        force,
+        decision,
+        observation: _,
+    } = prepared;
+    if let RmPreflight::Blocked(result) = decision {
+        if let Some(cb) = on_progress {
+            for repo in &result.repos {
+                cb(RmProgress::RepoStarting { name: &repo.name });
+                cb(RmProgress::RepoDone(repo));
+            }
+        }
+        return result;
+    }
+    let plan = &plan;
+    if let Some(error) = planned_or_current_root_safety_error(plan) {
+        return rejected_rm_result(plan, false, force, error);
     }
 
     let mut repos = Vec::new();
@@ -407,6 +509,7 @@ pub fn execute_rm(
     };
 
     RmResult {
+        preflight_blocked: false,
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
         dry_run: false,
@@ -1398,11 +1501,8 @@ fn inspect_forest_dir(forest_dir: &Path) -> std::result::Result<ForestDirInspect
 /// them, then the result is decided from what planning observed.
 fn plan_to_dry_run_result(plan: &RmPlan, force: bool) -> RmResult {
     validate_rm_plan_paths(plan);
-    let observation = plan
-        .dry_run
-        .as_ref()
-        .expect("a plan made for a dry-run carries its dry-run observation");
-    decide_rm_dry_run(plan, observation, force)
+    let prepared = prepare_rm(plan.clone(), force, true);
+    preflight_to_dry_run(prepared.decision, &prepared.plan, &prepared.observation)
 }
 
 #[cfg(test)]
@@ -1433,7 +1533,10 @@ pub fn cmd_rm_with_options(
         return Ok(plan_to_dry_run_result(&plan, options.force));
     }
 
-    Ok(execute_rm(&plan, options.force, on_progress))
+    Ok(execute_rm(
+        prepare_rm(plan, options.force, false),
+        on_progress,
+    ))
 }
 
 // --- rm --all ---
@@ -1443,7 +1546,7 @@ struct RmAllPlan {
 }
 
 enum RmAllForestPlan {
-    Ready(RmPlan),
+    Ready(RmPlan, ForestMeta),
     Rejected {
         forest_name: ForestName,
         forest_dir: PathBuf,
@@ -1454,20 +1557,34 @@ enum RmAllForestPlan {
 impl RmAllForestPlan {
     fn forest_name(&self) -> &ForestName {
         match self {
-            Self::Ready(plan) => &plan.forest_name,
+            Self::Ready(plan, _) => &plan.forest_name,
             Self::Rejected { forest_name, .. } => forest_name,
         }
     }
 
     fn result(&self, options: &RmOptions) -> RmResult {
         match self {
-            Self::Ready(plan) if options.dry_run => plan_to_dry_run_result(plan, options.force),
-            Self::Ready(plan) => execute_rm(plan, options.force, None),
+            Self::Ready(previous, meta) => {
+                match plan_rm_with_options(&previous.forest_dir, meta, options) {
+                    Ok(plan) if options.dry_run => plan_to_dry_run_result(&plan, options.force),
+                    Ok(plan) => execute_rm(prepare_rm(plan, options.force, false), None),
+                    Err(error) => Self::Rejected {
+                        forest_name: previous.forest_name.clone(),
+                        forest_dir: previous.forest_dir.clone(),
+                        issue: CleanupIssue::new(
+                            CleanupIssueCode::ForestPlanRejected,
+                            error.to_string(),
+                        ),
+                    }
+                    .result(options),
+                }
+            }
             Self::Rejected {
                 forest_name,
                 forest_dir,
                 issue,
             } => RmResult {
+                preflight_blocked: true,
                 forest_name: forest_name.clone(),
                 forest_dir: forest_dir.clone(),
                 dry_run: options.dry_run,
@@ -1498,7 +1615,7 @@ fn plan_rm_all(worktree_bases: &[&Path], options: &RmOptions) -> Result<RmAllPla
         .into_iter()
         .map(
             |forest| match plan_rm_with_options(&forest.dir, &forest.meta, options) {
-                Ok(plan) => RmAllForestPlan::Ready(plan),
+                Ok(plan) => RmAllForestPlan::Ready(plan, forest.meta),
                 Err(error) => RmAllForestPlan::Rejected {
                     forest_name: forest.meta.name,
                     forest_dir: forest.dir,
@@ -2411,7 +2528,7 @@ mod tests {
         let plan = plan_rm_with_options(&forest_dir, &meta, &RmOptions::new(true, false)).unwrap();
         std::fs::remove_dir(forest_dir.join(".idea")).unwrap();
 
-        let result = execute_rm(&plan, true, None);
+        let result = execute_rm(prepare_rm(plan.clone(), true, false), None);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(result.forest_dir_removed);
@@ -2587,7 +2704,7 @@ mod tests {
         assert!(result.forest_dir_removed);
         assert_eq!(result.forest_root_cleanup[0].path, PathBuf::from(".IDEA"));
 
-        let actual = execute_rm(&plan, false, None);
+        let actual = execute_rm(prepare_rm(plan.clone(), false, false), None);
 
         assert!(actual.errors.is_empty(), "errors: {:?}", actual.errors);
         assert!(actual.forest_dir_removed);
@@ -3189,7 +3306,7 @@ mod tests {
         assert!(dry_run.dry_run);
         assert!(matches!(
             dry_run.repos[0].worktree_removed,
-            RmOutcome::Success
+            RmOutcome::Skipped { .. }
         ));
         assert!(
             matches!(dry_run.repos[0].branch_deleted, RmOutcome::Failed { .. }),
@@ -3213,7 +3330,7 @@ mod tests {
         );
         assert!(!actual.errors.is_empty());
         assert!(crate::git::ref_exists(source, &branch_ref).unwrap());
-        assert!(!forest_dir.join("foo-api").exists());
+        assert!(forest_dir.join("foo-api").exists());
         assert!(forest_dir.join(META_FILENAME).exists());
     }
 
@@ -3300,7 +3417,7 @@ mod tests {
         assert!(dry_run.repos[0].branch_state.branch_drift);
         assert!(matches!(
             dry_run.repos[0].worktree_removed,
-            RmOutcome::Success
+            RmOutcome::Skipped { .. }
         ));
         assert!(matches!(
             dry_run.repos[0].branch_deleted,
@@ -4342,6 +4459,7 @@ mod tests {
     #[test]
     fn format_rm_human_success() {
         let result = RmResult {
+            preflight_blocked: false,
             forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: false,
@@ -4379,6 +4497,7 @@ mod tests {
     #[test]
     fn format_rm_human_dry_run() {
         let result = RmResult {
+            preflight_blocked: false,
             forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: true,
@@ -4404,6 +4523,7 @@ mod tests {
     #[test]
     fn format_rm_human_with_errors() {
         let result = RmResult {
+            preflight_blocked: false,
             forest_name: ForestName::new("test-forest".to_string()).unwrap(),
             forest_dir: PathBuf::from("/tmp/worktrees/test-forest"),
             dry_run: false,
@@ -4428,6 +4548,13 @@ mod tests {
 
         let output = format_rm_human(&result);
         assert!(output.contains("with errors"));
+        // Failed live removal may already have deleted a corrupt path before prune failed.
+        assert!(!output.contains("Removal blocked"));
+        assert!(!format_rm_summary(&result).contains("no changes made"));
+        assert!(serde_json::to_value(&result)
+            .unwrap()
+            .get("preflight_blocked")
+            .is_none());
         assert!(output.contains("worktree FAILED"));
         assert!(output.contains("Errors:"));
     }
@@ -5033,9 +5160,9 @@ mod tests {
     }
 
     #[test]
-    fn rm_idempotent_after_partial_failure() {
-        // Reproduces the bug: first rm partially fails (unmerged branch in one repo),
-        // second rm with --force should skip already-deleted branches and clean up fully.
+    fn rm_retry_after_preflight_refusal() {
+        // Known unsafe branch deletion preserves both repos on the first attempt.
+        // A forced retry then removes the complete forest.
         let env = TestEnv::new();
         env.create_repo_with_remote("foo-api");
         env.create_repo_with_remote("foo-web");
@@ -5058,30 +5185,31 @@ mod tests {
         crate::git::git(&web_wt, &["config", "user.email", "test@test.com"]).unwrap();
         commit_file(&web_wt, "local.txt", "local only", "local commit");
 
-        // First rm (no --force): foo-api branch deletes, foo-web branch fails
+        // Ordinary removal keeps the entire forest intact on the unsafe branch.
         let rm1 = cmd_rm(&forest_dir, &meta, false, false, None).unwrap();
-        assert!(matches!(rm1.repos[0].branch_deleted, RmOutcome::Success));
+        assert!(matches!(
+            rm1.repos[0].branch_deleted,
+            RmOutcome::Skipped { .. }
+        ));
         assert!(matches!(
             rm1.repos[1].branch_deleted,
             RmOutcome::Failed { .. }
         ));
         assert!(!rm1.errors.is_empty());
-        // foo-api branch gone, foo-web branch still exists
-        assert!(
-            !crate::git::ref_exists(api_source, &format!("refs/heads/{}", api_branch)).unwrap()
-        );
+        // Both branches and worktrees survive the preflight refusal.
+        assert!(crate::git::ref_exists(api_source, &format!("refs/heads/{}", api_branch)).unwrap());
         assert!(crate::git::ref_exists(web_source, &format!("refs/heads/{}", web_branch)).unwrap());
         // Forest dir still present (errors blocked cleanup)
         assert!(forest_dir.join(META_FILENAME).exists());
 
-        // Second rm (--force): should skip foo-api (already deleted), force-delete foo-web
+        // Forced retry removes both branches and worktrees.
         let meta2 = read_meta(&forest_dir.join(META_FILENAME)).unwrap();
         let rm2 = cmd_rm(&forest_dir, &meta2, true, false, None).unwrap();
 
-        // foo-api branch should be skipped (already deleted), not failed
+        // foo-api branch is still present and is removed now.
         assert!(
-            matches!(rm2.repos[0].branch_deleted, RmOutcome::Skipped { .. }),
-            "expected Skipped for already-deleted branch, got: {:?}",
+            matches!(rm2.repos[0].branch_deleted, RmOutcome::Success),
+            "expected Success for preserved branch, got: {:?}",
             rm2.repos[0].branch_deleted
         );
         // foo-web branch should be force-deleted
@@ -5119,7 +5247,7 @@ mod tests {
             root_plan: ForestRootPlan::Missing,
             dry_run: None,
         };
-        execute_rm(&plan, false, None);
+        execute_rm(prepare_rm(plan.clone(), false, false), None);
     }
 
     #[test]
@@ -5145,7 +5273,7 @@ mod tests {
             root_plan: ForestRootPlan::Missing,
             dry_run: None,
         };
-        execute_rm(&plan, false, None);
+        execute_rm(prepare_rm(plan.clone(), false, false), None);
     }
 
     #[test]
@@ -5171,7 +5299,7 @@ mod tests {
             root_plan: ForestRootPlan::Missing,
             dry_run: None,
         };
-        execute_rm(&plan, false, None);
+        execute_rm(prepare_rm(plan.clone(), false, false), None);
     }
 
     #[test]
@@ -5540,5 +5668,209 @@ mod tests {
 
         let ls = cmd_ls(&[tmpl.worktree_base.as_ref()], chrono::Utc::now()).unwrap();
         assert_eq!(ls.forests.len(), 0);
+    }
+    #[test]
+    fn preflight_preserves_whole_forest_for_dirty_and_locked_in_either_order() {
+        for lock_index in [0, 1] {
+            for force in [false, true] {
+                let env = TestEnv::new();
+                env.create_repo_with_remote("api");
+                env.create_repo_with_remote("web");
+                let tmpl = env.default_template(&["api", "web"]);
+                cmd_new(make_new_inputs("preflight", ForestMode::Feature), &tmpl).unwrap();
+                let dir = tmpl.worktree_base.join("preflight");
+                let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+                let locked = &meta.repos[lock_index];
+                crate::git::git(
+                    &locked.source,
+                    &[
+                        "worktree",
+                        "lock",
+                        dir.join(locked.name.as_str()).to_str().unwrap(),
+                    ],
+                )
+                .unwrap();
+                let dirty = &meta.repos[1 - lock_index];
+                std::fs::write(dir.join(dirty.name.as_str()).join("dirty.txt"), "keep").unwrap();
+                let before_meta = std::fs::read(dir.join(META_FILENAME)).unwrap();
+                let inventories: Vec<_> = meta
+                    .repos
+                    .iter()
+                    .map(|repo| {
+                        crate::git::git(&repo.source, &["worktree", "list", "--porcelain"]).unwrap()
+                    })
+                    .collect();
+                let tips: Vec<_> = meta
+                    .repos
+                    .iter()
+                    .map(|repo| {
+                        crate::git::git(&repo.source, &["rev-parse", &repo.branch]).unwrap()
+                    })
+                    .collect();
+                let preview = cmd_rm(&dir, &meta, force, true, None).unwrap();
+                let live = cmd_rm(&dir, &meta, force, false, None).unwrap();
+                assert_eq!(preview.errors, live.errors);
+                assert_eq!(preview.errors.len(), if force { 1 } else { 2 });
+                assert!(live
+                    .errors
+                    .iter()
+                    .any(|issue| issue.message.contains("locked")));
+                assert_eq!(std::fs::read(dir.join(META_FILENAME)).unwrap(), before_meta);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join(dirty.name.as_str()).join("dirty.txt"))
+                        .unwrap(),
+                    "keep"
+                );
+                for (index, repo) in meta.repos.iter().enumerate() {
+                    assert!(dir.join(repo.name.as_str()).is_dir());
+                    assert_eq!(
+                        crate::git::git(&repo.source, &["worktree", "list", "--porcelain"])
+                            .unwrap(),
+                        inventories[index]
+                    );
+                    assert_eq!(
+                        crate::git::git(&repo.source, &["rev-parse", &repo.branch]).unwrap(),
+                        tips[index]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_unsafe_branch_preserves_other_repo_and_branch() {
+        for unsafe_index in [0, 1] {
+            let env = TestEnv::new();
+            env.create_repo_with_remote("api");
+            env.create_repo_with_remote("web");
+            let tmpl = env.default_template(&["api", "web"]);
+            cmd_new(make_new_inputs("unsafe", ForestMode::Feature), &tmpl).unwrap();
+            let dir = tmpl.worktree_base.join("unsafe");
+            let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+            let wt = dir.join(meta.repos[unsafe_index].name.as_str());
+            std::fs::write(wt.join("unique.txt"), "unmerged").unwrap();
+            crate::git::git(&wt, &["add", "unique.txt"]).unwrap();
+            crate::git::git(&wt, &["commit", "-m", "unique"]).unwrap();
+            let before = std::fs::read(dir.join(META_FILENAME)).unwrap();
+            let result = cmd_rm(&dir, &meta, false, false, None).unwrap();
+            assert!(result
+                .errors
+                .iter()
+                .any(|issue| issue.code == CleanupIssueCode::BranchDeleteFailed));
+            assert_eq!(std::fs::read(dir.join(META_FILENAME)).unwrap(), before);
+            for repo in &meta.repos {
+                assert!(dir.join(repo.name.as_str()).exists());
+                assert!(crate::git::ref_exists(
+                    &repo.source,
+                    &format!("refs/heads/{}", repo.branch)
+                )
+                .unwrap());
+            }
+            let forced = cmd_rm(&dir, &meta, true, false, None).unwrap();
+            assert!(forced.errors.is_empty(), "{:?}", forced.errors);
+        }
+    }
+
+    #[test]
+    fn post_preflight_lock_retains_live_refusal_and_partial_results() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("api");
+        env.create_repo_with_remote("web");
+        let tmpl = env.default_template(&["api", "web"]);
+        cmd_new(make_new_inputs("race", ForestMode::Feature), &tmpl).unwrap();
+        let dir = tmpl.worktree_base.join("race");
+        let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+        let result = cmd_rm(
+            &dir,
+            &meta,
+            false,
+            false,
+            Some(&|progress| {
+                if let RmProgress::RepoStarting { name } = progress {
+                    if name.as_str() == "web" {
+                        crate::git::git(
+                            &meta.repos[1].source,
+                            &["worktree", "lock", dir.join("web").to_str().unwrap()],
+                        )
+                        .unwrap();
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(result.repos[0].worktree_removed, RmOutcome::Success);
+        assert!(matches!(
+            result.repos[1].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(!dir.join("api").exists());
+        assert!(dir.join("web").exists());
+        assert!(dir.join(META_FILENAME).exists());
+        crate::git::git(
+            &meta.repos[1].source,
+            &["worktree", "unlock", dir.join("web").to_str().unwrap()],
+        )
+        .unwrap();
+        let retry = cmd_rm(&dir, &meta, false, false, None).unwrap();
+        assert!(retry.errors.is_empty(), "{:?}", retry.errors);
+        assert!(
+            matches!(&retry.repos[0].worktree_removed, RmOutcome::Skipped { reason } if reason == "worktree already missing")
+        );
+        assert!(
+            matches!(&retry.repos[0].branch_deleted, RmOutcome::Skipped { reason } if reason == "branch already deleted")
+        );
+        assert_eq!(retry.repos[1].worktree_removed, RmOutcome::Success);
+        assert_eq!(retry.repos[1].branch_deleted, RmOutcome::Success);
+        assert!(retry.forest_dir_removed);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn batch_preflight_is_per_forest_for_both_orders_and_force_modes() {
+        for blocked_name in ["aaa", "zzz"] {
+            for force in [false, true] {
+                let env = TestEnv::new();
+                env.create_repo_with_remote("api");
+                let tmpl = env.default_template(&["api"]);
+                for name in ["aaa", "zzz"] {
+                    cmd_new(make_new_inputs(name, ForestMode::Feature), &tmpl).unwrap();
+                }
+                let blocked = tmpl.worktree_base.join(blocked_name);
+                let healthy =
+                    tmpl.worktree_base
+                        .join(if blocked_name == "aaa" { "zzz" } else { "aaa" });
+                let meta = read_meta(&blocked.join(META_FILENAME)).unwrap();
+                crate::git::git(
+                    &meta.repos[0].source,
+                    &["worktree", "lock", blocked.join("api").to_str().unwrap()],
+                )
+                .unwrap();
+                let before = std::fs::read(blocked.join(META_FILENAME)).unwrap();
+                let result =
+                    cmd_rm_all(&[tmpl.worktree_base.as_ref()], force, false, None).unwrap();
+                assert_eq!(result.succeeded, 1);
+                assert_eq!(result.failed, 1);
+                assert!(!healthy.exists());
+                assert!(blocked.join("api").exists());
+                assert_eq!(std::fs::read(blocked.join(META_FILENAME)).unwrap(), before);
+            }
+        }
+    }
+    #[test]
+    fn preview_uses_prepared_facts_instead_of_earlier_plan_observation() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("api");
+        let tmpl = env.default_template(&["api"]);
+        cmd_new(make_new_inputs("fresh-preview", ForestMode::Feature), &tmpl).unwrap();
+        let dir = tmpl.worktree_base.join("fresh-preview");
+        let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+        std::fs::write(dir.join("api").join("dirty.txt"), "dirty").unwrap();
+        let plan = plan_rm(&dir, &meta);
+        assert!(plan.repo_plans[0].has_dirty_files);
+        std::fs::remove_file(dir.join("api").join("dirty.txt")).unwrap();
+        let preview = plan_to_dry_run_result(&plan, false);
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert_eq!(preview.repos[0].worktree_removed, RmOutcome::Success);
+        assert!(dir.join("api").exists());
     }
 }

@@ -8,7 +8,7 @@ Dry run — no changes will be made.
 
 Removal blocked for forest "feat"
   foo-api: worktree FAILED, branch skipped (worktree not removed)
-  foo-web: worktree skipped (blocked by dirty repos), branch skipped (blocked by dirty repos)
+  foo-web: worktree skipped (blocked by removal preflight), branch skipped (blocked by removal preflight)
   Would not remove forest directory
 
 Errors:

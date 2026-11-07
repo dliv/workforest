@@ -6,8 +6,8 @@ exit: 1
 --- stdout ---
 Removing forest "feat"
   foo-api: removing... worktree FAILED, branch skipped (worktree not removed)
-  foo-web: removing... worktree skipped (blocked by dirty repos), branch skipped (blocked by dirty repos)
-Forest directory not removed (not empty).
+  foo-web: removing... worktree skipped (blocked by removal preflight), branch skipped (blocked by removal preflight)
+Removal blocked; no changes made.
 
 Errors:
   foo-api: worktree has uncommitted changes

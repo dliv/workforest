@@ -41,11 +41,11 @@ exit: 1
           },
           "worktree_removed": {
             "status": "skipped",
-            "reason": "blocked by dirty repos"
+            "reason": "blocked by removal preflight"
           },
           "branch_deleted": {
             "status": "skipped",
-            "reason": "blocked by dirty repos"
+            "reason": "blocked by removal preflight"
           }
         }
       ],

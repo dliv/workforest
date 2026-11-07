@@ -123,7 +123,25 @@ Options:
   --dry-run                      Show what would be removed without executing
 ```
 
-Best-effort cleanup: removes worktrees, deletes branches we created, removes the forest directory. Continues on individual failures and reports all errors.
+Removal first checks every repo for known safety blockers before changing that forest.
+Dirty or locked worktrees, unsafe branch deletion, unpreserved detached commits,
+and required observations that fail leave the whole forest intact. Dirtiness
+checks include untracked files and submodule changes even when Git display
+settings hide them. Submodule checkouts or stored submodule metadata also
+block ordinary removal, including metadata retained after deinitialization;
+a never-initialized submodule alone does not. Preview and live removal share
+that decision. Unmanaged root files are separate cleanup
+residue: they can retain the directory without blocking worktree removal.
+
+`--force` retains its dirty-worktree and unmerged-branch overrides; it does not
+unlock worktrees or delete branches checked out elsewhere. `rm --all` checks each
+forest independently after strict discovery: a blocked forest stays intact while
+healthy forests may be removed, with exit 1 for an incomplete batch.
+
+After preflight passes, cleanup remains best effort. Live Git and filesystem
+checks can still refuse a later operation and leave partial results; preflight
+is not a transaction or rollback guarantee. `reset` retains its separate cleanup
+policy and can still partially clean a forest.
 
 Disposable root entries are exact top-level names, not paths or globs. Values configured by `init` are snapshotted into each new forest's `.forest-meta.toml`; changing the template later does not change an existing forest's deletion authority. There are no built-in defaults.
 

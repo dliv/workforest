@@ -1,12 +1,12 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 #[expect(
     clippy::disallowed_methods,
     reason = "crates/forest/ops/src/git.rs is the one git subprocess wrapper"
 )]
-pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
+fn capture(repo: &Path, args: &[&str]) -> Result<Output> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -15,6 +15,10 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("failed to run git {:?} in {}", args, repo.display()))?;
 
+    Ok(output)
+}
+
+fn successful_bytes(repo: &Path, args: &[&str], output: Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
@@ -29,8 +33,17 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
         );
     }
 
-    let stdout = String::from_utf8(output.stdout).context("git output was not valid UTF-8")?;
+    Ok(output.stdout)
+}
+
+pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let stdout =
+        String::from_utf8(git_bytes(repo, args)?).context("git output was not valid UTF-8")?;
     Ok(stdout.trim_end().to_string())
+}
+
+pub(crate) fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    successful_bytes(repo, args, capture(repo, args)?)
 }
 
 /// Check if a ref exists. Returns true if `git show-ref --verify <refname>` succeeds.
@@ -119,6 +132,20 @@ mod tests {
             "error should mention failure: {}",
             err
         );
+    }
+
+    #[test]
+    fn byte_output_preserves_non_utf8_while_string_adapter_refuses_it() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("bytes");
+        std::fs::write(repo.join("raw"), b"\xff\0tail\n").unwrap();
+        git(&repo, &["add", "raw"]).unwrap();
+        git(&repo, &["commit", "-m", "raw fixture"]).unwrap();
+        assert_eq!(
+            git_bytes(&repo, &["show", "HEAD:raw"]).unwrap(),
+            b"\xff\0tail\n"
+        );
+        assert!(git(&repo, &["show", "HEAD:raw"]).is_err());
     }
 
     #[test]

@@ -36,6 +36,7 @@ impl RmOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct RmPlan {
     pub forest_name: ForestName,
     pub forest_dir: PathBuf,
@@ -45,6 +46,7 @@ pub struct RmPlan {
     pub dry_run: Option<RmDryRunObservation>,
 }
 
+#[derive(Clone)]
 pub enum ForestRootPlan {
     Missing,
     Ready {
@@ -64,6 +66,7 @@ pub enum ForestRootCleanupAction {
     RemoveForceEntry(PathBuf),
 }
 
+#[derive(Clone)]
 pub struct RepoRmPlan {
     pub name: RepoName,
     pub worktree_path: PathBuf,
@@ -89,6 +92,9 @@ pub enum DetachedHeadSafety {
 
 #[derive(Debug, Serialize)]
 pub struct RmResult {
+    /// Internal evidence that execution was refused before mutation; not a wire field.
+    #[serde(skip)]
+    pub preflight_blocked: bool,
     pub forest_name: ForestName,
     pub forest_dir: PathBuf,
     pub dry_run: bool,
@@ -300,6 +306,7 @@ pub fn root_entry_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
 
 pub fn rejected_rm_result(plan: &RmPlan, dry_run: bool, force: bool, error: String) -> RmResult {
     RmResult {
+        preflight_blocked: true,
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
         dry_run,
@@ -688,6 +695,7 @@ pub fn worktree_removal_refusal(
 // --- Dry-run over observations ---
 
 /// One entry of a source repo's `git worktree list`, with its canonical path when it has one.
+#[derive(Clone)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
     pub canonical: Option<PathBuf>,
@@ -696,6 +704,7 @@ pub struct WorktreeEntry {
 }
 
 /// What a dry-run reads about the branch a forest created, from its source repo.
+#[derive(Clone)]
 pub struct BranchObservation {
     /// Whether `refs/heads/<branch>` exists, or the git error text.
     pub exists: Result<bool, String>,
@@ -707,6 +716,7 @@ pub struct BranchObservation {
 }
 
 /// What a dry-run reads about one repo.
+#[derive(Clone)]
 pub struct RepoDryRunObservation {
     /// Whether the worktree path is a symlink.
     pub worktree_is_symlink: bool,
@@ -721,6 +731,7 @@ pub struct RepoDryRunObservation {
 }
 
 /// A forest directory's listing for a dry-run.
+#[derive(Clone)]
 pub enum ForestDirListing {
     /// The directory could not be listed; the error text.
     Unreadable(String),
@@ -729,6 +740,7 @@ pub enum ForestDirListing {
 }
 
 /// What a dry-run reads about the forest directory.
+#[derive(Clone)]
 pub struct ForestDirObservation {
     pub exists: bool,
     pub is_symlink: bool,
@@ -737,12 +749,84 @@ pub struct ForestDirObservation {
 
 /// What a dry-run reads while planning, from which `decide_rm_dry_run` builds its result
 /// without touching the filesystem or git.
+#[derive(Clone)]
 pub struct RmDryRunObservation {
     /// Why the forest root is refused when it is read again, if it is.
     pub current_root_refusal: Option<String>,
     /// One per repo of the forest, in metadata order.
     pub repos: Vec<RepoDryRunObservation>,
     pub forest_dir: ForestDirObservation,
+}
+
+/// A status observation used only by rm preflight; reset retains its own policy.
+pub enum Dirtiness {
+    Clean,
+    Dirty,
+    Unavailable(String),
+}
+
+/// Submodule checkout/metadata state that makes ordinary Git worktree removal refuse.
+pub enum SubmoduleState {
+    Clear,
+    RequiresForce,
+    Unavailable(String),
+}
+
+/// Independent content checks used by rm only, in plan order.
+pub struct RmWorktreeChecks {
+    pub dirtiness: Dirtiness,
+    pub submodules: SubmoduleState,
+}
+
+/// Safety readiness excludes root residue, which remains a cleanup forecast.
+pub enum RmPreflight {
+    Ready(RmResult),
+    Blocked(RmResult),
+}
+
+pub fn decide_rm_preflight(
+    plan: &RmPlan,
+    observation: &RmDryRunObservation,
+    checks: &[RmWorktreeChecks],
+    force: bool,
+    dry_run: bool,
+) -> RmPreflight {
+    let mut result = decide_rm_safety(plan, observation, force, false, Some(checks));
+    if result.errors.is_empty() {
+        return RmPreflight::Ready(result);
+    }
+    for repo in &mut result.repos {
+        for operation in [&mut repo.worktree_removed, &mut repo.branch_deleted] {
+            if matches!(operation, RmOutcome::Success) {
+                *operation = RmOutcome::Skipped {
+                    reason: "blocked by removal preflight".to_string(),
+                };
+            }
+        }
+    }
+    result.dry_run = dry_run;
+    result.preflight_blocked = true;
+    result.forest_root_cleanup.clear();
+    result.forest_dir_removed = false;
+    RmPreflight::Blocked(result)
+}
+
+/// Add the separate root-cleanup forecast only after the exact safety decision is Ready.
+pub fn preflight_to_dry_run(
+    decision: RmPreflight,
+    plan: &RmPlan,
+    observation: &RmDryRunObservation,
+) -> RmResult {
+    match decision {
+        RmPreflight::Ready(mut result) => {
+            result.dry_run = true;
+            forecast_root_cleanup(result, plan, observation)
+        }
+        RmPreflight::Blocked(mut result) => {
+            result.dry_run = true;
+            result
+        }
+    }
 }
 
 /// The dry-run result of a removal plan: what `execute_rm` would do, from the plan and what
@@ -752,6 +836,42 @@ pub fn decide_rm_dry_run(
     plan: &RmPlan,
     observation: &RmDryRunObservation,
     force: bool,
+) -> RmResult {
+    forecast_root_cleanup(
+        decide_rm_safety(plan, observation, force, true, None),
+        plan,
+        observation,
+    )
+}
+
+fn forecast_root_cleanup(
+    mut result: RmResult,
+    plan: &RmPlan,
+    observation: &RmDryRunObservation,
+) -> RmResult {
+    let force = result.force;
+    if result.errors.is_empty() {
+        result.forest_root_cleanup = root_cleanup_results(plan, |_| RmOutcome::Success);
+        if let Some(msg) =
+            forest_dir_cleanup_refusal(plan, &result.repos, force, &observation.forest_dir)
+        {
+            result.errors.push(CleanupIssue::new(
+                CleanupIssueCode::ForestDirNotRemoved,
+                msg,
+            ));
+        }
+        result.forest_dir_removed = result.errors.is_empty();
+    }
+    result
+}
+
+/// Safety only: this decision never forecasts root cleanup or residue.
+fn decide_rm_safety(
+    plan: &RmPlan,
+    observation: &RmDryRunObservation,
+    force: bool,
+    legacy_dirty_gate: bool,
+    checks: Option<&[RmWorktreeChecks]>,
 ) -> RmResult {
     let root_refusal = match &plan.root_plan {
         ForestRootPlan::Rejected { error } => Some(error.clone()),
@@ -768,14 +888,16 @@ pub fn decide_rm_dry_run(
         "a dry-run observes every repo of a plan whose root is not refused"
     );
 
-    let has_dirty = !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
+    let has_dirty =
+        legacy_dirty_gate && !force && plan.repo_plans.iter().any(|rp| rp.has_dirty_files);
 
     let mut errors = Vec::new();
     let repos: Vec<RepoRmResult> = plan
         .repo_plans
         .iter()
         .zip(&observation.repos)
-        .map(|(rp, observed)| {
+        .enumerate()
+        .map(|(index, (rp, observed))| {
             if has_dirty {
                 // Dirty preflight would block all removal
                 let (worktree_removed, branch_deleted) = if rp.has_dirty_files {
@@ -805,7 +927,7 @@ pub fn decide_rm_dry_run(
                 };
             }
 
-            let worktree_removed = if observed.worktree_is_symlink {
+            let mut worktree_removed = if observed.worktree_is_symlink {
                 if force {
                     if let Some(msg) = symlink_worktree_refusal(rp, observed) {
                         errors.push(CleanupIssue::new(
@@ -847,9 +969,59 @@ pub fn decide_rm_dry_run(
                 RmOutcome::Success
             };
 
+            if !force {
+                let issue = match checks.map(|values| &values[index].dirtiness) {
+                    Some(Dirtiness::Dirty) => Some(CleanupIssue::dirty_worktree(format!(
+                        "{}: worktree has uncommitted changes",
+                        rp.name
+                    ))),
+                    Some(Dirtiness::Unavailable(error)) => Some(CleanupIssue::new(
+                        CleanupIssueCode::WorktreeRefused,
+                        format!(
+                            "{}: could not inspect worktree dirtiness: {}",
+                            rp.name,
+                            compact_git_error(error)
+                        ),
+                    )),
+                    Some(Dirtiness::Clean) | None => None,
+                };
+                if let Some(issue) = issue {
+                    if !matches!(worktree_removed, RmOutcome::Failed { .. }) {
+                        worktree_removed = RmOutcome::Failed {
+                            error: issue.message.clone(),
+                        };
+                    }
+                    errors.push(issue);
+                }
+                let message = match checks.map(|values| &values[index].submodules) {
+                    Some(SubmoduleState::RequiresForce) => Some(format!(
+                        "{}: worktree has submodule checkouts or metadata; ordinary git worktree removal requires --force",
+                        rp.name
+                    )),
+                    Some(SubmoduleState::Unavailable(error)) => Some(format!(
+                        "{}: could not inspect worktree submodules: {}",
+                        rp.name,
+                        compact_git_error(error)
+                    )),
+                    Some(SubmoduleState::Clear) | None => None,
+                };
+                if let Some(message) = message {
+                    if !matches!(worktree_removed, RmOutcome::Failed { .. }) {
+                        worktree_removed = RmOutcome::Failed { error: message.clone() };
+                    }
+                    errors.push(CleanupIssue::new(CleanupIssueCode::WorktreeRefused, message));
+                }
+            }
+
             let wt_succeeded = !matches!(&worktree_removed, RmOutcome::Failed { .. });
-            let branch_deleted =
-                forecast_branch_delete(rp, force, wt_succeeded, observed, &mut errors);
+            let branch_deleted = forecast_branch_delete_with_policy(
+                rp,
+                force,
+                wt_succeeded,
+                observed,
+                &mut errors,
+                !legacy_dirty_gate,
+            );
 
             RepoRmResult {
                 name: rp.name.clone(),
@@ -860,28 +1032,15 @@ pub fn decide_rm_dry_run(
         })
         .collect();
 
-    let mut forest_root_cleanup = Vec::new();
-    if errors.is_empty() {
-        forest_root_cleanup = root_cleanup_results(plan, |_| RmOutcome::Success);
-        if let Some(msg) = forest_dir_cleanup_refusal(plan, &repos, force, &observation.forest_dir)
-        {
-            errors.push(CleanupIssue::new(
-                CleanupIssueCode::ForestDirNotRemoved,
-                msg,
-            ));
-        }
-    }
-
-    let forest_dir_removed = errors.is_empty();
-
     RmResult {
+        preflight_blocked: false,
         forest_name: plan.forest_name.clone(),
         forest_dir: plan.forest_dir.clone(),
         dry_run: true,
         force,
         repos,
-        forest_root_cleanup,
-        forest_dir_removed,
+        forest_root_cleanup: vec![],
+        forest_dir_removed: false,
         errors,
     }
 }
@@ -1008,6 +1167,17 @@ pub fn forecast_branch_delete(
     observed: &RepoDryRunObservation,
     errors: &mut Vec<CleanupIssue>,
 ) -> RmOutcome {
+    forecast_branch_delete_with_policy(repo_plan, force, wt_succeeded, observed, errors, false)
+}
+
+fn forecast_branch_delete_with_policy(
+    repo_plan: &RepoRmPlan,
+    force: bool,
+    wt_succeeded: bool,
+    observed: &RepoDryRunObservation,
+    errors: &mut Vec<CleanupIssue>,
+    require_branch_observation: bool,
+) -> RmOutcome {
     if !wt_succeeded {
         return RmOutcome::Skipped {
             reason: "worktree not removed".to_string(),
@@ -1031,6 +1201,21 @@ pub fn forecast_branch_delete(
             "a dry-run observes the branch and worktrees of every repo whose branch the forest created and whose source exists"
         );
     };
+
+    if let Err(error) = &branch.exists {
+        if require_branch_observation {
+            let msg = format!(
+                "{}: could not inspect branch existence: {}",
+                repo_plan.name,
+                compact_git_error(error)
+            );
+            errors.push(CleanupIssue::new(
+                CleanupIssueCode::BranchDeleteFailed,
+                msg.clone(),
+            ));
+            return RmOutcome::Failed { error: msg };
+        }
+    }
 
     if let Ok(false) = branch.exists {
         return RmOutcome::Skipped {
@@ -1176,6 +1361,10 @@ fn format_branch_state_warning_suffix(branch_state: &WorktreeBranchState) -> Str
         .unwrap_or_default()
 }
 
+fn removal_blocked(result: &RmResult) -> bool {
+    result.preflight_blocked
+}
+
 pub fn format_rm_human(result: &RmResult) -> String {
     let mut lines = Vec::new();
 
@@ -1195,6 +1384,11 @@ pub fn format_rm_human(result: &RmResult) -> String {
         }
     } else if result.errors.is_empty() {
         lines.push(format!("Removed forest {:?}", result.forest_name.as_str()));
+    } else if removal_blocked(result) {
+        lines.push(format!(
+            "Removal blocked for forest {:?}",
+            result.forest_name.as_str()
+        ));
     } else {
         lines.push(format!(
             "Removed forest {:?} (with errors)",
@@ -1299,7 +1493,9 @@ pub fn format_rm_summary(result: &RmResult) -> String {
 
     lines.extend(format_forest_root_cleanup(result));
 
-    if result.forest_dir_removed {
+    if removal_blocked(result) {
+        lines.push("Removal blocked; no changes made.".to_string());
+    } else if result.forest_dir_removed {
         lines.push("Forest directory removed.".to_string());
     } else {
         lines.push("Forest directory not removed (not empty).".to_string());
@@ -1656,5 +1852,138 @@ mod tests {
                 "foo-web: worktree path is a symlink; refusing to remove unverified worktree without `git forest rm --force`".to_string(),
             ]
         );
+    }
+    fn content_checks(dirtiness: Dirtiness) -> RmWorktreeChecks {
+        RmWorktreeChecks {
+            dirtiness,
+            submodules: SubmoduleState::Clear,
+        }
+    }
+
+    #[test]
+    fn preflight_separates_residue_from_safety_and_preserves_noops() {
+        let mut rp = repo_plan("api");
+        rp.branch_created = false;
+        let obs = observed(&rp);
+        let plan = plan(vec![rp]);
+        assert!(matches!(
+            decide_rm_preflight(
+                &plan,
+                &observation(&plan, vec![obs], &["keep.txt"]),
+                &[content_checks(Dirtiness::Clean)],
+                false,
+                false
+            ),
+            RmPreflight::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn preflight_collects_dirty_and_locked_repos_in_metadata_order() {
+        let plan = plan(vec![repo_plan("api"), repo_plan("web")]);
+        let a = observed(&plan.repo_plans[0]);
+        let mut b = observed(&plan.repo_plans[1]);
+        b.worktrees.as_mut().unwrap().as_mut().unwrap()[0].locked = true;
+        let obs = observation(&plan, vec![a, b], &[]);
+        for force in [false, true] {
+            let RmPreflight::Blocked(result) = decide_rm_preflight(
+                &plan,
+                &obs,
+                &[
+                    content_checks(Dirtiness::Dirty),
+                    content_checks(Dirtiness::Clean),
+                ],
+                force,
+                false,
+            ) else {
+                panic!("lock must block")
+            };
+            assert_eq!(result.errors.len(), if force { 1 } else { 2 });
+            if !force {
+                assert_eq!(result.errors[0].code, CleanupIssueCode::DirtyWorktree);
+            }
+            assert!(result.errors.last().unwrap().message.contains("locked"));
+            assert!(result
+                .repos
+                .iter()
+                .all(|r| !matches!(r.worktree_removed, RmOutcome::Success)
+                    && !matches!(r.branch_deleted, RmOutcome::Success)));
+            assert!(result.forest_root_cleanup.is_empty());
+            assert!(format_rm_human(&result).starts_with("Removal blocked"));
+        }
+    }
+
+    #[test]
+    fn preflight_preserves_failed_observations_and_force_overrides() {
+        let plan = plan(vec![repo_plan("api")]);
+        let obs = observation(&plan, vec![observed(&plan.repo_plans[0])], &[]);
+        for force in [false, true] {
+            let decision = decide_rm_preflight(
+                &plan,
+                &obs,
+                &[content_checks(Dirtiness::Unavailable(
+                    "status unavailable".into(),
+                ))],
+                force,
+                false,
+            );
+            assert_eq!(matches!(decision, RmPreflight::Ready(_)), force);
+        }
+        let mut repo = observed(&plan.repo_plans[0]);
+        repo.branch.as_mut().unwrap().exists = Err("ref unavailable".into());
+        let obs = observation(&plan, vec![repo], &[]);
+        for force in [false, true] {
+            let RmPreflight::Blocked(result) = decide_rm_preflight(
+                &plan,
+                &obs,
+                &[content_checks(Dirtiness::Clean)],
+                force,
+                false,
+            ) else {
+                panic!("unknown branch must block")
+            };
+            assert_eq!(result.errors[0].code, CleanupIssueCode::BranchDeleteFailed);
+        }
+        // The deferred reset helper keeps its original force forecast.
+        let mut issues = vec![];
+        assert_eq!(
+            forecast_branch_delete(&plan.repo_plans[0], true, true, &obs.repos[0], &mut issues),
+            RmOutcome::Success
+        );
+    }
+    #[test]
+    fn preflight_submodule_presence_and_failed_reads_block_only_without_force() {
+        let plan = plan(vec![repo_plan("api"), repo_plan("web")]);
+        let obs = observation(&plan, plan.repo_plans.iter().map(observed).collect(), &[]);
+        for force in [false, true] {
+            for submodules in [
+                SubmoduleState::RequiresForce,
+                SubmoduleState::Unavailable("cannot read submodules".into()),
+            ] {
+                let checks = [
+                    content_checks(Dirtiness::Clean),
+                    RmWorktreeChecks {
+                        dirtiness: Dirtiness::Clean,
+                        submodules,
+                    },
+                ];
+                match decide_rm_preflight(&plan, &obs, &checks, force, false) {
+                    RmPreflight::Ready(_) => assert!(force),
+                    RmPreflight::Blocked(result) => {
+                        assert!(!force);
+                        assert_eq!(result.errors.len(), 1);
+                        assert_eq!(result.errors[0].code, CleanupIssueCode::WorktreeRefused);
+                        assert!(result.errors[0].message.contains("submodule"));
+                        assert!(result.repos.iter().all(|repo| !matches!(
+                            repo.worktree_removed,
+                            RmOutcome::Success
+                        ) && !matches!(
+                            repo.branch_deleted,
+                            RmOutcome::Success
+                        )));
+                    }
+                }
+            }
+        }
     }
 }

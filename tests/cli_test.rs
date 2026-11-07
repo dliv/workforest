@@ -3084,3 +3084,375 @@ fn ls_reuses_source_lock_inventories_per_invocation() {
         json!([{"name":"foo-web","reason":"second forest only"}])
     );
 }
+
+/// The assembled CLI returns the same blocked operations in preview and live mode.
+#[test]
+fn rm_preflight_preserves_dirty_and_locked_forest_and_reports_truthfully() {
+    for locked_name in ["foo-api", "foo-web"] {
+        let (_tmp, home, base) = setup_new_env();
+        bin_cmd()
+            .args(["new", "preflight", "--mode", "feature", "--no-fetch"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .assert()
+            .success();
+        let dir = base.join("preflight");
+        let locked = dir.join(locked_name);
+        let dirty = dir.join(if locked_name == "foo-api" {
+            "foo-web"
+        } else {
+            "foo-api"
+        });
+        run_git(&locked, &["worktree", "lock", "."]);
+        std::fs::write(dirty.join("keep.txt"), "retain").unwrap();
+        let metadata = std::fs::read(dir.join(".forest-meta.toml")).unwrap();
+        for force in [false, true] {
+            let mut results = vec![];
+            for dry in [true, false] {
+                let mut args = vec!["--json", "rm", "preflight"];
+                if force {
+                    args.push("--force");
+                }
+                if dry {
+                    args.push("--dry-run");
+                }
+                let output = bin_cmd()
+                    .args(&args)
+                    .env("HOME", &home)
+                    .env("XDG_CONFIG_HOME", home.join(".config"))
+                    .assert()
+                    .code(1)
+                    .get_output()
+                    .stdout
+                    .clone();
+                let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(
+                    result["errors"].as_array().unwrap().len(),
+                    if force { 1 } else { 2 }
+                );
+                for repo in result["repos"].as_array().unwrap() {
+                    assert_ne!(repo["worktree_removed"]["status"], "success");
+                    assert_ne!(repo["branch_deleted"]["status"], "success");
+                }
+                assert_eq!(result["forest_dir_removed"], false);
+                assert_eq!(result["forest_root_cleanup"], serde_json::json!([]));
+                results.push(result);
+            }
+            assert_eq!(results[0]["errors"], results[1]["errors"]);
+            assert_eq!(results[0]["repos"], results[1]["repos"]);
+            let mut args = vec!["rm", "preflight"];
+            if force {
+                args.push("--force");
+            }
+            let output = bin_cmd()
+                .args(&args)
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .assert()
+                .code(1)
+                .get_output()
+                .stdout
+                .clone();
+            let human = String::from_utf8(output).unwrap();
+            assert!(human.contains("Removal blocked"), "{human}");
+            assert!(!human.contains("worktree removed"), "{human}");
+            assert_eq!(
+                std::fs::read(dir.join(".forest-meta.toml")).unwrap(),
+                metadata
+            );
+            assert_eq!(
+                std::fs::read_to_string(dirty.join("keep.txt")).unwrap(),
+                "retain"
+            );
+            assert!(locked.exists());
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RmSafetyFixture {
+    HiddenUntracked,
+    InitializedSubmodule,
+    HiddenDirtySubmodule,
+    UninitializedSubmodule,
+    DeinitializedSubmodule,
+    EmbeddedSubmodule,
+    EmptyModulesDirectory,
+}
+
+fn check_rm_safety_fixture(fixture: RmSafetyFixture, affected: &str, all: bool) {
+    let (tmp, home, base) = setup_new_env();
+    let source = tmp.path().join("src").join(affected);
+    let has_submodule = !matches!(
+        fixture,
+        RmSafetyFixture::HiddenUntracked | RmSafetyFixture::EmptyModulesDirectory
+    );
+    let nested = tmp.path().join("nested-source");
+    if has_submodule {
+        create_test_git_repo(&nested);
+        run_git(
+            &source,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                nested.to_str().unwrap(),
+                "nested",
+            ],
+        );
+        run_git(&source, &["commit", "-am", "add submodule"]);
+        run_git(&source, &["push", "origin", "main"]);
+    }
+    for name in if all {
+        vec!["healthy", "safety"]
+    } else {
+        vec!["safety"]
+    } {
+        bin_cmd()
+            .args(["new", name, "--mode", "feature", "--no-fetch"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .assert()
+            .success();
+    }
+    let dir = base.join("safety");
+    let worktree = dir.join(affected);
+    let git_output = |cwd: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    match fixture {
+        RmSafetyFixture::HiddenUntracked => {
+            std::fs::write(worktree.join("keep.txt"), "retain untracked bytes").unwrap();
+            run_git(&worktree, &["config", "status.showUntrackedFiles", "no"]);
+        }
+        RmSafetyFixture::UninitializedSubmodule => {}
+        RmSafetyFixture::EmbeddedSubmodule => {
+            run_git(&worktree, &["clone", nested.to_str().unwrap(), "nested"]);
+            assert!(worktree.join("nested/.git").is_dir());
+            run_git(&worktree, &["config", "submodule.nested.active", "false"]);
+        }
+        RmSafetyFixture::EmptyModulesDirectory => {
+            let git_dir = git_output(&worktree, &["rev-parse", "--absolute-git-dir"]);
+            std::fs::create_dir(std::path::Path::new(git_dir.trim()).join("modules")).unwrap();
+        }
+        RmSafetyFixture::InitializedSubmodule
+        | RmSafetyFixture::HiddenDirtySubmodule
+        | RmSafetyFixture::DeinitializedSubmodule => {
+            run_git(
+                &worktree,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "update",
+                    "--init",
+                ],
+            );
+            match fixture {
+                RmSafetyFixture::HiddenDirtySubmodule => {
+                    std::fs::write(worktree.join("nested/keep.txt"), "retain nested bytes")
+                        .unwrap();
+                    run_git(&worktree, &["config", "submodule.nested.ignore", "all"]);
+                }
+                RmSafetyFixture::DeinitializedSubmodule => {
+                    run_git(&worktree, &["submodule", "deinit", "--all"]);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(git_output(&worktree, &["status", "--porcelain"]).is_empty());
+    let metadata = std::fs::read(dir.join(".forest-meta.toml")).unwrap();
+    let registration = |source: &std::path::Path, wt: &std::path::Path| {
+        git_output(source, &["worktree", "list", "--porcelain", "-z"])
+            .split("\0\0")
+            .find(|record| {
+                record.starts_with(&format!(
+                    "worktree {}\0",
+                    wt.canonicalize().unwrap().display()
+                ))
+            })
+            .expect("fixture registration")
+            .to_string()
+    };
+    let before: Vec<_> = ["foo-api", "foo-web"]
+        .into_iter()
+        .map(|name| {
+            let source = tmp.path().join("src").join(name);
+            let wt = dir.join(name);
+            let tip = git_output(&source, &["rev-parse", "refs/heads/testuser/safety"]);
+            let registered = registration(&source, &wt);
+            (source, wt, tip, registered)
+        })
+        .collect();
+    let blocked = !matches!(fixture, RmSafetyFixture::UninitializedSubmodule);
+    let mut results = Vec::new();
+    for dry in [true, false] {
+        let mut args = vec!["rm", if all { "--all" } else { "safety" }, "--json"];
+        if dry {
+            args.push("--dry-run");
+        }
+        let output = bin_cmd()
+            .args(args)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .assert()
+            .code(if blocked { 1 } else { 0 })
+            .get_output()
+            .stdout
+            .clone();
+        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let result = if all {
+            result["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["forest_name"] == "safety")
+                .unwrap()
+                .clone()
+        } else {
+            result
+        };
+        if blocked {
+            assert!(!result["errors"].as_array().unwrap().is_empty());
+            for repo in result["repos"].as_array().unwrap() {
+                assert_ne!(repo["worktree_removed"]["status"], "success");
+                assert_ne!(repo["branch_deleted"]["status"], "success");
+            }
+            assert_eq!(result["forest_dir_removed"], false);
+        }
+        if dry || blocked {
+            assert_eq!(
+                std::fs::read(dir.join(".forest-meta.toml")).unwrap(),
+                metadata
+            );
+            for (source, wt, tip, registered) in &before {
+                assert!(wt.is_dir(), "{fixture:?}: {}", wt.display());
+                assert_eq!(
+                    &git_output(source, &["rev-parse", "refs/heads/testuser/safety"]),
+                    tip
+                );
+                assert_eq!(&registration(source, wt), registered);
+            }
+            let payload = match fixture {
+                RmSafetyFixture::HiddenUntracked => {
+                    Some((worktree.join("keep.txt"), "retain untracked bytes"))
+                }
+                RmSafetyFixture::HiddenDirtySubmodule => {
+                    Some((worktree.join("nested/keep.txt"), "retain nested bytes"))
+                }
+                _ => None,
+            };
+            if let Some((path, bytes)) = payload {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
+            }
+        }
+        if all {
+            assert_eq!(base.join("healthy").exists(), dry);
+        }
+        results.push(result);
+    }
+    assert_eq!(results[0]["errors"], results[1]["errors"]);
+    assert_eq!(results[0]["repos"], results[1]["repos"]);
+    if blocked {
+        for dry in [true, false] {
+            let mut args = vec!["rm", "safety", "--force", "--json"];
+            if dry {
+                args.push("--dry-run");
+            }
+            bin_cmd()
+                .args(args)
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .assert()
+                .success();
+            assert_eq!(dir.exists(), dry);
+        }
+    } else {
+        assert!(!dir.exists());
+    }
+}
+
+#[test]
+fn rm_preflight_rejects_hidden_untracked_content() {
+    for affected in ["foo-api", "foo-web"] {
+        for all in [false, true] {
+            check_rm_safety_fixture(RmSafetyFixture::HiddenUntracked, affected, all);
+        }
+    }
+}
+
+#[test]
+fn rm_preflight_handles_submodule_removal_states() {
+    for fixture in [
+        RmSafetyFixture::InitializedSubmodule,
+        RmSafetyFixture::HiddenDirtySubmodule,
+        RmSafetyFixture::UninitializedSubmodule,
+        RmSafetyFixture::DeinitializedSubmodule,
+        RmSafetyFixture::EmbeddedSubmodule,
+        RmSafetyFixture::EmptyModulesDirectory,
+    ] {
+        for affected in ["foo-api", "foo-web"] {
+            check_rm_safety_fixture(fixture, affected, false);
+        }
+    }
+    check_rm_safety_fixture(RmSafetyFixture::InitializedSubmodule, "foo-web", true);
+}
+
+#[test]
+fn rm_preflight_failed_status_is_a_blocker_with_existing_force_recovery() {
+    let (_tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "bad-index", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    let dir = base.join("bad-index");
+    let wt = dir.join("foo-web");
+    let git_dir = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    std::fs::write(
+        std::path::Path::new(git_dir.trim()).join("index"),
+        "corrupt index",
+    )
+    .unwrap();
+    let output = bin_cmd()
+        .args(["--json", "rm", "bad-index"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| issue["message"].as_str().unwrap().contains("dirtiness")));
+    assert!(dir.join("foo-api").exists());
+    assert!(wt.exists());
+    bin_cmd()
+        .args(["rm", "bad-index", "--force"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    assert!(!dir.exists());
+}

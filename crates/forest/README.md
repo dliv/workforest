@@ -36,6 +36,18 @@ observations; each worktree is matched separately. `status` reads a fresh
 inventory per repo. The [user-facing contract](../../README.md#commands) describes
 the output and unavailable-state semantics.
 
+Removal observes repo safety before mutation and core decides explicit Ready or
+Blocked readiness independently of root residue. The rm-private `PreparedRemoval`
+binds its plan, force policy, observation and decision; preview uses that exact
+decision and adds the root-cleanup forecast afterward. Execution accepts only the
+prepared value and keeps live refusal checks. Its content observations override
+Git's status suppression settings and inspect worktree-specific submodule
+metadata plus indexed gitlinks, independently of active/ignore configuration.
+Failed observations block ordinary removal; force retains its existing override. Batch removal refreshes each forest
+before handling it, after strict discovery. Reset keeps its distinct executor and
+legacy preview policy. The [user contract](../../README.md#rm) describes scope,
+force overrides and the remaining race/partial-cleanup limits.
+
 ## Proofs
 
 - Core unit tests beside the decisions, newtypes and config format assert
