@@ -14,4 +14,5 @@ pub mod commands;
 pub mod config;
 pub mod forest;
 mod git;
+mod lock_state;
 mod testutil;

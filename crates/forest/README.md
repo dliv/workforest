@@ -29,6 +29,13 @@ and its own allowed libraries, never update-check or another feature. The
 [architecture rules](../../docs/architecture.md) own the exact allowlists,
 visibility contract and the permanent `reset -> rm` helper-sharing boundary.
 
+Read-only lock reporting uses [lock observations](ops/src/lock_state.rs) in ops
+and [lock state and rendering](core/src/plan/lock_state.rs) in core. `ls` reuses
+one inventory per canonical source path within its invocation, including failed
+observations; each worktree is matched separately. `status` reads a fresh
+inventory per repo. The [user-facing contract](../../README.md#commands) describes
+the output and unavailable-state semantics.
+
 ## Proofs
 
 - Core unit tests beside the decisions, newtypes and config format assert
@@ -44,6 +51,10 @@ visibility contract and the permanent `reset -> rm` helper-sharing boundary.
 - [Process tests](../../tests/README.md) exercise the built CLI's output,
   exits, dry-runs and partial failures. [Policy checks](../policy/README.md)
   protect the package and purity boundaries.
+- `ls_and_status_report_worktree_locks` exercises real locks, missing records,
+  unavailable sources and terminal escaping. `ls_reuses_source_lock_inventories_per_invocation`
+  counts real Git subprocesses across shared sources, checks separate forest
+  locks, source aliases on Unix, failed inventories and fresh later invocations.
 
 ## What comes next
 

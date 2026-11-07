@@ -2,6 +2,7 @@
 //! (`git-forest-ops`) reads each worktree's branch state and runs `git status` where that state
 //! allows, so `status` has no decide step.
 
+use crate::plan::lock_state::WorktreeLockState;
 use serde::Serialize;
 
 use crate::paths::{ForestName, RepoName};
@@ -16,6 +17,7 @@ pub struct StatusResult {
 #[derive(Debug, Serialize)]
 pub struct RepoStatus {
     pub name: RepoName,
+    pub lock_state: WorktreeLockState,
     pub branch_state: WorktreeBranchState,
     pub status: RepoStatusKind,
 }
@@ -32,6 +34,9 @@ pub fn format_status_human(result: &StatusResult) -> String {
     let mut lines = Vec::new();
     for repo in &result.repos {
         lines.push(format!("=== {} ===", repo.name));
+        if let Some(annotation) = repo.lock_state.human_annotation() {
+            lines.push(format!("  {}", annotation));
+        }
         if let Some(message) = repo.branch_state.drift_message() {
             lines.push(format!("  warning: {}", message));
         } else if let Some(message) = repo.branch_state.lookup_error_message() {

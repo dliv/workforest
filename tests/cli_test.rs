@@ -2835,3 +2835,252 @@ fn golden_update_failure() {
     insta::assert_snapshot!("update_brew_fails", golden_transcript(&output, t));
     assert_no_version_check(t);
 }
+
+/// Locks are inventory observations, independent of branch/status health. Drive the actual
+/// binary after every Git transition, including failures and missing registrations.
+#[test]
+fn ls_and_status_report_worktree_locks() {
+    let (tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "locks", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    let forest = base.join("locks");
+    let api = forest.join("foo-api");
+    let web = forest.join("foo-web");
+    let output = |command: &str, json: bool| {
+        let mut cmd = bin_cmd();
+        cmd.arg(command);
+        if command == "status" {
+            cmd.arg("locks");
+        }
+        if json {
+            cmd.arg("--json");
+        }
+        String::from_utf8(
+            cmd.env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone(),
+        )
+        .unwrap()
+    };
+    let check = |states: &[serde_json::Value],
+                 locked: serde_json::Value,
+                 unavailable: serde_json::Value| {
+        let status: serde_json::Value = serde_json::from_str(&output("status", true)).unwrap();
+        assert_eq!(
+            status["repos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["foo-api", "foo-web"]
+        );
+        for (repo, state) in status["repos"].as_array().unwrap().iter().zip(states) {
+            assert_eq!(&repo["lock_state"], state);
+            assert!(repo["branch_state"].is_object());
+            assert!(repo["status"].is_object());
+        }
+        let ls: serde_json::Value = serde_json::from_str(&output("ls", true)).unwrap();
+        let summary = &ls["forests"][0];
+        assert_eq!(summary["locked_worktrees"], locked);
+        assert_eq!(
+            summary["locked_worktree_count"],
+            locked.as_array().unwrap().len()
+        );
+        assert_eq!(summary["lock_unavailable_repos"], unavailable);
+        assert_eq!(
+            summary["lock_unavailable_count"],
+            unavailable.as_array().unwrap().len()
+        );
+        (output("status", false), output("ls", false), status, ls)
+    };
+    use serde_json::json;
+    let unlocked = json!({"type":"unlocked"});
+    let unavailable = json!({"type":"unavailable"});
+    let bare = json!({"type":"locked","reason":null});
+    let (human, listing, _, _) = check(&[unlocked.clone(), unlocked.clone()], json!([]), json!([]));
+    assert!(!human.contains("locked"));
+    assert!(!listing.contains("locked"));
+    assert!(!listing.contains("lock state unavailable"));
+
+    run_git(&api, &["worktree", "lock", "."]);
+    let reason = format!("stop dev first\n\t\x1b[31m{} end", "x".repeat(400));
+    run_git(&web, &["worktree", "lock", "--reason", &reason, "."]);
+    let (human, listing, _, _) = check(
+        &[bare.clone(), json!({"type":"locked","reason":reason})],
+        json!([{"name":"foo-api","reason":null},{"name":"foo-web","reason":reason}]),
+        json!([]),
+    );
+    assert!(listing.contains("[2 locked]"));
+    assert!(human.contains("=== foo-api ===\n  locked\n##"));
+    assert!(human.contains("locked: stop dev first\\n\\t\\u{1b}[31m"));
+    assert!(human.contains(&format!("{} end", "x".repeat(400))));
+    assert!(!human.contains('\x1b'));
+
+    // A locked registration survives an absent directory and must retain both facts.
+    std::fs::remove_dir_all(&api).unwrap();
+    let (human, _, status, ls) = check(
+        &[bare.clone(), json!({"type":"locked","reason":reason})],
+        json!([{"name":"foo-api","reason":null},{"name":"foo-web","reason":reason}]),
+        json!([]),
+    );
+    assert_eq!(status["repos"][0]["status"]["type"], "Missing");
+    assert_eq!(ls["forests"][0]["missing_worktree_count"], 1);
+    assert!(human.contains("  locked\n  warning: worktree missing"));
+
+    // Failed source observation cannot claim unlocked, but status still reads the worktree.
+    let source = tmp.path().join("src/foo-web");
+    let moved = tmp.path().join("src/foo-web-moved");
+    std::fs::rename(&source, &moved).unwrap();
+    let (human, listing, _, _) = check(
+        &[bare.clone(), unavailable.clone()],
+        json!([{"name":"foo-api","reason":null}]),
+        json!(["foo-web"]),
+    );
+    assert!(human.contains("warning: lock state unavailable"));
+    assert!(listing.contains("[1 locked] [lock state unavailable: 1 repo]"));
+    std::fs::rename(&moved, &source).unwrap();
+
+    // Successful inventory with no expected record is unavailable, even if a directory exists.
+    run_git(&web, &["worktree", "unlock", "."]);
+    run_git(&source, &["worktree", "remove", web.to_str().unwrap()]);
+    std::fs::create_dir_all(&web).unwrap();
+    let (_, _, status, _) = check(
+        &[bare, unavailable],
+        json!([{"name":"foo-api","reason":null}]),
+        json!(["foo-web"]),
+    );
+    assert_eq!(status["repos"][1]["status"]["type"], "Error");
+}
+
+/// Shared sources are observed once, without sharing one worktree's lock with another.
+/// Git's own trace records actual subprocess starts, including failed inventories.
+#[test]
+fn ls_reuses_source_lock_inventories_per_invocation() {
+    use serde_json::json;
+
+    let (tmp, home, base) = setup_new_env();
+    for name in ["locks-a", "locks-b"] {
+        bin_cmd()
+            .args(["new", name, "--mode", "feature", "--no-fetch"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .assert()
+            .success();
+    }
+    let forest_a = base.join("locks-a");
+    let forest_b = base.join("locks-b");
+    run_git(&forest_a.join("foo-api"), &["worktree", "lock", "."]);
+    run_git(
+        &forest_b.join("foo-web"),
+        &["worktree", "lock", "--reason", "second forest only", "."],
+    );
+
+    // Aliases of the same source must reuse its observation as well.
+    #[cfg(unix)]
+    {
+        let source = tmp.path().join("src");
+        let alias = tmp.path().join("source-alias");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let meta_path = forest_b.join(".forest-meta.toml");
+        let meta = std::fs::read_to_string(&meta_path).unwrap();
+        assert_eq!(meta.matches(source.to_str().unwrap()).count(), 2);
+        std::fs::write(
+            meta_path,
+            meta.replace(source.to_str().unwrap(), alias.to_str().unwrap()),
+        )
+        .unwrap();
+    }
+
+    let trace = tmp.path().join("git-trace.jsonl");
+    let listing = || {
+        std::fs::write(&trace, "").unwrap();
+        let stdout = bin_cmd()
+            .args(["ls", "--json"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GIT_TRACE2_EVENT", &trace)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let inventories = std::fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "start"
+                    && event["argv"].as_array().is_some_and(|args| {
+                        args.len() == 5
+                            && args[1..]
+                                == json!(["worktree", "list", "--porcelain", "-z"])
+                                    .as_array()
+                                    .unwrap()[..]
+                    })
+            })
+            .count();
+        assert_eq!(
+            inventories, 2,
+            "one inventory per source across both forests"
+        );
+        let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        let forest = |name: &str| {
+            result["forests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|forest| forest["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        (forest("locks-a"), forest("locks-b"))
+    };
+
+    let (a, b) = listing();
+    assert_eq!(
+        a["locked_worktrees"],
+        json!([{"name":"foo-api","reason":null}])
+    );
+    assert_eq!(
+        b["locked_worktrees"],
+        json!([{"name":"foo-web","reason":"second forest only"}])
+    );
+    assert_eq!(a["lock_unavailable_count"], 0);
+    assert_eq!(b["lock_unavailable_count"], 0);
+
+    // No cache survives the invocation: a later Git change appears on the next call.
+    run_git(&forest_a.join("foo-api"), &["worktree", "unlock", "."]);
+    let (a, b) = listing();
+    assert_eq!(a["locked_worktree_count"], 0);
+    assert_eq!(b["locked_worktree_count"], 1);
+
+    // A failed inventory is shared too, but does not poison the other source.
+    let source = tmp.path().join("src/foo-web");
+    let moved = tmp.path().join("src/foo-web-moved");
+    std::fs::rename(&source, &moved).unwrap();
+    std::fs::create_dir(&source).unwrap();
+    let (a, b) = listing();
+    for forest in [a, b] {
+        assert_eq!(forest["lock_unavailable_repos"], json!(["foo-web"]));
+        assert_eq!(forest["lock_unavailable_count"], 1);
+        assert_eq!(forest["locked_worktree_count"], 0);
+    }
+
+    std::fs::remove_dir(&source).unwrap();
+    std::fs::rename(&moved, &source).unwrap();
+    let (_, b) = listing();
+    assert_eq!(b["lock_unavailable_count"], 0);
+    assert_eq!(
+        b["locked_worktrees"],
+        json!([{"name":"foo-web","reason":"second forest only"}])
+    );
+}

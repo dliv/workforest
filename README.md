@@ -152,6 +152,17 @@ git forest exec <name> -- <cmd> [args...]
 
 `status` and `rm` auto-detect the current forest when run from inside one.
 
+`ls` summarizes registered Git worktree locks and unavailable lock observations.
+`status` reports each repo's lock and its reason above its Git status. Human reasons
+escape control characters; JSON preserves the reason. In `status --json`, every
+repo has `lock_state` with `type` equal to `locked` (and a nullable `reason`),
+`unlocked`, or `unavailable`. In `ls --json`, every forest includes
+`locked_worktree_count`, `locked_worktrees` (name and nullable reason),
+`lock_unavailable_count`, and `lock_unavailable_repos` (repo names).
+An unlocked observation requires a matching Git inventory record; a failed
+observation or absent record is unavailable. Lock metadata is independent of
+branch and directory health, so a missing worktree can still report a lock.
+
 ## Development
 
 Start with the [developer documentation](docs/README.md) for setup, commands,

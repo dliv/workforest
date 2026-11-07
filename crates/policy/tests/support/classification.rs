@@ -28,6 +28,11 @@ pub enum ModuleClass {
 /// Every .rs file under the `src/` directory of every workspace member except Tooling, by
 /// repository-relative path, with its class.
 pub const MODULES: &[(&str, ModuleClass)] = &[
+    (
+        "crates/forest/core/src/plan/lock_state.rs",
+        ModuleClass::Pure,
+    ),
+    ("crates/forest/ops/src/lock_state.rs", ModuleClass::Shared),
     ("crates/forest/core/src/config.rs", ModuleClass::Pure),
     ("crates/forest/core/src/lib.rs", ModuleClass::Pure),
     ("crates/forest/core/src/meta.rs", ModuleClass::Pure),

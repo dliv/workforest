@@ -36,6 +36,7 @@ pub fn cmd_status(forest_dir: &Path, meta: &ForestMeta) -> Result<StatusResult> 
 
         repos.push(RepoStatus {
             name: repo.name.clone(),
+            lock_state: crate::lock_state::read_lock_state(&repo.source, &worktree),
             branch_state,
             status,
         });

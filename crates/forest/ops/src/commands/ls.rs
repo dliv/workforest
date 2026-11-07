@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::branch_state::{read_branch_state, WorktreeBranchState};
@@ -17,7 +18,8 @@ pub fn cmd_ls(worktree_bases: &[&Path], now: DateTime<Utc>) -> Result<LsResult> 
 
 /// Reads what listing needs: the inventory of each worktree base in the given order (a scan
 /// error aborts, as nothing else in `ls` can fail), the canonical key of each base and of each
-/// finding, and the branch state of each repo of each deduplicated forest.
+/// finding, and the branch and lock state of each repo of each deduplicated forest.
+/// Source lock inventories (including failures) live only for this invocation.
 fn observe_ls(worktree_bases: &[&Path]) -> Result<LsObservation> {
     let mut entries = Vec::new();
     for base in worktree_bases {
@@ -51,10 +53,25 @@ fn observe_ls(worktree_bases: &[&Path]) -> Result<LsObservation> {
         .iter()
         .map(|base| canonical_path_key(base))
         .collect();
+    let mut lock_inventories = HashMap::new();
     let forests = forests
         .into_iter()
         .map(|forest| LsForestObservation {
             branch_states: branch_states(&forest.dir, &forest.meta.repos),
+            lock_states: forest
+                .meta
+                .repos
+                .iter()
+                .map(|repo| {
+                    let inventory = lock_inventories
+                        .entry(canonical_path_key(&repo.source))
+                        .or_insert_with(|| crate::lock_state::read_lock_inventory(&repo.source));
+                    (
+                        repo.name.clone(),
+                        inventory.state_for(&forest.dir.join(repo.name.as_str())),
+                    )
+                })
+                .collect(),
             meta: forest.meta,
         })
         .collect();

@@ -2,6 +2,7 @@
 //! (`git-forest-ops`) `commands::ls` observes (the configured bases, the forests under them
 //! with their worktrees' branch states, and the inventory findings), and the human renderer.
 
+use crate::plan::lock_state::WorktreeLockState;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::cmp::Reverse;
@@ -45,6 +46,16 @@ pub struct ForestSummary {
     pub branch_drifts: Vec<RepoBranchDrift>,
     pub branch_lookup_error_count: usize,
     pub branch_lookup_errors: Vec<RepoBranchLookupError>,
+    pub locked_worktree_count: usize,
+    pub locked_worktrees: Vec<RepoLockedWorktree>,
+    pub lock_unavailable_count: usize,
+    pub lock_unavailable_repos: Vec<RepoName>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoLockedWorktree {
+    pub name: RepoName,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +100,8 @@ pub struct LsForestObservation {
     pub meta: ForestMeta,
     /// The branch state of each repo's worktree, in metadata order.
     pub branch_states: Vec<(RepoName, WorktreeBranchState)>,
+    /// Independent lock observations, in metadata order.
+    pub lock_states: Vec<(RepoName, WorktreeLockState)>,
 }
 
 /// One directory under a worktree base whose forest metadata is missing or unreadable.
@@ -131,7 +144,14 @@ pub fn decide_ls(observation: LsObservation, now: DateTime<Utc>) -> LsResult {
 
     let summaries = forests
         .iter()
-        .map(|forest| summarize_forest(&forest.meta, &forest.branch_states, now))
+        .map(|forest| {
+            summarize_forest(
+                &forest.meta,
+                &forest.branch_states,
+                &forest.lock_states,
+                now,
+            )
+        })
         .collect();
     LsResult {
         forests: summaries,
@@ -151,6 +171,7 @@ fn display_path(path: &Path) -> String {
 fn summarize_forest(
     forest: &ForestMeta,
     branch_states: &[(RepoName, WorktreeBranchState)],
+    lock_states: &[(RepoName, WorktreeLockState)],
     now: DateTime<Utc>,
 ) -> ForestSummary {
     let age_seconds = (now - forest.created_at).num_seconds();
@@ -161,7 +182,29 @@ fn summarize_forest(
     let branch_drift_count = branch_drifts.len();
     let branch_lookup_errors = branch_lookup_errors(branch_states);
     let branch_lookup_error_count = branch_lookup_errors.len();
+    let locked_worktrees: Vec<_> = lock_states
+        .iter()
+        .filter_map(|(name, state)| {
+            if let WorktreeLockState::Locked { reason } = state {
+                Some(RepoLockedWorktree {
+                    name: name.clone(),
+                    reason: reason.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let lock_unavailable_repos: Vec<_> = lock_states
+        .iter()
+        .filter(|(_, state)| matches!(state, WorktreeLockState::Unavailable))
+        .map(|(name, _)| name.clone())
+        .collect();
     ForestSummary {
+        locked_worktree_count: locked_worktrees.len(),
+        locked_worktrees,
+        lock_unavailable_count: lock_unavailable_repos.len(),
+        lock_unavailable_repos,
         name: forest.name.clone(),
         age_seconds,
         age_display: format_age(age_seconds),
@@ -320,6 +363,20 @@ pub fn format_ls_human(result: &LsResult) -> String {
 
         for forest in &result.forests {
             let mut branches = format_branches(&forest.branch_summary);
+            if forest.locked_worktree_count > 0 {
+                branches.push_str(&format!(" [{} locked]", forest.locked_worktree_count));
+            }
+            if forest.lock_unavailable_count > 0 {
+                branches.push_str(&format!(
+                    " [lock state unavailable: {} {}]",
+                    forest.lock_unavailable_count,
+                    if forest.lock_unavailable_count == 1 {
+                        "repo"
+                    } else {
+                        "repos"
+                    }
+                ));
+            }
             branches.push_str(&format_missing_worktree_summary(&forest.missing_worktrees));
             branches.push_str(&format_branch_drift_summary(&forest.branch_drifts));
             branches.push_str(&format_branch_lookup_error_summary(
@@ -482,6 +539,10 @@ mod tests {
                     branch_drifts: vec![],
                     branch_lookup_error_count: 0,
                     branch_lookup_errors: vec![],
+                    locked_worktree_count: 0,
+                    locked_worktrees: vec![],
+                    lock_unavailable_count: 0,
+                    lock_unavailable_repos: vec![],
                 },
                 ForestSummary {
                     name: ForestName::new("review-bar-very-long-name".to_string()).unwrap(),
@@ -504,6 +565,10 @@ mod tests {
                     branch_drifts: vec![],
                     branch_lookup_error_count: 0,
                     branch_lookup_errors: vec![],
+                    locked_worktree_count: 0,
+                    locked_worktrees: vec![],
+                    lock_unavailable_count: 0,
+                    lock_unavailable_repos: vec![],
                 },
                 ForestSummary {
                     name: ForestName::new("mid-length".to_string()).unwrap(),
@@ -520,6 +585,10 @@ mod tests {
                     branch_drifts: vec![],
                     branch_lookup_error_count: 0,
                     branch_lookup_errors: vec![],
+                    locked_worktree_count: 0,
+                    locked_worktrees: vec![],
+                    lock_unavailable_count: 0,
+                    lock_unavailable_repos: vec![],
                 },
             ],
             findings: vec![],
@@ -545,6 +614,10 @@ mod tests {
                 branch_drifts: vec![],
                 branch_lookup_error_count: 0,
                 branch_lookup_errors: vec![],
+                locked_worktree_count: 0,
+                locked_worktrees: vec![],
+                lock_unavailable_count: 0,
+                lock_unavailable_repos: vec![],
             }],
             findings: vec![],
         };
@@ -597,6 +670,7 @@ mod tests {
         LsForestObservation {
             meta,
             branch_states: vec![],
+            lock_states: vec![],
         }
     }
 
@@ -764,6 +838,7 @@ mod tests {
             forests: vec![LsForestObservation {
                 meta: forest_meta("states", now, repos),
                 branch_states,
+                lock_states: vec![],
             }],
             findings: vec![],
         };
