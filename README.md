@@ -181,6 +181,53 @@ An unlocked observation requires a matching Git inventory record; a failed
 observation or absent record is unavailable. Lock metadata is independent of
 branch and directory health, so a missing worktree can still report a lock.
 
+`rm` also includes the observed lock reason in its refusal message, with control
+characters escaped. A reason is explanatory text; a lock without a reason still
+blocks removal, including with `--force`.
+
+Successful `status --json` entries retain `status.output` and add `status.summary`:
+
+```json
+{
+  "type": "available",
+  "head_commit": "<observed commit ID>",
+  "changed_path_count": 2,
+  "upstream": { "type": "not_configured" },
+  "base": { "type": "available", "ref": "refs/remotes/origin/main", "ahead": 1, "behind": 3 },
+  "commits_not_on_known_remotes": { "type": "available", "count": 1 }
+}
+```
+
+- `changed_path_count` counts Git change entries: staged and unstaged changes
+  to the same path count once, a rename counts once, untracked directories are
+  expanded to files, and a dirty submodule counts as one parent entry. Ignored
+  files do not count. Explicit scan options can reveal entries hidden or grouped
+  by settings in the retained text output.
+- `upstream` compares the actual branch with its configured upstream. Its type
+  can be `available`, `not_configured`, `detached`, or `unavailable`. A configured
+  upstream that is missing or cannot be mapped remains unavailable.
+- `base` separately compares with the base remote-tracking ref saved when the
+  forest was created. It is available or unavailable; legacy metadata without a
+  recorded remote does not imply `origin`.
+- `commits_not_on_known_remotes` counts commits reachable from the observed HEAD
+  but absent from every locally known remote-tracking history. Publishing to a
+  backup remote can make it zero even while ahead of the upstream. No known
+  remote refs means unavailable.
+
+Unavailable observations have a `reason` and `message`, never invented zero
+counts. A failed structured scan makes the summary unavailable while retaining
+successful text; a failed individual comparison/count preserves the other
+summary fields. Unborn HEAD has a null `head_commit`, a valid changed-path count,
+and unavailable history counts. Missing/error repo results remain unchanged.
+
+These are local observations: status does not fetch. Stale refs, fetch coverage
+and shallow history affect the counts; being behind alone does not establish
+fast-forward readiness. Comparisons use the observed HEAD commit, but the scans,
+refs and worktree are not one atomic snapshot. The extra worktree scan and
+history walks add synchronous cost, especially for many untracked files or
+submodules. Human status output and exit behavior are unchanged. These fields
+do not grant removal permission.
+
 ## Development
 
 Start with the [developer documentation](docs/README.md) for setup, commands,

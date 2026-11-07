@@ -3,6 +3,7 @@
 //! allows, so `status` has no decide step.
 
 use crate::plan::lock_state::WorktreeLockState;
+use crate::plan::status_protocol::CommitId;
 use serde::Serialize;
 
 use crate::paths::{ForestName, RepoName};
@@ -25,9 +26,112 @@ pub struct RepoStatus {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum RepoStatusKind {
-    Ok { output: String },
-    Missing { path: String },
-    Error { message: String },
+    Ok {
+        output: String,
+        summary: StatusSummary,
+    },
+    Missing {
+        path: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StatusSummary {
+    Available(Box<AvailableStatusSummary>),
+    Unavailable {
+        reason: SummaryUnavailableReason,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AvailableStatusSummary {
+    pub head_commit: Option<CommitId>,
+    pub changed_path_count: u64,
+    pub upstream: UpstreamComparison,
+    pub base: BaseComparison,
+    pub commits_not_on_known_remotes: KnownRemoteCommits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryUnavailableReason {
+    ObservationFailed,
+    InvalidOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitComparison {
+    pub r#ref: String,
+    pub ahead: u64,
+    pub behind: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UpstreamComparison {
+    Available(CommitComparison),
+    NotConfigured,
+    Detached,
+    Unavailable {
+        r#ref: Option<String>,
+        reason: ComparisonUnavailableReason,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonUnavailableReason {
+    TargetUnavailable,
+    ObservationFailed,
+    ObservationChanged,
+    UnbornHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BaseComparison {
+    Available(CommitComparison),
+    Unavailable {
+        r#ref: Option<String>,
+        reason: BaseUnavailableReason,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseUnavailableReason {
+    TargetUnavailable,
+    ObservationFailed,
+    UnbornHead,
+    MetadataRemoteMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KnownRemoteCommits {
+    Available {
+        count: u64,
+    },
+    Unavailable {
+        reason: RemoteCountUnavailableReason,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCountUnavailableReason {
+    NoRemoteRefs,
+    UnbornHead,
+    ObservationFailed,
+    InvalidOutput,
 }
 
 pub fn format_status_human(result: &StatusResult) -> String {
@@ -43,7 +147,7 @@ pub fn format_status_human(result: &StatusResult) -> String {
             lines.push(format!("  warning: {}", message));
         }
         match &repo.status {
-            RepoStatusKind::Ok { output } => lines.push(output.clone()),
+            RepoStatusKind::Ok { output, .. } => lines.push(output.clone()),
             RepoStatusKind::Missing { path } => {
                 lines.push(format!("  warning: worktree missing at {}", path));
             }

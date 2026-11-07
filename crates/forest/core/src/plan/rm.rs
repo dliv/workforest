@@ -694,13 +694,42 @@ pub fn worktree_removal_refusal(
 
 // --- Dry-run over observations ---
 
+/// Lock data from a successfully observed worktree record. Listing failure is separate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WorktreeLock {
+    #[default]
+    Unlocked,
+    Locked {
+        reason: Option<String>,
+    },
+}
+
+impl WorktreeLock {
+    pub fn is_locked(&self) -> bool {
+        matches!(self, Self::Locked { .. })
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            Self::Unlocked => "unlocked".to_string(),
+            Self::Locked { reason: None } => "locked".to_string(),
+            Self::Locked {
+                reason: Some(reason),
+            } => format!(
+                "locked (reason: {})",
+                crate::plan::lock_state::escape_lock_reason(reason)
+            ),
+        }
+    }
+}
+
 /// One entry of a source repo's `git worktree list`, with its canonical path when it has one.
 #[derive(Clone)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
     pub canonical: Option<PathBuf>,
     pub branch: Option<String>,
-    pub locked: bool,
+    pub lock: WorktreeLock,
 }
 
 /// What a dry-run reads about the branch a forest created, from its source repo.
@@ -1069,12 +1098,12 @@ fn listed_worktree_lock(
     worktrees: &Result<Vec<WorktreeEntry>, String>,
     repo_plan: &RepoRmPlan,
     target_canonical: Option<&Path>,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<WorktreeLock>, String> {
     let entries = worktrees.as_ref().map_err(Clone::clone)?;
     Ok(entries
         .iter()
         .find(|entry| worktree_paths_match(entry, &repo_plan.worktree_path, target_canonical))
-        .map(|entry| entry.locked))
+        .map(|entry| entry.lock.clone()))
 }
 
 /// Why a dry-run cannot prove a worktree's removal from git's worktree metadata, if it cannot:
@@ -1088,11 +1117,11 @@ pub fn worktree_metadata_refusal(
     let worktrees = observed.worktrees.as_ref()?;
 
     match listed_worktree_lock(worktrees, repo_plan, observed.worktree_canonical.as_deref()) {
-        Ok(Some(true)) => Some(format!(
-            "{}: refusing removal because git worktree metadata is locked",
-            repo_plan.name
+        Ok(Some(lock @ WorktreeLock::Locked { .. })) => Some(format!(
+            "{}: refusing removal because git worktree metadata is {}",
+            repo_plan.name, lock.description()
         )),
-        Ok(Some(false)) if !repo_plan.worktree_exists && !force => Some(format!(
+        Ok(Some(WorktreeLock::Unlocked)) if !repo_plan.worktree_exists && !force => Some(format!(
             "{}: source repo still lists missing worktree metadata for {}; dry-run cannot prove branch deletion",
             repo_plan.name,
             repo_plan.worktree_path.display()
@@ -1125,9 +1154,10 @@ fn symlink_worktree_refusal(
     let worktrees = observed.worktrees.as_ref()?;
 
     match listed_worktree_lock(worktrees, repo_plan, observed.worktree_canonical.as_deref()) {
-        Ok(Some(true)) => Some(format!(
-            "{}: refusing removal because git worktree metadata is locked",
-            repo_plan.name
+        Ok(Some(lock @ WorktreeLock::Locked { .. })) => Some(format!(
+            "{}: refusing removal because git worktree metadata is {}",
+            repo_plan.name,
+            lock.description()
         )),
         Ok(_) => None,
         Err(e) => Some(format!(
@@ -1667,7 +1697,7 @@ mod tests {
                 path: repo_plan.worktree_path.clone(),
                 canonical: Some(repo_plan.worktree_path.clone()),
                 branch: Some(format!("refs/heads/{}", repo_plan.branch)),
-                locked: false,
+                lock: WorktreeLock::Unlocked,
             }])),
             branch: Some(BranchObservation {
                 exists: Ok(true),
@@ -1793,7 +1823,7 @@ mod tests {
         let locked = repo_plan("foo-api");
         let mut locked_observed = observed(&locked);
         if let Some(Ok(entries)) = &mut locked_observed.worktrees {
-            entries[0].locked = true;
+            entries[0].lock = WorktreeLock::Locked { reason: None };
         }
         let mut stale = repo_plan("foo-web");
         stale.worktree_exists = false;
@@ -1835,7 +1865,7 @@ mod tests {
         let locked = repo_plan("foo-api");
         let mut locked_observed = observed(&locked);
         if let Some(Ok(entries)) = &mut locked_observed.worktrees {
-            entries[0].locked = true;
+            entries[0].lock = WorktreeLock::Locked { reason: None };
         }
         let symlinked = repo_plan("foo-web");
         let mut symlinked_observed = observed(&symlinked);
@@ -1883,7 +1913,8 @@ mod tests {
         let plan = plan(vec![repo_plan("api"), repo_plan("web")]);
         let a = observed(&plan.repo_plans[0]);
         let mut b = observed(&plan.repo_plans[1]);
-        b.worktrees.as_mut().unwrap().as_mut().unwrap()[0].locked = true;
+        b.worktrees.as_mut().unwrap().as_mut().unwrap()[0].lock =
+            WorktreeLock::Locked { reason: None };
         let obs = observation(&plan, vec![a, b], &[]);
         for force in [false, true] {
             let RmPreflight::Blocked(result) = decide_rm_preflight(

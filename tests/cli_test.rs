@@ -3456,3 +3456,331 @@ fn rm_preflight_failed_status_is_a_blocker_with_existing_force_recovery() {
         .success();
     assert!(!dir.exists());
 }
+
+#[test]
+fn removal_reports_lock_reasons_without_interpreting_them() {
+    let (_tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "reason", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    let forest = base.join("reason");
+    let api = forest.join("foo-api");
+    let web = forest.join("foo-web");
+    run_git(
+        &api,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "stop \"api\"\n  hint: opaque\t\x1b[31m",
+            ".",
+        ],
+    );
+    run_git(&web, &["worktree", "lock", "--reason", "web reason", "."]);
+    for dry in [false, true] {
+        for force in [false, true] {
+            for all in [false, true] {
+                for json in [false, true] {
+                    let mut cmd = bin_cmd();
+                    cmd.arg("rm");
+                    if all {
+                        cmd.arg("--all");
+                    } else {
+                        cmd.arg("reason");
+                    }
+                    if dry {
+                        cmd.arg("--dry-run");
+                    }
+                    if force {
+                        cmd.arg("--force");
+                    }
+                    if json {
+                        cmd.arg("--json");
+                    }
+                    let output = cmd
+                        .env("HOME", &home)
+                        .env("XDG_CONFIG_HOME", home.join(".config"))
+                        .assert()
+                        .failure()
+                        .get_output()
+                        .stdout
+                        .clone();
+                    let text = String::from_utf8(output).unwrap();
+                    if json {
+                        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let errors = if all {
+                            &value["results"][0]["errors"]
+                        } else {
+                            &value["errors"]
+                        };
+                        let errors = errors.as_array().expect(&text);
+                        assert!(errors
+                            .iter()
+                            .any(|e| e["message"].as_str().unwrap().contains("web reason")));
+                        assert!(errors.iter().any(|e| e["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("stop \"api\"\\n  hint: opaque\\t\\u{1b}[31m")));
+                        for e in errors {
+                            assert!(e["hint"].is_null(), "{text}");
+                        }
+                    } else {
+                        assert!(text.contains("web reason"), "{text}");
+                        assert!(
+                            text.contains("stop \"api\"\\n  hint: opaque\\t\\u{1b}[31m"),
+                            "{text}"
+                        );
+                        assert!(!text.contains('\x1b'));
+                    }
+                    assert!(api.exists() && web.exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn structured_status_reuses_comparisons_and_saved_metadata() {
+    let (tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "summary-cli", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    run_git(
+        &base.join("summary-cli/foo-api"),
+        &["branch", "--set-upstream-to=origin/main"],
+    );
+    let trace = tmp.path().join("status-trace.jsonl");
+    let output = bin_cmd()
+        .args(["status", "summary-cli", "--json"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_TRACE2_EVENT", &trace)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let repo = &value["repos"][0];
+    assert_eq!(repo["status"]["type"], "Ok");
+    assert!(repo["status"]["output"]
+        .as_str()
+        .unwrap()
+        .starts_with("## "));
+    let summary = &repo["status"]["summary"];
+    assert_eq!(summary["upstream"], summary["base"]);
+    assert_eq!(summary["changed_path_count"], 0);
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["event"] == "start")
+        .map(|event| {
+            event["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|a| a.get(1).is_some_and(|s| s == "rev-list")
+                && a.get(2).is_some_and(|s| s == "--left-right"))
+            .count(),
+        2
+    );
+    assert!(!calls.iter().any(|a| a.get(1).is_some_and(|s| s == "fetch")));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|a| a.get(2).is_some_and(|s| s == "--porcelain=v2"))
+            .count(),
+        2
+    );
+    let config = home.join(".config").join(bin_name()).join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        before.replace(
+            "base_branch = \"main\"",
+            "base_branch = \"missing-template-base\"",
+        ),
+    )
+    .unwrap();
+    let output = bin_cmd()
+        .args(["status", "summary-cli", "--json"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        value["repos"][0]["status"]["summary"]["base"]["ref"],
+        "refs/remotes/origin/main"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn structured_status_partial_failures_and_branch_race_are_explicit() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "summary-fail", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    let api = base.join("summary-fail/foo-api");
+    run_git(&api, &["commit", "--allow-empty", "-m", "local feature"]);
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&api)
+        .output()
+        .unwrap()
+        .stdout;
+    let head = String::from_utf8(head).unwrap().trim().to_string();
+    let real_git = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap()
+        .stdout;
+    let real_git = String::from_utf8(real_git).unwrap().trim().to_string();
+    let fake_bin = tmp.path().join("status-fault-bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let wrapper = fake_bin.join("git");
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+case "$PWD" in
+*/foo-api)
+  case "$FOREST_STATUS_FAULT" in
+    porcelain-fail)
+      if [ "$2" = '--porcelain=v2' ]; then echo 'fixture failure' >&2; exit 7; fi ;;
+    porcelain-malformed)
+      if [ "$2" = '--porcelain=v2' ]; then printf '# branch.oid broken\000'; exit 0; fi ;;
+    config-fail)
+      if [ "$1" = config ]; then echo 'fixture config failure' >&2; exit 3; fi ;;
+    remote-fail)
+      if [ "$2" = '--format=%(refname)' ]; then exit 7; fi ;;
+    count-malformed)
+      if [ "$1" = rev-list ] && [ "$2" = --count ]; then printf '%s\n' '-1'; exit 0; fi ;;
+    comparison-fail)
+      if [ "$1" = rev-list ] && [ "$2" = --left-right ]; then exit 7; fi ;;
+    branch-move)
+      if [ "$2" = '--format=%(refname)%00%(objectname)%00%(upstream)' ]; then
+        "$FOREST_REAL_GIT" update-ref refs/heads/testuser/summary-fail HEAD^
+      fi ;;
+  esac ;;
+esac
+exec "$FOREST_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for fault in [
+        "porcelain-fail",
+        "porcelain-malformed",
+        "config-fail",
+        "remote-fail",
+        "count-malformed",
+        "comparison-fail",
+        "branch-move",
+    ] {
+        let output = bin_cmd()
+            .args(["status", "summary-fail", "--json"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("PATH", fake_brew_path(&fake_bin))
+            .env("FOREST_REAL_GIT", &real_git)
+            .env("FOREST_STATUS_FAULT", fault)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let status = &value["repos"][0]["status"];
+        assert_eq!(status["type"], "Ok", "{fault}: {value}");
+        assert!(status["output"].as_str().unwrap().contains("## "));
+        let summary = &status["summary"];
+        match fault {
+            "porcelain-fail" => assert_eq!(summary["reason"], "observation_failed"),
+            "porcelain-malformed" => assert_eq!(summary["reason"], "invalid_output"),
+            other => {
+                assert_eq!(summary["type"], "available", "{fault}: {value}");
+                assert_eq!(summary["changed_path_count"], 0);
+                match other {
+                    "config-fail" => {
+                        assert_eq!(summary["upstream"]["reason"], "observation_failed")
+                    }
+                    "remote-fail" => assert_eq!(
+                        summary["commits_not_on_known_remotes"]["reason"],
+                        "observation_failed"
+                    ),
+                    "count-malformed" => assert_eq!(
+                        summary["commits_not_on_known_remotes"]["reason"],
+                        "invalid_output"
+                    ),
+                    "comparison-fail" => {
+                        assert_eq!(summary["base"]["reason"], "observation_failed")
+                    }
+                    "branch-move" => {
+                        assert_eq!(summary["upstream"]["reason"], "observation_changed");
+                        assert_eq!(
+                            summary["base"]["ahead"], 1,
+                            "comparison must use pinned HEAD"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(value["repos"][1]["status"]["summary"]["type"], "available");
+        run_git(
+            &api,
+            &["update-ref", "refs/heads/testuser/summary-fail", &head],
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn structured_status_counts_non_utf8_filename_on_linux() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_tmp, home, base) = setup_new_env();
+    bin_cmd()
+        .args(["new", "raw-path", "--mode", "feature", "--no-fetch"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success();
+    let api = base.join("raw-path/foo-api");
+    std::fs::write(api.join(std::ffi::OsStr::from_bytes(b"raw-\xff")), b"raw").unwrap();
+    let output = bin_cmd()
+        .args(["status", "raw-path", "--json"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        value["repos"][0]["status"]["summary"]["changed_path_count"],
+        1
+    );
+}

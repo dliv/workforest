@@ -695,7 +695,11 @@ mod tests {
                             path: worktree_path.clone(),
                             canonical: Some(worktree_path),
                             branch: Some(format!("refs/heads/{branch}")),
-                            locked,
+                            lock: if locked {
+                                crate::plan::rm::WorktreeLock::Locked { reason: None }
+                            } else {
+                                crate::plan::rm::WorktreeLock::Unlocked
+                            },
                         }])),
                         branch: Some(BranchObservation {
                             exists: Ok(true),

@@ -16,6 +16,7 @@ use git_forest_core::plan::rm::{
     BranchObservation, Dirtiness, ForestDirListing, ForestDirObservation, ForestRootCleanupAction,
     ForestRootPlan, RepoDryRunObservation, RepoObservation, RmDryRunObservation, RmObservation,
     RmPreflight, RmWorktreeChecks, RootListing, RootObservation, SubmoduleState, WorktreeEntry,
+    WorktreeLock,
 };
 pub use git_forest_core::plan::rm::{
     format_repo_done, format_rm_all_human, format_rm_all_summary, format_rm_human,
@@ -225,7 +226,7 @@ fn observed_worktrees(source: &Path) -> Result<Vec<WorktreeEntry>, String> {
                 canonical: entry.path.canonicalize().ok(),
                 path: entry.path,
                 branch: entry.branch,
-                locked: entry.locked,
+                lock: entry.lock,
             })
             .collect()
     })
@@ -761,11 +762,12 @@ fn remove_corrupt_worktree_dir(
 ) -> (RmOutcome, bool) {
     let target_canonical = canonicalize_existing_or_parent(&repo_plan.worktree_path);
     match worktree_metadata_for_path(repo_plan, target_canonical.as_deref()) {
-        Ok(Some(metadata)) if metadata.locked => {
+        Ok(Some(metadata)) if metadata.lock.is_locked() => {
             let msg = format!(
-                "{}: git worktree remove failed: {}; refusing direct removal because git worktree metadata is locked",
+                "{}: git worktree remove failed: {}; refusing direct removal because git worktree metadata is {}",
                 repo_plan.name,
-                compact_git_error(&git_error)
+                compact_git_error(&git_error),
+                metadata.lock.description()
             );
             errors.push(CleanupIssue::new(
                 CleanupIssueCode::WorktreeRefused,
@@ -913,13 +915,13 @@ fn path_is_symlink(path: &Path) -> bool {
 }
 
 struct WorktreeMetadata {
-    locked: bool,
+    lock: WorktreeLock,
 }
 
 struct WorktreeListEntry {
     path: PathBuf,
     branch: Option<String>,
-    locked: bool,
+    lock: WorktreeLock,
 }
 
 fn path_has_parent_dir(path: &Path) -> bool {
@@ -933,7 +935,7 @@ fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String
     let mut entries = Vec::new();
     let mut current_path = None;
     let mut current_branch = None;
-    let mut current_locked = false;
+    let mut current_lock = WorktreeLock::Unlocked;
 
     for token in output.split('\0') {
         if token.is_empty() {
@@ -941,11 +943,11 @@ fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String
                 entries.push(WorktreeListEntry {
                     path,
                     branch: current_branch.take(),
-                    locked: current_locked,
+                    lock: std::mem::take(&mut current_lock),
                 });
             }
             current_branch = None;
-            current_locked = false;
+            current_lock = WorktreeLock::Unlocked;
             continue;
         }
 
@@ -953,8 +955,12 @@ fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String
             current_path = Some(PathBuf::from(path));
         } else if let Some(branch) = token.strip_prefix("branch ") {
             current_branch = Some(branch.to_string());
-        } else if token == "locked" || token.starts_with("locked ") {
-            current_locked = true;
+        } else if token == "locked" {
+            current_lock = WorktreeLock::Locked { reason: None };
+        } else if let Some(reason) = token.strip_prefix("locked ") {
+            current_lock = WorktreeLock::Locked {
+                reason: Some(reason.to_string()),
+            };
         }
     }
 
@@ -962,7 +968,7 @@ fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String
         entries.push(WorktreeListEntry {
             path,
             branch: current_branch,
-            locked: current_locked,
+            lock: std::mem::take(&mut current_lock),
         });
     }
 
@@ -975,9 +981,7 @@ fn worktree_metadata_for_path(
 ) -> Result<Option<WorktreeMetadata>, String> {
     for entry in worktree_list_entries(&repo_plan.source)? {
         if worktree_paths_match(&entry.path, &repo_plan.worktree_path, target_canonical) {
-            return Ok(Some(WorktreeMetadata {
-                locked: entry.locked,
-            }));
+            return Ok(Some(WorktreeMetadata { lock: entry.lock }));
         }
     }
 
@@ -3829,6 +3833,50 @@ mod tests {
             "stale worktree metadata should be pruned: {}",
             worktrees
         );
+    }
+
+    #[test]
+    fn live_corrupt_fallback_preserves_and_escapes_lock_reason() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+        cmd_new(
+            make_new_inputs("fallback-reason", ForestMode::Feature),
+            &tmpl,
+        )
+        .unwrap();
+        let dir = tmpl.worktree_base.join("fallback-reason");
+        let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+        let plan = plan_rm(&dir, &meta);
+        let worktree = dir.join("foo-api");
+        crate::git::git(
+            &meta.repos[0].source,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "stop\n  hint: not advice\t\u{1b}[31m",
+                worktree.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        replace_worktree_with_plain_dir(&worktree);
+        let mut errors = Vec::new();
+        let (outcome, removed) = remove_corrupt_worktree_dir(
+            &plan.repo_plans[0],
+            "fixture git removal failure".to_string(),
+            &mut errors,
+        );
+        assert!(!removed);
+        assert!(matches!(outcome, RmOutcome::Failed { .. }));
+        assert!(worktree.exists());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, CleanupIssueCode::WorktreeRefused);
+        assert_eq!(errors[0].hint, None);
+        assert!(errors[0]
+            .message
+            .contains("stop\\n  hint: not advice\\t\\u{1b}[31m"));
+        assert!(!errors[0].message.contains('\n'));
     }
 
     #[test]

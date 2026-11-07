@@ -50,6 +50,10 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
     ("crates/forest/core/src/plan/rm.rs", ModuleClass::Pure),
     ("crates/forest/core/src/plan/status.rs", ModuleClass::Pure),
     (
+        "crates/forest/core/src/plan/status_protocol.rs",
+        ModuleClass::Pure,
+    ),
+    (
         "crates/forest/ops/src/commands/branch_state.rs",
         ModuleClass::Command,
     ),

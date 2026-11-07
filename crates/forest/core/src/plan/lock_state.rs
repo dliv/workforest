@@ -16,20 +16,25 @@ impl WorktreeLockState {
             Self::Locked {
                 reason: Some(reason),
             } => {
-                let escaped: String = reason
-                    .chars()
-                    .flat_map(|c| {
-                        if c.is_control() {
-                            c.escape_default().collect::<Vec<_>>()
-                        } else {
-                            vec![c]
-                        }
-                    })
-                    .collect();
+                let escaped = escape_lock_reason(reason);
                 Some(format!("locked: {}", escaped))
             }
             Self::Unlocked => None,
             Self::Unavailable => Some("warning: lock state unavailable".to_string()),
         }
     }
+}
+
+/// Keep user-supplied lock text on one diagnostic line, including before hint splitting.
+pub(crate) fn escape_lock_reason(reason: &str) -> String {
+    reason
+        .chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }

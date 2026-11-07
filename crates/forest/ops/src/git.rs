@@ -46,6 +46,22 @@ pub(crate) fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     successful_bytes(repo, args, capture(repo, args)?)
 }
 
+/// Presence is distinct from empty values and failed config reads. Callers supply an exact key.
+pub(crate) fn config_key_present(repo: &Path, key: &str) -> Result<bool> {
+    let args = ["config", "--null", "--get-all", key];
+    let output = capture(repo, &args)?;
+    if output.status.success() {
+        if !output.stdout.ends_with(b"\0") {
+            bail!("invalid Git config query output");
+        }
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Ok(false);
+    }
+    successful_bytes(repo, &args, output).map(|_| true)
+}
+
 /// Check if a ref exists. Returns true if `git show-ref --verify <refname>` succeeds.
 #[expect(
     clippy::disallowed_methods,
@@ -132,6 +148,27 @@ mod tests {
             "error should mention failure: {}",
             err
         );
+    }
+
+    #[test]
+    fn config_presence_distinguishes_empty_inherited_missing_and_failed_reads() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("config-presence");
+        let key = "branch.main.merge";
+        assert!(!config_key_present(&repo, key).unwrap());
+        git(&repo, &["config", key, ""]).unwrap();
+        assert!(config_key_present(&repo, key).unwrap());
+        git(&repo, &["config", "--unset", key]).unwrap();
+        let included = env.root().join("included-config");
+        std::fs::write(&included, "[branch \"main\"]\nmerge = refs/heads/main\n").unwrap();
+        git(
+            &repo,
+            &["config", "include.path", included.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(config_key_present(&repo, key).unwrap());
+        std::fs::write(&included, "[invalid\n").unwrap();
+        assert!(config_key_present(&repo, key).is_err());
     }
 
     #[test]

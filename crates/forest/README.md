@@ -48,6 +48,21 @@ before handling it, after strict discovery. Reset keeps its distinct executor an
 legacy preview policy. The [user contract](../../README.md#rm) describes scope,
 force overrides and the remaining race/partial-cleanup limits.
 
+Structured status uses a second, byte-preserving porcelain observation through
+the existing Git wrapper. [Protocol parsing](core/src/plan/status_protocol.rs)
+is Pure; [status operations](ops/src/commands/status.rs) own exact ref reads,
+conditional upstream config reads and pinned-commit history comparisons. Result
+types and the unchanged human renderer live in [status core](core/src/plan/status.rs).
+Independent unavailable states retain partial observations. Identical upstream
+and base targets reuse their result within the invocation. No stored state,
+fetch, worker or removal-policy dependency is introduced. The
+[user contract](../../README.md#ls-status-exec) owns field meanings and limits.
+
+Removal's observed lock type retains the optional reason through preflight and
+the live fallback. Core escapes control characters before diagnostic/hint
+composition. Read-only lock inventories remain separate; shared reset callers
+retain their existing execution policy.
+
 ## Proofs
 
 - Core unit tests beside the decisions, newtypes and config format assert

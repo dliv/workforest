@@ -11,3 +11,4 @@ pub mod new;
 pub mod reset;
 pub mod rm;
 pub mod status;
+pub mod status_protocol;
