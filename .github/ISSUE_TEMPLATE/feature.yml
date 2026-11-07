@@ -1,0 +1,28 @@
+name: Feature or workflow request
+description: Describe a workflow that Workforest could support better.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the workflow; a detailed design or implementation is optional.
+        Please discuss an approach before investing in a PR.
+        See our [contribution guide](https://github.com/dliv/workforest/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task and how you use Workforest, including any agent or other tool driving it.
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: What is awkward or missing?
+      description: Explain the current behavior or workaround and the outcome you want. Examples are useful.
+    validations:
+      required: true
+  - type: textarea
+    id: ideas
+    attributes:
+      label: Ideas or additional context
+      description: Optional examples, alternatives, or a proposed approach.

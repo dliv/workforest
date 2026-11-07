@@ -17,9 +17,11 @@ Or download a binary from [GitHub Releases](https://github.com/dliv/workforest/r
 
 ## AI Agent Integration
 
-git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). All commands accept flags (no interactive prompts), support `--json` output, and include actionable error hints.
+git-forest is designed agent-first ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)). Commands accept flags without interactive prompts; forest operations provide `--json` results and actionable error hints.
 
-**For AI agents:** Run `git forest agent-instructions` for usage guidance.
+**For AI agents:** Run `git forest agent-instructions` for the installed version's
+usage guide, including structured status and removal safety. Use
+`git forest <command> --help` for detailed command behavior and flags.
 
 **For your project's agents:** Add the following to your project's `AGENTS.md` or `CLAUDE.md` so agents know git-forest is available:
 
@@ -76,7 +78,8 @@ git forest version  Show version (--check to check for updates)
 git forest update   Update git-forest to the latest version
 ```
 
-All commands support `--json` for structured output.
+Use `--json` for structured forest-operation results. Help, `agent-instructions`,
+`version`, and `init --show-path` remain textual; `update` rejects `--json`.
 
 ### `init`
 
@@ -230,9 +233,12 @@ do not grant removal permission.
 
 ## Development
 
+Bug reports, reproductions, and workflow descriptions are welcome. Read
+[Contributing](CONTRIBUTING.md) before proposing implementation work.
+
 Start with the [developer documentation](docs/README.md) for setup, commands,
 design guidance and the code map. [Development](docs/development.md) owns the
-local validation workflow; `just check` is the full Rust gate. Agents should
+local validation workflow; `just check` is the full repository gate. Agents should
 also read [AGENTS.md](AGENTS.md).
 
 ## Design
@@ -240,7 +246,7 @@ also read [AGENTS.md](AGENTS.md).
 See the [ADR index](docs/decisions/ADR_INDEX.md) for design decisions and
 [architecture rules](docs/architecture.md) for their enforcement. Key principles:
 
-- **Agent-drivable first** ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)) — all inputs as flags, `--json` on every command
+- **Agent-drivable first** ([ADR 0001](docs/decisions/0001-agent-drivable-first.md)) — all inputs as flags, structured forest-operation results
 - **Commands return data, don't print** ([ADR 0002](docs/decisions/0002-functional-core-imperative-shell.md)) — typed result structs, formatted at the edge
 - **Plan/execute for mutations** ([ADR 0003](docs/decisions/0003-plan-execute-split.md)) — `new` and `rm` use plan/execute split with `--dry-run`
 - **Self-contained forest meta** ([ADR 0004](docs/decisions/0004-forest-meta-self-contained.md)) — `.forest-meta.toml` captures all resolved values at creation; post-creation commands never re-consult config

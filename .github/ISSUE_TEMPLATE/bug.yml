@@ -1,0 +1,35 @@
+name: Bug report
+description: Report an unexpected result with enough detail to investigate.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A reproducible report is a useful contribution; a fix is not required.
+        Remove credentials, private remote URLs, and sensitive paths before posting.
+        See our [contribution guide](https://github.com/dliv/workforest/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description: Include `git forest --version`, `git --version`, your operating system, and how you installed Workforest.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Command and reproduction steps
+      description: Include the exact command and the smallest repository or forest setup that shows the problem. Note relevant Git settings or submodules.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: What did you expect, and what happened? Include the exit code or JSON result if available.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional evidence
+      description: Optional logs, screenshots, a reproducer, or a regression test. Verify any AI-assisted analysis before including it.
