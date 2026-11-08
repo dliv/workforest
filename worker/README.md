@@ -30,9 +30,11 @@ recipes act on remote infrastructure; the database-migrate recipe executes
 
 [CI](../.github/workflows/ci.yml) runs `npm ci --no-audit` and then `npm audit`
 here on Node 22.
-Tag preflight audits before any release build/upload; the deployment job audits
-again immediately before deployment. Future beta tags publish as GitHub prereleases.
-The same audit command gates local release recipes. These are dependency
+The [candidate workflow](../.github/workflows/release-candidate.yml) audits before
+publication readiness; promotion audits again immediately before a required
+deployment. The [release guide](../docs/releases.md) owns the separate approvals,
+channel regression checks and delivery/recovery sequence. Beta publication uses
+a GitHub prerelease. Preparation also runs the same audit command. These are dependency
 checks, not a TypeScript typecheck or a live protocol proof.
 `package.json` currently has a deploy script and no test script. The Rust
 ignored network tests exercise a deployed endpoint, not this checkout's worker

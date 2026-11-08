@@ -7,7 +7,8 @@ holds contributor instructions and the when-to-read router.
 
 | Document | Owns |
 | --- | --- |
-| [Development](development.md) | Local commands, validation and release mechanics |
+| [Development](development.md) | Local commands and validation |
+| [Releases](releases.md) | Approvals, candidate proof, publication and recovery |
 | [Design principles](design-principles.md) | Judgment rules and the six feature-start questions |
 | [Architecture](architecture.md) | Module/crate rules, enforcement, exceptions and proof limits |
 | [Candidate features](candidate-features.md) | The feature placement test and dated placement decisions |

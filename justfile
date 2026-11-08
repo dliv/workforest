@@ -31,59 +31,26 @@ test-linux:
 loc:
     tokei src crates tests
 
-# macOS-only (sed -i '' syntax). Bumps version, commits, tags, pushes, deploys worker.
+# quote() passes each argument as one shell-escaped value.
 release version:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    @echo 'Combined publication is retired. Follow docs/releases.md: prepare, review, merge, check, publish.' >&2
+    @exit 1
 
-    # 1. Verify clean state and passing checks
-    just check
-    just test
-    (cd worker && npm ci --silent --no-audit && npm audit)
-
-    # 2. Update version in Cargo.toml and wrangler.toml
-    sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-    sed -i '' 's/^LATEST_VERSION_STABLE = ".*"/LATEST_VERSION_STABLE = "{{version}}"/' worker/wrangler.toml
-
-    # 3. Rebuild to update Cargo.lock
-    cargo check
-    just check
-
-    # 4. Commit, tag, push (push tag by name per CLAUDE.md)
-    git add Cargo.toml Cargo.lock worker/wrangler.toml
-    git commit -m "chore: bump version to {{version}}"
-    git tag "v{{version}}"
-    git push
-    git push origin "v{{version}}"
-
-    echo "Released v{{version}} — worker deploys via CI"
-
-# macOS-only. Bumps beta version, commits, tags, pushes.
 release-beta version:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    @echo 'Combined publication is retired. Follow docs/releases.md.' >&2
+    @exit 1
 
-    # 1. Verify clean state and passing checks
-    just check
-    just test
-    (cd worker && npm ci --silent --no-audit && npm audit)
+release-prepare version:
+    python3 scripts/release.py prepare {{quote(version)}}
 
-    # 2. Update version in Cargo.toml and wrangler.toml
-    sed -i '' 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
-    sed -i '' 's/^LATEST_VERSION_BETA = ".*"/LATEST_VERSION_BETA = "{{version}}"/' worker/wrangler.toml
+release-merge branch expected_main reviewed_head ci_run ci_attempt:
+    python3 scripts/release.py merge {{quote(branch)}} {{quote(expected_main)}} {{quote(reviewed_head)}} {{quote(ci_run)}} {{quote(ci_attempt)}}
 
-    # 3. Rebuild to update Cargo.lock
-    cargo check
-    just check
+release-check merge_sha:
+    python3 scripts/release.py check {{quote(merge_sha)}}
 
-    # 4. Commit, tag, push (push tag by name per CLAUDE.md)
-    git add Cargo.toml Cargo.lock worker/wrangler.toml
-    git commit -m "chore: bump beta version to {{version}}"
-    git tag "v{{version}}"
-    git push
-    git push origin "v{{version}}"
-
-    echo "Released v{{version}} (beta) — worker deploys via CI"
+release-publish version merge_sha candidate_run candidate_attempt:
+    python3 scripts/release.py publish {{quote(version)}} {{quote(merge_sha)}} {{quote(candidate_run)}} {{quote(candidate_attempt)}}
 
 # --- Worker (Cloudflare) ---
 

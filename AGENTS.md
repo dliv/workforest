@@ -39,9 +39,14 @@ before every commit and before handing work back.
 
 ## Releases
 
-Use `just release <version>` (stable) or `just release-beta <version>` (beta). These handle Cargo.toml, wrangler.toml, Cargo.lock, checks, commit, tag, and push.
-
-When pushing tags manually, push by name - `git push origin v0.x.y` - not `--tags`. Pushing all tags at once doesn't trigger the GitHub Actions release workflow.
+Follow [the release guide](docs/releases.md). Preparation never commits or publishes.
+An external agent must review the whole release delta before merge readiness.
+**Ask Dave and wait for explicit merge approval** naming main base, reviewed head
+and hosted CI before `release-merge`. Then build/check the exact main merge.
+**Ask Dave separately and wait for publication approval** naming merge, version,
+candidate run/attempt, notes and artifact digests before `release-publish`.
+Successful commands, flags and CI are evidence, never human consent. Product
+commits still require their own approval. Never use manual tags to bypass this path.
 
 ## Using git-forest
 

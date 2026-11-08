@@ -1,0 +1,169 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact approved main merge SHA
+        required: true
+        type: string
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  validation:
+    name: Validate source
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      channel: ${{ steps.source.outputs.channel }}
+      bin: ${{ steps.source.outputs.bin }}
+      features: ${{ steps.source.outputs.features }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check dispatch identity or record PR proof identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from release import require_main
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              if os.environ['GITHUB_REF'] != 'refs/heads/main' or os.environ['EXPECTED_SHA'] != os.environ['GITHUB_SHA']:
+                  raise ValueError('candidate dispatch must name its exact main merge')
+              require_main(os.environ['EXPECTED_SHA'])
+          else:
+              print('PR proof only; artifacts are ineligible for publication')
+              subprocess.run(['git', 'show', '-s', '--format=commit=%H tree=%T parents=%P'], check=True)
+          PY
+      - name: Validate pre-tag source and notes
+        id: source
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          python3 scripts/check_release.py --candidate "$VERSION" --notes >> "$GITHUB_OUTPUT"
+      - name: Upload reviewed notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes-a${{ github.run_attempt }}
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 30
+
+  check:
+    name: Full gate
+    needs: validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install just
+        run: sudo apt-get update && sudo apt-get install -y just
+      - run: just check
+
+  audit-worker:
+    name: Audit worker deps
+    needs: validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - run: cd worker && npm ci --no-audit && npm audit
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: validation
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-26
+            architecture: arm64
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Locked native build
+        env:
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ needs.validation.outputs.features }}
+          BIN: ${{ needs.validation.outputs.bin }}
+        run: cargo build --release --locked --target "$TARGET" --no-default-features --features "$FEATURES" --bin "$BIN"
+      - name: Inspect and package exact bytes
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          BIN: ${{ needs.validation.outputs.bin }}
+          VERSION: ${{ needs.validation.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="$BIN-$TARGET"
+          mkdir -p dist
+          cp "target/$TARGET/release/$BIN" "dist/$NAME"
+          test "$(lipo -archs "dist/$NAME")" = "$ARCHITECTURE"
+          test "$("dist/$NAME" --version)" = "$BIN $VERSION"
+          (cd dist && COPYFILE_DISABLE=1 tar czf "$NAME.tar.gz" "$NAME")
+          test "$(tar -tzf "dist/$NAME.tar.gz")" = "$NAME"
+          tar -xOf "dist/$NAME.tar.gz" "$NAME" | cmp - "dist/$NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}-a${{ github.run_attempt }}
+          path: dist/${{ needs.validation.outputs.bin }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  manifest:
+    name: Manifest
+    needs: [validation, check, audit-worker, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bind exact artifact IDs and file digests
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py manifest "$RUNNER_TEMP/manifest.json"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: manifest-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Explain PR proof limit
+        if: github.event_name == 'pull_request'
+        run: echo 'Native PR checks ran; no publishable manifest is created for a PR event.'

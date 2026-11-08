@@ -33,12 +33,14 @@ class ReleaseIdentityTests(unittest.TestCase):
 
     def write_version(self, version):
         (self.root / "Cargo.toml").write_text(
-            f'[package]\nname = "fixture"\nversion = "{version}"\n')
+            f'[package]\nname = "git-forest"\nversion = "{version}"\n')
+        (self.root / "Cargo.lock").write_text(
+            f'version = 4\n[[package]]\nname = "git-forest"\nversion = "{version}"\n')
         worker = self.root / "worker"
         worker.mkdir(exist_ok=True)
         (worker / "wrangler.toml").write_text(
-            f'[vars]\nLATEST_VERSION_STABLE = "{version}"\n'
-            f'LATEST_VERSION_BETA = "{version}"\n')
+            f'[vars]\nLATEST_VERSION_STABLE = "{version if "-" not in version else "1.2.3"}"\n'
+            f'LATEST_VERSION_BETA = "{version if "-beta." in version else "1.2.4-beta.1"}"\n')
 
     def check(self, tag):
         return subprocess.run([sys.executable, str(SCRIPT), tag], cwd=self.root,
