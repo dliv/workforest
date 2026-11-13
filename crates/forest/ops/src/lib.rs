@@ -16,3 +16,4 @@ pub mod forest;
 mod git;
 mod lock_state;
 mod testutil;
+mod worktree_inventory;
