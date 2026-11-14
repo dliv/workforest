@@ -244,14 +244,29 @@ def merge(branch, expected_main, reviewed_head, ci_run, ci_attempt, gh):
     return merged
 
 
+class DispatchReadbackError(ValueError):
+    """GitHub accepted a dispatch whose run identity could not be confirmed."""
+
+
 def dispatch(gh, workflow, commit, inputs):
     response = gh.api(f"repos/{REPO}/actions/workflows/{workflow}/dispatches", method="POST",
                       body={"ref": "main", "inputs": inputs})
     run_id = positive(response["workflow_run_id"])
-    observed = gh.api(f"repos/{REPO}/actions/runs/{run_id}")
-    if observed["head_sha"] != commit or observed["event"] != "workflow_dispatch":
-        raise ValueError(f"dispatch run {run_id} has different source; expected-SHA gate must reject it")
-    print(f"run={run_id} attempt={observed['run_attempt']} url={response['html_url']}")
+    url = response.get("html_url") or f"https://github.com/{REPO}/actions/runs/{run_id}"
+    print(f"dispatched run={run_id} url={url}", flush=True)
+    try:
+        observed = gh.api(f"repos/{REPO}/actions/runs/{run_id}")
+        attempt = positive(observed["run_attempt"])
+        head_sha, event = observed["head_sha"], observed["event"]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+        raise DispatchReadbackError(
+            f"run {run_id} was dispatched but identity readback failed; inspect {url} before redispatching"
+        ) from error
+    if head_sha != commit or event != "workflow_dispatch":
+        raise DispatchReadbackError(
+            f"run {run_id} was dispatched but has unexpected source or event; inspect {url} before redispatching"
+        )
+    print(f"run={run_id} attempt={attempt} url={url}")
 
 
 def candidate_check(commit, gh):
@@ -335,7 +350,7 @@ def make_manifest(output, gh):
     Path(output).write_text(json.dumps(data, indent=2) + "\n")
 
 
-def load_candidate(gh, version, commit, run_id, attempt, output):
+def load_candidate(gh, version, commit, run_id, attempt, output, *, new_output=False):
     run_id, attempt = positive(run_id), positive(attempt)
     identity = validate_source(version, notes=True)
     checked_run(gh, run_id, attempt, commit, "main", "release-candidate.yml", "workflow_dispatch", CANDIDATE_JOBS)
@@ -349,11 +364,20 @@ def load_candidate(gh, version, commit, run_id, attempt, output):
     if manifest != expected or files["RELEASE_NOTES.md"] != Path("RELEASE_NOTES.md").read_bytes():
         raise ValueError("candidate manifest/source/run/version/channel/file digest identity mismatch")
     destination = Path(output)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(parents=True, exist_ok=not new_output)
     for filename, data in files.items():
         (destination / filename).write_bytes(data)
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
+
+
+def verify_candidate(commit, run_id, attempt, output, gh):
+    destination = Path(output).absolute()
+    with checkout(sha(commit)):
+        require_main(commit)
+        version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+        manifest = load_candidate(gh, version, commit, run_id, attempt, destination, new_output=True)
+    print(json.dumps(manifest, indent=2))
 
 
 def delivered_versions():
@@ -593,6 +617,9 @@ def main():
     for key in ("branch", "expected_main", "reviewed_head", "ci_run", "ci_attempt"):
         merging.add_argument(key)
     sub.add_parser("check").add_argument("merge_sha")
+    verifying = sub.add_parser("verify", help="verify a candidate and save artifacts locally")
+    for key in ("merge_sha", "candidate_run", "candidate_attempt", "output"):
+        verifying.add_argument(key)
     for operation in ("publish", "promote"):
         command = sub.add_parser(operation)
         for key in ("version", "merge_sha", "candidate_run", "candidate_attempt"):
@@ -607,11 +634,16 @@ def main():
             merge(args.branch, args.expected_main, args.reviewed_head, args.ci_run, args.ci_attempt, gh)
         elif args.command == "check":
             candidate_check(args.merge_sha, gh)
+        elif args.command == "verify":
+            verify_candidate(args.merge_sha, args.candidate_run, args.candidate_attempt, args.output, gh)
         elif args.command == "manifest":
             make_manifest(args.output, gh)
         else:
             operation = publish if args.command == "publish" else promote
             operation(args.version, sha(args.merge_sha), positive(args.candidate_run), positive(args.candidate_attempt), gh)
+    except DispatchReadbackError as error:
+        print(f"release {args.command}: {error}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError, zipfile.BadZipFile) as error:
         # Never dump captured subprocess output: credentials can appear in tool diagnostics.
         print(f"release {args.command} stopped: {error}", file=sys.stderr)

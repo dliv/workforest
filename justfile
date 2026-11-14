@@ -49,6 +49,9 @@ release-merge branch expected_main reviewed_head ci_run ci_attempt:
 release-check merge_sha:
     python3 scripts/release.py check {{quote(merge_sha)}}
 
+release-verify merge_sha candidate_run candidate_attempt output:
+    python3 scripts/release.py verify {{quote(merge_sha)}} {{quote(candidate_run)}} {{quote(candidate_attempt)}} {{quote(output)}}
+
 release-publish version merge_sha candidate_run candidate_attempt:
     python3 scripts/release.py publish {{quote(version)}} {{quote(merge_sha)}} {{quote(candidate_run)}} {{quote(candidate_attempt)}}
 

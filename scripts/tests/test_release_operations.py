@@ -327,8 +327,14 @@ class MetadataTests(GitFixture):
     def test_exact_dispatch_response_is_used(self):
         gh = self.metadata()
         gh.current["event"] = "workflow_dispatch"
-        release.dispatch(gh, "ci.yml", self.head, {"expected_sha": self.head})
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            release.dispatch(gh, "ci.yml", self.head, {"expected_sha": self.head})
         self.assertEqual(gh.writes()[0][2], {"ref": "main", "inputs": {"expected_sha": self.head}})
+        self.assertEqual(stdout.getvalue().splitlines(), [
+            "dispatched run=123 url=fixture://run",
+            "run=123 attempt=1 url=fixture://run",
+        ])
 
 
 class PromotionTests(GitFixture):
@@ -372,6 +378,71 @@ class PromotionTests(GitFixture):
         for filename, data in self.files.items():
             self.assertEqual((self.output / filename).read_bytes(), data)
         self.assertEqual(self.gh.writes(), [])
+
+    def test_verify_command_saves_artifacts_without_using_publication_state(self):
+        self.git("tag", "v1.2.3", self.base)
+        relative_output = Path("scratch output") / "verified"
+        destination = self.root / relative_output
+        argv = ["release.py", "verify", self.head, "123", "1", str(relative_output)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with working(self.root), patch.object(sys, "argv", argv), \
+                patch.object(release, "GitHub", return_value=self.gh), \
+                patch.object(release, "delivered_versions", side_effect=AssertionError("worker read")), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(release.main(), 0, stderr.getvalue())
+        self.assertEqual(json.loads(stdout.getvalue()), self.manifest)
+        self.assertEqual(json.loads((destination / "manifest.json").read_text()), self.manifest)
+        for filename, data in self.files.items():
+            self.assertEqual((destination / filename).read_bytes(), data)
+        self.assertEqual(self.gh.writes(), [])
+        self.assertTrue(all("/actions/" in endpoint for _, endpoint, _ in self.gh.calls))
+        self.assertEqual(self.main_sha(), self.head)
+
+    def test_verify_rejects_stale_attempt_and_preserves_existing_output(self):
+        self.gh.current["run_attempt"] = 2
+        with working(self.root), self.assertRaisesRegex(ValueError, "stale"):
+            release.verify_candidate(self.head, 123, 1, self.output, self.gh)
+        self.assertFalse(self.output.exists())
+        self.gh.current["run_attempt"] = 1
+        self.output.mkdir()
+        notes = self.output / "RELEASE_NOTES.md"
+        notes.write_text("previous evidence")
+        with working(self.root), self.assertRaises(FileExistsError):
+            release.verify_candidate(self.head, 123, 1, self.output, self.gh)
+        self.assertEqual(notes.read_text(), "previous evidence")
+        self.assertEqual(list(self.output.iterdir()), [notes])
+        self.assertEqual(self.gh.writes(), [])
+
+    def test_check_command_retains_dispatch_locator_on_failed_readback(self):
+        argv = ["release.py", "check", self.head]
+        for failure in ("unavailable", "wrong-sha", "missing-attempt"):
+            self.gh.calls.clear()
+            stdout, stderr = io.StringIO(), io.StringIO()
+            fake_api = self.gh.api
+
+            def dispatch_then_read(endpoint, *, method="GET", body=None):
+                if method == "POST":
+                    return fake_api(endpoint, method=method, body=body)
+                self.assertEqual(endpoint, f"repos/{release.REPO}/actions/runs/123")
+                self.assertEqual(stdout.getvalue(), "dispatched run=123 url=fixture://run\n")
+                if failure == "unavailable":
+                    raise subprocess.CalledProcessError(1, ["gh", "api", endpoint])
+                observed = fake_api(endpoint)
+                if failure == "wrong-sha":
+                    observed["head_sha"] = self.base
+                else:
+                    del observed["run_attempt"]
+                return observed
+
+            with self.subTest(failure=failure), working(self.root), patch.object(sys, "argv", argv), \
+                    patch.object(release, "GitHub", return_value=self.gh), \
+                    patch.object(self.gh, "api", side_effect=dispatch_then_read), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(release.main(), 1)
+            self.assertIn("run 123 was dispatched", stderr.getvalue())
+            self.assertIn("inspect fixture://run before redispatching", stderr.getvalue())
+            self.assertNotIn("stopped:", stderr.getvalue())
+            self.assertEqual(len(self.gh.writes()), 1)
 
     def test_missing_expired_wrong_origin_and_artifact_digest_reject_before_write(self):
         for mutation in ("missing", "expired", "old", "origin", "commit", "zip-digest", "run"):

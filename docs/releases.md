@@ -63,12 +63,15 @@ just release-check M
 ```
 
 `release-check` validates M and dispatches `release-candidate.yml` on `main`
-using M as the expected SHA. It prints the run ID, attempt, and URL. The workflow
-file must exist on the default branch for dispatch. The run verifies its source
-and notes, runs the full Linux gate, audits worker dependencies, and packages
-both native macOS targets with architecture, version, and archive checks. It
-uses read-only repository permissions. The publication workflow creates tags
-and releases.
+using M as the expected SHA. The workflow file must exist on the default branch
+for dispatch. The run verifies its source and notes, runs the full Linux gate,
+audits worker dependencies, and packages both native macOS targets with
+architecture, version, and archive checks. The run has read-only repository
+permissions. The publication workflow creates tags and releases.
+
+Both `release-check` and `release-publish` print the run ID and URL as soon as
+GitHub returns them, then read back the run identity and attempt. If that
+readback fails, inspect the existing run before requesting another dispatch.
 
 The manifest records repository, commit/tree, version/channel, run/attempt, both
 worker channel versions, notes digest and the two archive filenames/targets,
@@ -79,11 +82,19 @@ PR checks run the same native build steps. Publication requires a manifest from
 an exact-main dispatch. Signed-in GitHub users with read access can download
 the artifacts.
 
-Inspect the exact run and its required jobs, then download and verify the
-manifest and artifacts. This completes verification for a maintenance-only
-merge. For a release, request explicit **publication approval** from the
-maintainer with M, version/channel, run/attempt, notes, and both archive
-SHA-256 digests. That approval covers those exact inputs and artifacts.
+After the run succeeds, use the same candidate checks as publication to verify
+the exact attempt.
+
+```sh
+just release-verify M CANDIDATE_RUN CANDIDATE_ATTEMPT OUTPUT_DIR
+```
+
+The command reads GitHub metadata and checks the manifest and artifact bytes
+against M. It prints the verified manifest, including both archive SHA-256
+digests, and saves the manifest, notes, and archives in a new local directory.
+This completes verification for a maintenance-only merge. For a release, use
+the verified M, version/channel, run/attempt, notes, and archive digests to
+request explicit **publication approval** from the maintainer.
 
 ## Publish and verify
 
