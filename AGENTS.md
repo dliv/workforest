@@ -4,6 +4,7 @@ Canonical agent instructions for this project. `CLAUDE.md` is only a pointer to 
 
 ## Working with humans
 
+- **Get explicit maintainer approval for each public repository action.** Name the action and target before pushing a branch or tag, opening or updating a pull request, commenting on or managing an issue, dispatching a workflow, merging, or publishing a release. Approval to commit locally covers the local commit only.
 - **Push back on suggestions that don't make sense.** Don't blindly execute every request - if something is wrong or inapplicable, say so. Example: git-forest is a single-repo project, so "add git-forest multi-repo instructions to our own AGENTS.md" doesn't apply here - we don't consume git-forest, we build it.
 - **Fresh-agent handoffs:** when pivoting work to a new agent/thread, write a concise detailed handoff prompt under `tmp/` with the objective, repo state, key commits, verification already run, known blockers, and suggested next steps. `tmp/` is intentionally scratch space and should not be used for durable project documentation. Also provide the human a copy-paste-ready fenced text block that references the detailed prompt file path.
 
@@ -41,12 +42,12 @@ before every commit and before handing work back.
 
 Follow [the release guide](docs/releases.md). Preparation never commits or publishes.
 An external agent must review the whole release delta before merge readiness.
-**Ask Dave and wait for explicit merge approval** naming main base, reviewed head
-and hosted CI before `release-merge`. Then build/check the exact main merge.
-**Ask Dave separately and wait for publication approval** naming merge, version,
-candidate run/attempt, notes and artifact digests before `release-publish`.
-Successful commands, flags and CI are evidence, never human consent. Product
-commits still require their own approval. Never use manual tags to bypass this path.
+**Obtain explicit maintainer approval for the merge** naming the main base,
+reviewed head and hosted CI before `release-merge`. Then obtain approval to run
+`release-check` on the exact main merge.
+**Obtain separate publication approval** naming the merge, version, candidate
+run/attempt, notes and artifact digests before `release-publish`. Use the
+approved publication workflow for creating release tags.
 
 ## Using git-forest
 

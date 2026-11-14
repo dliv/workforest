@@ -2,6 +2,7 @@
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import base64
 import io
 import json
 import os
@@ -553,6 +554,107 @@ class PromotionTests(GitFixture):
         release.check_channels(self.manifest, {"stable": "1.2.2", "beta": "1.2.4-beta.1"})
         release.check_channels(self.manifest, self.manifest["worker_versions"])
 
+    def exercise_worker_transition(self, *, after_assets=None, after_audit=None, after_tap=None):
+        """Run real promotion with phase hooks at the explicit service boundaries."""
+        self.matching_release()
+        observed = {"stable": "1.2.2", "beta": "1.2.4-beta.1"}
+        context = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+                   "GITHUB_SHA": self.head, "GITHUB_REPOSITORY": release.REPO}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        original_run, original_assets = release.run, release.release_assets
+        commands, tap_calls = [], []
+        def publish_assets(*args):
+            original_assets(*args)
+            if after_assets is not None:
+                observed.update(after_assets)
+        def service_command(*args, **kwargs):
+            if args[0] == "npm":
+                commands.append(args)
+                if args[1] == "audit" and after_audit is not None:
+                    observed.update(after_audit)
+                return ""
+            if args[0] == "npx":
+                commands.append(args)
+                observed.update(self.manifest["worker_versions"])
+                return ""
+            return original_run(*args, **kwargs)
+        def update_tap(manifest):
+            tap_calls.append(manifest)
+            if after_tap is not None:
+                observed.update(after_tap)
+        error = None
+        with working(self.root), patch.dict(os.environ, context), \
+                patch.object(release, "delivered_versions", side_effect=lambda: dict(observed)), \
+                patch.object(release, "inspect_tap"), \
+                patch.object(release, "release_assets", side_effect=publish_assets), \
+                patch.object(release, "update_tap", side_effect=update_tap), \
+                patch.object(release, "run", side_effect=service_command), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                release.promote("1.2.3", self.head, 123, 1, self.gh)
+            except ValueError as failure:
+                error = failure
+        return {"error": error, "stdout": stdout.getvalue(), "stderr": stderr.getvalue(),
+                "commands": commands, "tap_calls": tap_calls, "worker": observed}
+
+    def test_worker_transition_after_assets_rejects_observed_channel_drift(self):
+        for drift, message in (({"stable": "1.2.4"}, "obsolete candidate"),
+                               ({"beta": "1.2.4-beta.2"}, "other delivered channel")):
+            with self.subTest(drift=drift):
+                result = self.exercise_worker_transition(after_assets=drift)
+                self.assertIsInstance(result["error"], ValueError)
+                self.assertIn(message, str(result["error"]))
+                self.assertEqual(result["commands"], [])
+                self.assertEqual(result["tap_calls"], [])
+                self.assertNotIn("Delivered:", result["stdout"])
+                self.assertIn("completed phases: tag/release/exact assets", result["stderr"])
+                self.assertEqual(self.gh.writes(), [])
+
+    def test_worker_transition_during_audit_rejects_last_predeploy_drift(self):
+        for drift, message in (({"stable": "1.2.4"}, "obsolete candidate"),
+                               ({"beta": "1.2.4-beta.2"}, "other delivered channel")):
+            with self.subTest(drift=drift):
+                result = self.exercise_worker_transition(after_audit=drift)
+                self.assertIsInstance(result["error"], ValueError)
+                self.assertIn(message, str(result["error"]))
+                self.assertEqual(result["commands"], [("npm", "ci", "--no-audit"), ("npm", "audit")])
+                self.assertEqual(result["tap_calls"], [])
+                self.assertNotIn("Delivered:", result["stdout"])
+                self.assertIn("completed phases: tag/release/exact assets", result["stderr"])
+                self.assertEqual(self.gh.writes(), [])
+
+    def test_worker_transition_during_audit_retains_now_matching_worker(self):
+        result = self.exercise_worker_transition(after_audit=self.manifest["worker_versions"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["commands"], [("npm", "ci", "--no-audit"), ("npm", "audit")])
+        self.assertEqual(len(result["tap_calls"]), 1)
+        self.assertIn("Retained matching delivered worker versions", result["stdout"])
+        self.assertIn("Delivered:", result["stdout"])
+        self.assertEqual(result["stderr"], "")
+
+    def test_worker_transition_advances_compatible_worker_and_verifies_delivery(self):
+        result = self.exercise_worker_transition()
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["commands"], [("npm", "ci", "--no-audit"), ("npm", "audit"),
+                                              ("npx", "wrangler", "deploy")])
+        self.assertEqual(result["worker"], self.manifest["worker_versions"])
+        self.assertEqual(len(result["tap_calls"]), 1)
+        self.assertIn("Delivered:", result["stdout"])
+        self.assertEqual(result["stderr"], "")
+
+    def test_worker_transition_after_tap_rejects_terminal_drift_without_repair(self):
+        for drift in ({"stable": "1.2.4"}, {"beta": "1.2.4-beta.2"}):
+            with self.subTest(drift=drift):
+                result = self.exercise_worker_transition(after_assets=self.manifest["worker_versions"], after_tap=drift)
+                self.assertIsInstance(result["error"], ValueError)
+                self.assertIn("terminal worker readback", str(result["error"]))
+                self.assertEqual(result["commands"], [])
+                self.assertEqual(len(result["tap_calls"]), 1)
+                self.assertNotIn("Delivered:", result["stdout"])
+                self.assertIn("Publication stopped.", result["stderr"])
+                self.assertIn("effects are not rolled back", result["stderr"])
+                self.assertEqual(self.gh.writes(), [])
+
     def test_worker_failure_prevents_tap_and_reports_partial_publication(self):
         context = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
                    "GITHUB_SHA": self.head, "GITHUB_REPOSITORY": release.REPO}
@@ -580,6 +682,100 @@ class PromotionTests(GitFixture):
             with self.assertRaises(ValueError):
                 release.promote("1.2.3", self.head, 123, 1, self.gh)
         self.assertEqual(self.gh.calls, [])
+
+    def tap_formula_fixture(self):
+        text = '''class GitForest < Formula
+  version "1.2.2"
+  if Hardware::CPU.arm?
+    url "old-arm"
+    sha256 "''' + "0" * 64 + '''"
+  elsif Hardware::CPU.intel?
+    url "old-intel"
+    sha256 "''' + "1" * 64 + '''"
+  end
+end
+'''
+        return release.update_formula(text, self.manifest)
+
+    def test_tap_retry_inspection_rejects_equal_version_url_or_digest_conflict(self):
+        approved = self.tap_formula_fixture()
+        for archive in self.manifest["archives"]:
+            for field in ("sha256", "url"):
+                with self.subTest(target=archive["target"], field=field):
+                    if field == "sha256":
+                        conflicting = approved.replace(archive["sha256"], "0" * 64)
+                    else:
+                        conflicting = approved.replace('/' + archive["filename"] + '"', '/unexpected-' + archive["filename"] + '"')
+                    response = {"content": base64.b64encode(conflicting.encode()).decode()}
+                    with patch.object(self.gh, "api", return_value=response) as api:
+                        with self.assertRaisesRegex(ValueError, "same-version tap formula conflicts"):
+                            release.inspect_tap(self.gh, self.manifest)
+                        api.assert_called_once_with(f"repos/{release.TAP}/contents/Formula/git-forest.rb?ref=main")
+
+    def test_tap_retry_preflight_conflict_stops_before_github_effect_phase(self):
+        self.matching_release()
+        conflicting = self.tap_formula_fixture().replace(self.manifest["archives"][0]["sha256"], "0" * 64)
+        original_api = self.gh.api
+        def tap_response(endpoint, **kwargs):
+            if "/contents/Formula/" in endpoint:
+                return {"content": base64.b64encode(conflicting.encode()).decode()}
+            return original_api(endpoint, **kwargs)
+        context = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+                   "GITHUB_SHA": self.head, "GITHUB_REPOSITORY": release.REPO}
+        with working(self.root), patch.dict(os.environ, context), \
+                patch.object(self.gh, "api", side_effect=tap_response), \
+                patch.object(release, "delivered_versions", return_value=self.manifest["worker_versions"]), \
+                patch.object(release, "release_assets", wraps=release.release_assets) as assets, \
+                patch.object(release, "update_tap") as tap, \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "same-version tap formula conflicts"):
+                release.promote("1.2.3", self.head, 123, 1, self.gh)
+            assets.assert_not_called()
+            tap.assert_not_called()
+        self.assertEqual(self.gh.writes(), [])
+
+    def test_tap_retry_fresh_clone_refuses_conflict_arriving_after_preflight(self):
+        approved = self.tap_formula_fixture()
+        for field in ("sha256", "url"):
+            with self.subTest(field=field):
+                tap_root = Path(self.temp.name) / f"tap-seed-{field}"
+                tap_root.mkdir()
+                tap_remote = Path(self.temp.name) / f"tap-remote-{field}.git"
+                def tap_git(*args):
+                    return subprocess.run(["git", *args], cwd=tap_root, check=True,
+                                          capture_output=True, text=True).stdout.strip()
+                tap_git("init", "-q", "-b", "main")
+                tap_git("init", "--bare", "-q", "-b", "main", str(tap_remote))
+                (tap_root / "Formula").mkdir()
+                formula = tap_root / "Formula/git-forest.rb"
+                formula.write_text(approved)
+                tap_git("add", ".")
+                tap_git("-c", "commit.gpgsign=false", "commit", "-qm", "matching release")
+                tap_git("remote", "add", "origin", str(tap_remote))
+                tap_git("push", "-q", "origin", "main")
+                response = {"content": base64.b64encode(approved.encode()).decode()}
+                with patch.object(self.gh, "api", return_value=response):
+                    release.inspect_tap(self.gh, self.manifest)
+                # An outside fixture writer changes the same-version formula after preflight.
+                conflicting = (approved.replace(self.manifest["archives"][0]["sha256"], "0" * 64)
+                               if field == "sha256" else approved.replace("https://github.com", "https://example.invalid", 1))
+                formula.write_text(conflicting)
+                tap_git("add", ".")
+                tap_git("-c", "commit.gpgsign=false", "commit", "-qm", "outside formula edit")
+                tap_git("push", "-q", "origin", "main")
+                before = tap_git("ls-remote", "origin", "refs/heads/main")
+                original_write = Path.write_text
+                with patch.dict(os.environ, {"HOMEBREW_TAP_TOKEN": "fixture-token"}), \
+                        patch.object(subprocess, "run", wraps=subprocess.run) as commands, \
+                        patch.object(Path, "write_text", autospec=True, side_effect=original_write) as writes:
+                    with self.assertRaisesRegex(ValueError, "same-version tap formula conflicts"):
+                        release.update_tap(self.manifest, repository_url=str(tap_remote))
+                    writes.assert_not_called()
+                    executed = [call.args[0] for call in commands.call_args_list]
+                    self.assertFalse(any("commit" in command or "push" in command for command in executed))
+                self.assertEqual(tap_git("ls-remote", "origin", "refs/heads/main"), before)
+                tap_git("fetch", "origin", "main")
+                self.assertEqual(tap_git("show", "origin/main:Formula/git-forest.rb") + "\n", conflicting)
 
     def test_tap_real_bare_remote_push_and_idempotent_readback(self):
         tap_root = Path(self.temp.name) / "tap-seed"

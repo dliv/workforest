@@ -488,16 +488,23 @@ def update_formula(text, manifest):
     return text
 
 
+def checked_formula_update(text, manifest):
+    observed = re.search(r'(?m)^  version "([^"\n]+)"$', text)
+    if (not observed or release_identity(observed[1])["channel"] != manifest["channel"]
+            or version_key(observed[1]) > version_key(manifest["version"])):
+        raise ValueError("tap formula is newer, has the wrong channel or an unknown version")
+    updated = update_formula(text, manifest)
+    if observed[1] == manifest["version"] and updated != text:
+        raise ValueError("same-version tap formula conflicts with approved URLs/digests")
+    return updated
+
+
 def inspect_tap(gh, manifest):
     import base64
     binary = release_identity(manifest["version"])["bin"]
     response = gh.api(f"repos/{TAP}/contents/Formula/{binary}.rb?ref=main")
     text = base64.b64decode(response["content"]).decode()
-    match = re.search(r'(?m)^  version "([^"\n]+)"$', text)
-    if (not match or release_identity(match[1])["channel"] != manifest["channel"]
-            or version_key(match[1]) > version_key(manifest["version"])):
-        raise ValueError("tap has a newer version or wrong channel")
-    update_formula(text, manifest)  # Refuse unknown formula structure before any write.
+    checked_formula_update(text, manifest)
 
 
 def update_tap(manifest, *, repository_url=f"https://github.com/{TAP}.git"):
@@ -516,11 +523,7 @@ def update_tap(manifest, *, repository_url=f"https://github.com/{TAP}.git"):
         tap_git("merge", "--ff-only", "origin/main")
         formula = Path(temp) / "Formula" / f"{release_identity(manifest['version'])['bin']}.rb"
         before = formula.read_text()
-        observed = re.search(r'(?m)^  version "([^"\n]+)"$', before)
-        if (not observed or release_identity(observed[1])["channel"] != manifest["channel"]
-                or version_key(observed[1]) > version_key(manifest["version"])):
-            raise ValueError("tap formula is newer or has an unknown version")
-        after = update_formula(before, manifest)
+        after = checked_formula_update(before, manifest)
         if after != before:
             formula.write_text(after)
             tap_git("add", str(formula))
@@ -533,7 +536,7 @@ def update_tap(manifest, *, repository_url=f"https://github.com/{TAP}.git"):
         # Read back the actual remote branch, including when the formula needed no edit.
         tap_git("fetch", "origin", "main")
         remote = tap_git("show", f"origin/main:Formula/{formula.name}") + "\n"
-        if update_formula(remote, manifest) != remote:
+        if checked_formula_update(remote, manifest) != remote:
             raise ValueError("tap readback differs from approved URLs/digests")
     print(f"Completed Homebrew {manifest['version']}; URLs/digests read back", flush=True)
 
@@ -556,9 +559,14 @@ def promote(version, commit, run_id, attempt, gh):
             inspect_tap(gh, manifest)
             release_assets(manifest, temp, gh)
             completed.append("tag/release/exact assets")
-            if delivered_versions() != manifest["worker_versions"]:
+            observed_worker = delivered_versions()
+            check_channels(manifest, observed_worker)
+            if observed_worker != manifest["worker_versions"]:
                 run("npm", "ci", "--no-audit", cwd="worker")
                 run("npm", "audit", cwd="worker")
+                observed_worker = delivered_versions()
+                check_channels(manifest, observed_worker)
+            if observed_worker != manifest["worker_versions"]:
                 run("npx", "wrangler", "deploy", cwd="worker")
             else:
                 print("Retained matching delivered worker versions", flush=True)
@@ -568,6 +576,8 @@ def promote(version, commit, run_id, attempt, gh):
             update_tap(manifest)
             completed.append("tap/readback")
             require_complete_publication(gh, manifest, temp)
+            if delivered_versions() != manifest["worker_versions"]:
+                raise ValueError("terminal worker readback does not match both proposed channel versions")
             print("Delivered: " + ", ".join(completed))
         except Exception:
             print("Publication stopped. Verified completed phases: " + (", ".join(completed) or "none")
