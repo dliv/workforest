@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::branch_state::read_branch_state;
 use crate::forest::{dedupe_discovered_forests, discover_forests_with_dirs};
+use crate::worktree_inventory::{read_worktree_inventory, WorktreeInventoryLock};
 use git_forest_core::meta::{ForestMeta, RepoMeta, META_FILENAME, STAGED_META_PREFIX};
 use git_forest_core::paths::{AbsolutePath, ForestName};
 use git_forest_core::plan::branch_state::{
@@ -219,17 +220,16 @@ fn observe_repo_dry_run(
 
 /// The source repo's worktree listing with each listed path's canonical form.
 fn observed_worktrees(source: &Path) -> Result<Vec<WorktreeEntry>, String> {
-    worktree_list_entries(source).map(|entries| {
-        entries
-            .into_iter()
-            .map(|entry| WorktreeEntry {
-                canonical: entry.path.canonicalize().ok(),
-                path: entry.path,
-                branch: entry.branch,
-                lock: entry.lock,
-            })
-            .collect()
-    })
+    let entries = read_worktree_inventory(source).map_err(|error| error.to_string())?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| WorktreeEntry {
+            canonical: entry.path.canonicalize().ok(),
+            path: entry.path,
+            branch: entry.branch_ref,
+            lock: entry.lock.into(),
+        })
+        .collect())
 }
 
 fn observe_forest_dir(forest_dir: &Path) -> ForestDirObservation {
@@ -918,10 +918,13 @@ struct WorktreeMetadata {
     lock: WorktreeLock,
 }
 
-struct WorktreeListEntry {
-    path: PathBuf,
-    branch: Option<String>,
-    lock: WorktreeLock,
+impl From<WorktreeInventoryLock> for WorktreeLock {
+    fn from(lock: WorktreeInventoryLock) -> Self {
+        match lock {
+            WorktreeInventoryLock::Unlocked => Self::Unlocked,
+            WorktreeInventoryLock::Locked { reason } => Self::Locked { reason },
+        }
+    }
 }
 
 fn path_has_parent_dir(path: &Path) -> bool {
@@ -929,59 +932,16 @@ fn path_has_parent_dir(path: &Path) -> bool {
         .any(|component| matches!(component, Component::ParentDir))
 }
 
-fn worktree_list_entries(source: &Path) -> Result<Vec<WorktreeListEntry>, String> {
-    let output = crate::git::git(source, &["worktree", "list", "--porcelain", "-z"])
-        .map_err(|e| e.to_string())?;
-    let mut entries = Vec::new();
-    let mut current_path = None;
-    let mut current_branch = None;
-    let mut current_lock = WorktreeLock::Unlocked;
-
-    for token in output.split('\0') {
-        if token.is_empty() {
-            if let Some(path) = current_path.take() {
-                entries.push(WorktreeListEntry {
-                    path,
-                    branch: current_branch.take(),
-                    lock: std::mem::take(&mut current_lock),
-                });
-            }
-            current_branch = None;
-            current_lock = WorktreeLock::Unlocked;
-            continue;
-        }
-
-        if let Some(path) = token.strip_prefix("worktree ") {
-            current_path = Some(PathBuf::from(path));
-        } else if let Some(branch) = token.strip_prefix("branch ") {
-            current_branch = Some(branch.to_string());
-        } else if token == "locked" {
-            current_lock = WorktreeLock::Locked { reason: None };
-        } else if let Some(reason) = token.strip_prefix("locked ") {
-            current_lock = WorktreeLock::Locked {
-                reason: Some(reason.to_string()),
-            };
-        }
-    }
-
-    if let Some(path) = current_path {
-        entries.push(WorktreeListEntry {
-            path,
-            branch: current_branch,
-            lock: std::mem::take(&mut current_lock),
-        });
-    }
-
-    Ok(entries)
-}
-
 fn worktree_metadata_for_path(
     repo_plan: &RepoRmPlan,
     target_canonical: Option<&Path>,
 ) -> Result<Option<WorktreeMetadata>, String> {
-    for entry in worktree_list_entries(&repo_plan.source)? {
+    let entries = read_worktree_inventory(&repo_plan.source).map_err(|error| error.to_string())?;
+    for entry in entries {
         if worktree_paths_match(&entry.path, &repo_plan.worktree_path, target_canonical) {
-            return Ok(Some(WorktreeMetadata { lock: entry.lock }));
+            return Ok(Some(WorktreeMetadata {
+                lock: entry.lock.into(),
+            }));
         }
     }
 
@@ -3877,6 +3837,111 @@ mod tests {
             .message
             .contains("stop\\n  hint: not advice\\t\\u{1b}[31m"));
         assert!(!errors[0].message.contains('\n'));
+    }
+
+    #[test]
+    fn duplicate_worktree_paths_keep_git_order_for_reporting_and_removal() {
+        use git_forest_core::plan::lock_state::WorktreeLockState;
+
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+        cmd_new(make_new_inputs("duplicate", ForestMode::Feature), &tmpl).unwrap();
+        let dir = tmpl.worktree_base.join("duplicate");
+        let meta = read_meta(&dir.join(META_FILENAME)).unwrap();
+        let plan = plan_rm(&dir, &meta);
+        let repo = &plan.repo_plans[0];
+        let worktree = &repo.worktree_path;
+        let canonical = worktree.canonicalize().unwrap();
+
+        let admin = crate::git::git(worktree, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let admin = Path::new(&admin);
+        let duplicate = admin.parent().unwrap().join("duplicate-registration");
+        std::fs::create_dir(&duplicate).unwrap();
+        for name in ["HEAD", "commondir", "gitdir"] {
+            std::fs::copy(admin.join(name), duplicate.join(name)).unwrap();
+        }
+        std::fs::write(duplicate.join("locked"), "").unwrap();
+
+        // Read the actual order from Git because the registration names do not determine it.
+        let listing =
+            crate::git::git(&repo.source, &["worktree", "list", "--porcelain", "-z"]).unwrap();
+        let matches_target = |path: &Path| path.canonicalize().ok().as_ref() == Some(&canonical);
+        let expected: Vec<_> = listing
+            .split("\0\0")
+            .filter_map(|record| {
+                let (path, fields) = record.strip_prefix("worktree ")?.split_once('\0')?;
+                matches_target(Path::new(path)).then(|| fields.split('\0').any(|f| f == "locked"))
+            })
+            .collect();
+        assert!(matches!(expected.as_slice(), [true, false] | [false, true]));
+
+        let entries = read_worktree_inventory(&repo.source).unwrap();
+        let actual: Vec<_> = entries
+            .iter()
+            .filter(|entry| matches_target(&entry.path))
+            .map(|entry| matches!(entry.lock, WorktreeInventoryLock::Locked { reason: None }))
+            .collect();
+        assert_eq!(actual, expected);
+
+        let expected_report = if expected[1] {
+            WorktreeLockState::Locked { reason: None }
+        } else {
+            WorktreeLockState::Unlocked
+        };
+        assert_eq!(
+            crate::lock_state::read_lock_state(&repo.source, worktree),
+            expected_report
+        );
+        let live = worktree_metadata_for_path(repo, Some(&canonical))
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.lock.is_locked(), expected[0]);
+    }
+
+    #[test]
+    fn post_preflight_lock_blocks_live_corrupt_worktree_fallback() {
+        let env = TestEnv::new();
+        env.create_repo_with_remote("foo-api");
+        let tmpl = env.default_template(&["foo-api"]);
+        cmd_new(make_new_inputs("late-lock", ForestMode::Feature), &tmpl).unwrap();
+        let dir = tmpl.worktree_base.join("late-lock");
+        let meta_path = dir.join(META_FILENAME);
+        let meta = read_meta(&meta_path).unwrap();
+        let worktree = dir.join("foo-api");
+        replace_worktree_with_plain_dir(&worktree);
+
+        let result = cmd_rm(
+            &dir,
+            &meta,
+            true,
+            false,
+            Some(&|progress| {
+                if let RmProgress::RepoStarting { .. } = progress {
+                    crate::git::git(
+                        &meta.repos[0].source,
+                        &["worktree", "lock", worktree.to_str().unwrap()],
+                    )
+                    .unwrap();
+                }
+            }),
+        )
+        .unwrap();
+        assert!(!result.preflight_blocked);
+        assert!(matches!(
+            result.repos[0].worktree_removed,
+            RmOutcome::Failed { .. }
+        ));
+        assert!(
+            result.errors.iter().any(|issue| {
+                issue.code == CleanupIssueCode::WorktreeRefused
+                    && issue.message.contains("git worktree metadata is locked")
+            }),
+            "{:?}",
+            result.errors
+        );
+        assert!(worktree.join("README.txt").is_file());
+        assert!(meta_path.is_file());
     }
 
     #[test]

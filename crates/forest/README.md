@@ -29,12 +29,13 @@ and its own allowed libraries, never update-check or another feature. The
 [architecture rules](../../docs/architecture.md) own the exact allowlists,
 visibility contract and the permanent `reset -> rm` helper-sharing boundary.
 
-Read-only lock reporting uses [lock observations](ops/src/lock_state.rs) in ops
-and [lock state and rendering](core/src/plan/lock_state.rs) in core. `ls` reuses
-one inventory per canonical source path within its invocation, including failed
-observations; each worktree is matched separately. `status` reads a fresh
-inventory per repo. The [user-facing contract](../../README.md#commands) describes
-the output and unavailable-state semantics.
+Reporting and removal read source registrations through the shared [worktree
+inventory reader](ops/src/worktree_inventory.rs). [Lock reporting](ops/src/lock_state.rs)
+indexes those records by worktree path. `ls` reuses one inventory per canonical
+source path within its invocation, including failed observations. `status` reads
+a fresh inventory per repo. [Core](core/src/plan/lock_state.rs) owns reporting
+state and rendering. The [user-facing contract](../../README.md#commands)
+describes the output and unavailable-state semantics.
 
 Removal observes repo safety before mutation and core decides explicit Ready or
 Blocked readiness independently of root residue. The rm-private `PreparedRemoval`
@@ -58,10 +59,10 @@ and base targets reuse their result within the invocation. No stored state,
 fetch, worker or removal-policy dependency is introduced. The
 [user contract](../../README.md#ls-status-exec) owns field meanings and limits.
 
-Removal's observed lock type retains the optional reason through preflight and
-the live fallback. Core escapes control characters before diagnostic/hint
-composition. Read-only lock inventories remain separate; shared reset callers
-retain their existing execution policy.
+Removal uses the ordered inventory records for path and branch checks during
+preflight and reads again during live metadata cleanup. Its lock type retains
+the optional reason for diagnostics, where core escapes control characters.
+Reset uses those removal observations with its own execution policy.
 
 ## Proofs
 

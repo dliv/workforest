@@ -91,6 +91,10 @@ pub const MODULES: &[(&str, ModuleClass)] = &[
         "crates/forest/ops/src/testutil.rs",
         ModuleClass::TestSupport,
     ),
+    (
+        "crates/forest/ops/src/worktree_inventory.rs",
+        ModuleClass::Shared,
+    ),
     ("crates/update-check/src/lib.rs", ModuleClass::Shell),
     ("src/bin/git-forest-beta.rs", ModuleClass::Root),
     ("src/bin/git-forest.rs", ModuleClass::Root),

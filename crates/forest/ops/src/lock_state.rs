@@ -1,4 +1,5 @@
 //! Read-only lock observation, independent of branch and directory health.
+use crate::worktree_inventory::{read_worktree_inventory, WorktreeInventoryLock};
 use git_forest_core::plan::lock_state::WorktreeLockState;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,32 +28,16 @@ impl WorktreeLockInventory {
 }
 
 pub(crate) fn read_lock_inventory(source: &Path) -> WorktreeLockInventory {
-    let Ok(output) = crate::git::git(source, &["worktree", "list", "--porcelain", "-z"]) else {
+    let Ok(entries) = read_worktree_inventory(source) else {
         return WorktreeLockInventory::Unavailable;
     };
     let mut states = HashMap::new();
-    for record in output.split("\0\0") {
-        let mut fields = record.split('\0');
-        let Some(path) = fields
-            .next()
-            .and_then(|field| field.strip_prefix("worktree "))
-        else {
-            continue;
+    for entry in entries {
+        let state = match entry.lock {
+            WorktreeInventoryLock::Unlocked => WorktreeLockState::Unlocked,
+            WorktreeInventoryLock::Locked { reason } => WorktreeLockState::Locked { reason },
         };
-        let state = fields
-            .find_map(|field| {
-                if field == "locked" {
-                    Some(WorktreeLockState::Locked { reason: None })
-                } else {
-                    field
-                        .strip_prefix("locked ")
-                        .map(|reason| WorktreeLockState::Locked {
-                            reason: Some(reason.to_string()),
-                        })
-                }
-            })
-            .unwrap_or(WorktreeLockState::Unlocked);
-        states.insert(path_key(Path::new(path)), state);
+        states.insert(path_key(&entry.path), state);
     }
     WorktreeLockInventory::Available(states)
 }
@@ -110,6 +95,37 @@ mod tests {
         );
         assert_eq!(
             read_lock_state(&source, &source.join("unregistered")),
+            WorktreeLockState::Unavailable
+        );
+    }
+
+    #[test]
+    fn non_utf8_lock_reason_makes_the_whole_inventory_unavailable() {
+        let env = TestEnv::new();
+        let source = env.create_repo("source");
+        let healthy = env.root().join("healthy");
+        let invalid = env.root().join("invalid");
+        for worktree in [&healthy, &invalid] {
+            crate::git::git(
+                &source,
+                &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read_lock_state(&source, &healthy),
+            WorktreeLockState::Unlocked
+        );
+
+        let admin = crate::git::git(&invalid, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        std::fs::write(Path::new(&admin).join("locked"), b"invalid \xff reason").unwrap();
+
+        assert_eq!(
+            read_worktree_inventory(&source).unwrap_err().to_string(),
+            "git output was not valid UTF-8"
+        );
+        assert_eq!(
+            read_lock_state(&source, &healthy),
             WorktreeLockState::Unavailable
         );
     }

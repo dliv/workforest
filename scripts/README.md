@@ -13,16 +13,26 @@ owns the exact claim and limits. A matching count is not proof of which
 function owns a call or how often it executes. The
 [policy README](../crates/policy/README.md) maps the other checks.
 
-## Release preflight
+## Release operations
 
-`python3 scripts/check_release.py v<version>` (Python 3.11+) reads clean tagged
-source, requires the tag's commit to be HEAD, and matches root Cargo version
-to the selected `LATEST_VERSION_STABLE` or `LATEST_VERSION_BETA` worker variable.
-Supported channels are stable `X.Y.Z` and beta `X.Y.Z-beta.N`. The script accepts
-existing lightweight and annotated tags. It emits constrained channel/binary
-outputs only after all checks pass and performs no publication or deployment.
+[The release guide](../docs/releases.md) owns the operator sequence and approval
+boundaries. [release.py](release.py) is the Python standard-library operations
+entrypoint; it uses subprocess argument arrays, the authenticated `gh` CLI and
+ordinary Git. It does not infer human consent. Run it through the named `just`
+recipes. Its internal `manifest` command binds candidate artifact IDs/digests;
+`promote` is the trusted main-dispatch publication entrypoint.
 
-`just release-tests`, also in `just check`, uses disposable real Git repositories
-to exercise accepted and rejected identities. CI installs Python explicitly.
-The release workflow runs the full gate before locked native macOS builds;
-architecture, executable version and exact archive bytes are checked before upload.
+[check_release.py](check_release.py) validates clean source, root Cargo/lockfile
+identity and the selected worker version. `--candidate VERSION --channel CHANNEL
+--notes` works before a tag exists, even for the bootstrap's existing version.
+The retained positional `vVERSION` invocation additionally requires that exact
+lightweight or annotated tag to resolve to HEAD. Supported versions are stable
+`X.Y.Z` and beta `X.Y.Z-beta.N` with no leading zeroes. Only successful validation
+emits constrained version/channel/binary outputs.
+
+`just release-tests` (also in `just check`) runs real temporary Git merge and
+Cargo preparation fixtures, metadata/artifact/digest refusal tests and promotion
+recovery tests. API/worker/upload fault-injection tests use explicit substitutes;
+they prove guards and ordering, not hosted delivery. Native package checks live
+in [release-candidate.yml](../.github/workflows/release-candidate.yml). The
+publication workflow contains no Cargo build and promotes those exact archives.

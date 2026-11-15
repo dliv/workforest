@@ -21,7 +21,7 @@ exact commands.
 | `cargo check --workspace --locked` | Typecheck without running the full gate |
 | `just test` | Run workspace tests for both channels with global/system git configuration disabled |
 | `just check` | Run formatting, Clippy, tests for both channels, release-identity fixtures, and the policy positive control |
-| `just release-tests` | Test release tag/version/commit and worker-channel identity in disposable Git fixtures |
+| `just release-tests` | Test release identity, guarded merges, artifact promotion and recovery fixtures |
 | `just policy-control` | Check that sanctioned Clippy sites still produce the expected warnings |
 | `just loc` | Count source lines |
 | `just test-linux` | Run the existing Docker test recipe; it is not a substitute for `just check` |
@@ -35,17 +35,11 @@ are not part of the ordinary gate.
 
 ## Releases and the worker
 
-Follow the commit instructions in [AGENTS.md](../AGENTS.md). The macOS-only
-`just release <version>` and `just release-beta <version>` recipes validate,
-bump the channel's version, commit, tag and push. They are publishing actions,
-not local build checks. The [release validator](../scripts/README.md#release-preflight)
-checks clean exact-tag/Cargo/worker identity. Tag CI runs that check and the full
-gate, then builds and inspects the matching
-binary on each supported native macOS architecture, deploys the worker
-and updates the Homebrew tap; [release.yml](../.github/workflows/release.yml)
-owns that sequence. When pushing a tag manually, name the tag rather than
-using `--tags`.
+The [release guide](releases.md) owns preparation, external review, the separate
+merge and publication approvals, exact-merge hosted candidate builds, promotion
+and partial-failure recovery. The old combined `release` / `release-beta`
+recipes refuse publication. Do not run release or worker deployment commands
+merely to validate documentation.
 
 The [worker README](../worker/README.md) owns its source map, generated
-response type and remote-operation recipes. Do not run release or worker
-deployment recipes merely to validate a documentation change.
+response type and remote-operation recipes.
